@@ -8,11 +8,22 @@ Supports English / Chinese interface language toggle.
 import os
 import sys
 import io
+import platform
 import threading
 import webbrowser
 import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import date
+
+# ---------------------------------------------------------------------------
+# 跨平台字体适配 — Mac 使用系统内置字体，Windows 使用 Segoe UI / Consolas
+# ---------------------------------------------------------------------------
+if platform.system() == "Darwin":  # macOS
+    FONT_FAMILY = "Helvetica Neue"
+    FONT_MONO = "Menlo"
+else:  # Windows / Linux
+    FONT_FAMILY = "Segoe UI"
+    FONT_MONO = "Consolas"
 
 try:
     import requests
@@ -331,24 +342,24 @@ class ExportApp:
 
         style.configure("Title.TLabel",
                          background=self.BG, foreground="#fff",
-                         font=("Segoe UI", 18, "bold"))
+                         font=(FONT_FAMILY, 18, "bold"))
         style.configure("Subtitle.TLabel",
                          background=self.BG, foreground="#888",
-                         font=("Segoe UI", 10))
+                         font=(FONT_FAMILY, 10))
         style.configure("Card.TLabel",
                          background=self.BG_CARD, foreground=self.FG,
-                         font=("Segoe UI", 11))
+                         font=(FONT_FAMILY, 11))
         style.configure("CardBold.TLabel",
                          background=self.BG_CARD, foreground="#fff",
-                         font=("Segoe UI", 11, "bold"))
+                         font=(FONT_FAMILY, 11, "bold"))
         style.configure("Status.TLabel",
                          background=self.BG, foreground="#888",
-                         font=("Segoe UI", 9))
+                         font=(FONT_FAMILY, 9))
 
         # Radio button for dark theme
         style.configure("Card.TRadiobutton",
                          background=self.BG_CARD, foreground=self.FG,
-                         font=("Segoe UI", 11),
+                         font=(FONT_FAMILY, 11),
                          indicatorrelief="flat")
         style.map("Card.TRadiobutton",
                   background=[("active", self.ACCENT)])
@@ -357,19 +368,19 @@ class ExportApp:
         style.configure("Summary.TFrame", background=self.BG_CARD)
         style.configure("SummaryTitle.TLabel",
                          background=self.BG_CARD, foreground="#fff",
-                         font=("Segoe UI", 13, "bold"))
+                         font=(FONT_FAMILY, 13, "bold"))
         style.configure("SummaryCount.TLabel",
                          background=self.BG_CARD, foreground=self.ACCENT_BTN,
-                         font=("Segoe UI", 28, "bold"))
+                         font=(FONT_FAMILY, 28, "bold"))
         style.configure("SummaryCountLabel.TLabel",
                          background=self.BG_CARD, foreground="#888",
-                         font=("Segoe UI", 10))
+                         font=(FONT_FAMILY, 10))
         style.configure("SummarySection.TLabel",
                          background=self.BG_CARD, foreground="#aaa",
-                         font=("Segoe UI", 10, "bold"))
+                         font=(FONT_FAMILY, 10, "bold"))
         style.configure("SummaryStatus.TLabel",
                          background=self.BG_CARD, foreground="#666",
-                         font=("Segoe UI", 9))
+                         font=(FONT_FAMILY, 9))
 
         # Treeview for dark theme
         style.configure("Summary.Treeview",
@@ -377,12 +388,12 @@ class ExportApp:
                          foreground=self.FG,
                          fieldbackground="#0d1a30",
                          borderwidth=0,
-                         font=("Segoe UI", 9),
+                         font=(FONT_FAMILY, 9),
                          rowheight=26)
         style.configure("Summary.Treeview.Heading",
                          background=self.ACCENT,
                          foreground="#ccc",
-                         font=("Segoe UI", 9, "bold"),
+                         font=(FONT_FAMILY, 9, "bold"),
                          borderwidth=0)
         style.map("Summary.Treeview",
                   background=[("selected", "#1a3a6a")],
@@ -397,7 +408,7 @@ class ExportApp:
 
         # Language toggle button (top-right)
         self.btn_lang = tk.Button(
-            header, text="中文", font=("Segoe UI", 10),
+            header, text="中文", font=(FONT_FAMILY, 10),
             bg=self.ACCENT, fg="#ccc", activebackground="#1a3a6a",
             activeforeground="#fff", relief="flat", cursor="hand2",
             bd=0, padx=12, pady=2, command=self._toggle_lang)
@@ -454,7 +465,7 @@ class ExportApp:
         self.lbl_task_id.pack(side="left")
         self.task_var = tk.StringVar()
         self.task_entry = tk.Entry(row1, textvariable=self.task_var,
-                                   font=("Segoe UI", 11),
+                                   font=(FONT_FAMILY, 11),
                                    bg="#0a0a1a", fg="#fff",
                                    insertbackground="#fff",
                                    relief="flat", bd=0,
@@ -502,14 +513,14 @@ class ExportApp:
         btn_frame.pack(fill="x", pady=(16, 0))
 
         self.btn_run = tk.Button(
-            btn_frame, text="", font=("Segoe UI", 12, "bold"),
+            btn_frame, text="", font=(FONT_FAMILY, 12, "bold"),
             bg=self.ACCENT_BTN, fg="#fff", activebackground=self.ACCENT_BTN_HOVER,
             activeforeground="#fff", relief="flat", cursor="hand2",
             bd=0, padx=20, pady=8, command=self._on_run)
         self.btn_run.pack(side="left")
 
         self.btn_open = tk.Button(
-            btn_frame, text="", font=("Segoe UI", 12),
+            btn_frame, text="", font=(FONT_FAMILY, 12),
             bg=self.ACCENT, fg="#888", relief="flat",
             bd=0, padx=20, pady=8, state="disabled",
             command=self._on_open)
@@ -528,7 +539,7 @@ class ExportApp:
         self.log_text = tk.Text(
             log_frame, height=12,
             bg="#0a0a1a", fg="#aaa",
-            font=("Consolas", 10),
+            font=(FONT_MONO, 10),
             relief="flat", bd=0,
             highlightthickness=1,
             highlightbackground=self.BORDER,
@@ -629,7 +640,7 @@ class ExportApp:
         btn_bar.pack(fill="x", pady=(10, 0))
 
         self.btn_refresh = tk.Button(
-            btn_bar, text="", font=("Segoe UI", 9),
+            btn_bar, text="", font=(FONT_FAMILY, 9),
             bg=self.ACCENT, fg="#ccc", activebackground="#1a3a6a",
             activeforeground="#fff", relief="flat", cursor="hand2",
             bd=0, padx=12, pady=4, command=self._load_summary_data)

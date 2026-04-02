@@ -11,6 +11,7 @@ from datetime import date, datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import export_mr_pipeline as mr_api
 import quality_overview as qa
+from export_gui import FONT_FAMILY
 
 
 # ============================================================
@@ -79,19 +80,19 @@ class MRPipelineTab:
 
         self.lbl_mr_date = ttk.Label(r2, text="", style="Card.TLabel", width=8)
         self.lbl_mr_date.pack(side="left")
-        self.mr_date_from = tk.Entry(r2, width=12, font=("Segoe UI", 10),
+        self.mr_date_from = tk.Entry(r2, width=12, font=(FONT_FAMILY, 10),
                                       bg="#0a0a1a", fg="#fff", insertbackground="#fff", relief="flat")
         self.mr_date_from.pack(side="left", padx=(4, 4), ipady=3)
         ttk.Label(r2, text="—", style="Card.TLabel").pack(side="left")
-        self.mr_date_to = tk.Entry(r2, width=12, font=("Segoe UI", 10),
+        self.mr_date_to = tk.Entry(r2, width=12, font=(FONT_FAMILY, 10),
                                     bg="#0a0a1a", fg="#fff", insertbackground="#fff", relief="flat")
         self.mr_date_to.pack(side="left", padx=(4, 12), ipady=3)
 
-        self.btn_mr_search = tk.Button(r2, text="", font=("Segoe UI", 10, "bold"),
+        self.btn_mr_search = tk.Button(r2, text="", font=(FONT_FAMILY, 10, "bold"),
                                         bg="#e94560", fg="#fff", relief="flat", cursor="hand2",
                                         bd=0, padx=14, pady=3, command=self._on_search)
         self.btn_mr_search.pack(side="left", padx=(0, 6))
-        self.btn_mr_reset = tk.Button(r2, text="", font=("Segoe UI", 10),
+        self.btn_mr_reset = tk.Button(r2, text="", font=(FONT_FAMILY, 10),
                                        bg="#0f3460", fg="#ccc", relief="flat", cursor="hand2",
                                        bd=0, padx=14, pady=3, command=self._on_reset)
         self.btn_mr_reset.pack(side="left")
@@ -117,16 +118,16 @@ class MRPipelineTab:
         bot = ttk.Frame(left, style="App.TFrame")
         bot.pack(fill="x")
 
-        self.btn_mr_prev = tk.Button(bot, text="◀", font=("Segoe UI", 10), bg="#0f3460", fg="#ccc",
+        self.btn_mr_prev = tk.Button(bot, text="◀", font=(FONT_FAMILY, 10), bg="#0f3460", fg="#ccc",
                                       relief="flat", bd=0, padx=8, command=self._prev_page, state="disabled")
         self.btn_mr_prev.pack(side="left")
         self.lbl_mr_page = ttk.Label(bot, text="", style="Status.TLabel")
         self.lbl_mr_page.pack(side="left", padx=8)
-        self.btn_mr_next = tk.Button(bot, text="▶", font=("Segoe UI", 10), bg="#0f3460", fg="#ccc",
+        self.btn_mr_next = tk.Button(bot, text="▶", font=(FONT_FAMILY, 10), bg="#0f3460", fg="#ccc",
                                       relief="flat", bd=0, padx=8, command=self._next_page, state="disabled")
         self.btn_mr_next.pack(side="left")
 
-        self.btn_mr_refresh = tk.Button(bot, text="", font=("Segoe UI", 9),
+        self.btn_mr_refresh = tk.Button(bot, text="", font=(FONT_FAMILY, 9),
                                          bg="#0f3460", fg="#ccc", relief="flat", cursor="hand2",
                                          bd=0, padx=10, pady=3, command=self._refresh_tasks)
         self.btn_mr_refresh.pack(side="left", padx=(12, 0))
@@ -139,7 +140,7 @@ class MRPipelineTab:
         ttk.Radiobutton(bot, text="Excel", variable=self.mr_fmt_var, value="xlsx",
                          style="Card.TRadiobutton").pack(side="left")
 
-        self.btn_mr_export = tk.Button(bot, text="", font=("Segoe UI", 10, "bold"),
+        self.btn_mr_export = tk.Button(bot, text="", font=(FONT_FAMILY, 10, "bold"),
                                         bg="#2ecc71", fg="#fff", relief="flat", cursor="hand2",
                                         bd=0, padx=14, pady=4, command=self._on_export, state="disabled")
         self.btn_mr_export.pack(side="right")
@@ -179,7 +180,7 @@ class MRPipelineTab:
         self.lbl_mr_sidebar_status.pack(anchor="w", pady=(8, 0))
 
         self.btn_mr_sidebar_refresh = tk.Button(
-            inner, text="", font=("Segoe UI", 9), bg="#0f3460", fg="#ccc",
+            inner, text="", font=(FONT_FAMILY, 9), bg="#0f3460", fg="#ccc",
             relief="flat", cursor="hand2", bd=0, padx=10, pady=3,
             command=self._load_overview)
         self.btn_mr_sidebar_refresh.pack(anchor="e", pady=(8, 0))
@@ -439,11 +440,11 @@ class QualityOverviewTab:
         self.cmb_qa_lang = ttk.Combobox(r1, textvariable=self.qa_lang_var, width=12)
         self.cmb_qa_lang.pack(side="left", padx=(4, 12))
 
-        self.btn_qa_search = tk.Button(r1, text="", font=("Segoe UI", 10, "bold"),
+        self.btn_qa_search = tk.Button(r1, text="", font=(FONT_FAMILY, 10, "bold"),
                                         bg="#e94560", fg="#fff", relief="flat", cursor="hand2",
                                         bd=0, padx=14, pady=3, command=self._on_search)
         self.btn_qa_search.pack(side="left", padx=(12, 6))
-        self.btn_qa_reset = tk.Button(r1, text="", font=("Segoe UI", 10),
+        self.btn_qa_reset = tk.Button(r1, text="", font=(FONT_FAMILY, 10),
                                        bg="#0f3460", fg="#ccc", relief="flat", cursor="hand2",
                                        bd=0, padx=14, pady=3, command=self._on_reset)
         self.btn_qa_reset.pack(side="left")
@@ -529,7 +530,7 @@ class QualityOverviewTab:
         ttk.Radiobutton(ebar, text="Excel", variable=self.qa_fmt_var, value="xlsx",
                          style="Card.TRadiobutton").pack(side="left")
 
-        self.btn_qa_export = tk.Button(ebar, text="", font=("Segoe UI", 10, "bold"),
+        self.btn_qa_export = tk.Button(ebar, text="", font=(FONT_FAMILY, 10, "bold"),
                                         bg="#2ecc71", fg="#fff", relief="flat", cursor="hand2",
                                         bd=0, padx=14, pady=4, command=self._on_export, state="disabled")
         self.btn_qa_export.pack(side="right")

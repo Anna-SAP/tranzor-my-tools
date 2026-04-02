@@ -7,8 +7,17 @@
 import html as html_mod
 import math
 import os
+import platform
 import webbrowser
 from collections import OrderedDict
+
+# ---------------------------------------------------------------------------
+# 跨平台字体适配
+# ---------------------------------------------------------------------------
+if platform.system() == "Darwin":  # macOS
+    FONT_FAMILY = "Helvetica Neue"
+else:  # Windows / Linux
+    FONT_FAMILY = "Segoe UI"
 
 
 # ---------------------------------------------------------------------------
@@ -154,12 +163,12 @@ def draw_pie_chart(canvas, data, width, height, title=""):
     # Title
     if title:
         canvas.create_text(width // 2, 16, text=title,
-                           fill="#ccc", font=("Segoe UI", 11, "bold"))
+                           fill="#ccc", font=(FONT_FAMILY, 11, "bold"))
 
     total = sum(data.values())
     if total == 0:
         canvas.create_text(width // 2, height // 2, text="No Data",
-                           fill="#666", font=("Segoe UI", 10))
+                           fill="#666", font=(FONT_FAMILY, 10))
         return
 
     cx, cy = width // 2 - 40, height // 2 + 10
@@ -193,7 +202,7 @@ def draw_pie_chart(canvas, data, width, height, title=""):
         canvas.create_text(
             lx + 18, y + 6, anchor="w",
             text=f"{label}: {count} ({pct:.0f}%)",
-            fill="#bbb", font=("Segoe UI", 9)
+            fill="#bbb", font=(FONT_FAMILY, 9)
         )
 
 
@@ -206,7 +215,7 @@ def draw_bar_chart(canvas, data, width, height, title=""):
     # Title
     if title:
         canvas.create_text(width // 2, 16, text=title,
-                           fill="#ccc", font=("Segoe UI", 11, "bold"))
+                           fill="#ccc", font=(FONT_FAMILY, 11, "bold"))
 
     labels = list(data.keys())
     values = list(data.values())
@@ -217,7 +226,7 @@ def draw_bar_chart(canvas, data, width, height, title=""):
     n = len(labels)
     if n == 0:
         canvas.create_text(width // 2, height // 2, text="No Data",
-                           fill="#666", font=("Segoe UI", 10))
+                           fill="#666", font=(FONT_FAMILY, 10))
         return
 
     pad_left = 50
@@ -243,11 +252,11 @@ def draw_bar_chart(canvas, data, width, height, title=""):
 
         # Value label on top
         canvas.create_text(x + bar_w // 2, y_top - 8, text=str(val),
-                           fill="#ccc", font=("Segoe UI", 9, "bold"))
+                           fill="#ccc", font=(FONT_FAMILY, 9, "bold"))
 
         # X-axis label
         canvas.create_text(x + bar_w // 2, y_bot + 14, text=label,
-                           fill="#888", font=("Segoe UI", 8))
+                           fill="#888", font=(FONT_FAMILY, 8))
 
     # Y-axis line
     canvas.create_line(pad_left - 2, pad_top, pad_left - 2,
