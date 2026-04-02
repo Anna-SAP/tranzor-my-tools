@@ -1,0 +1,882 @@
+#!/usr/bin/env python3
+"""
+Tranzor Translation Exporter — Lightweight Desktop GUI
+Uses Python built-in tkinter, zero extra dependencies.
+Supports English / Chinese interface language toggle.
+"""
+
+import os
+import sys
+import io
+import threading
+import webbrowser
+import tkinter as tk
+from tkinter import ttk, messagebox
+from datetime import date
+
+try:
+    import requests
+except ImportError:
+    requests = None
+
+# Ensure sibling modules are importable
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import export_changes
+import export_translations
+import gui_tabs
+
+# ---------------------------------------------------------------------------
+# Tranzor API config (reuse from export_changes)
+# ---------------------------------------------------------------------------
+TRANZOR_URL = "http://tranzor-platform.int.rclabenv.com"
+API = f"{TRANZOR_URL}/api/v1/legacy"
+
+
+# ============================================================
+# i18n — All UI strings in English and Chinese
+# ============================================================
+STRINGS = {
+    "en": {
+        "window_title":       "Tranzor Translation Exporter",
+        "title":              "🌐 Tranzor Translation Exporter",
+        "subtitle":           "Export translation changes or all translations — HTML / Excel / TMX",
+        "task_id_label":      "Task ID",
+        "task_id_hint":       "Empty = All Tasks",
+        "export_type_label":  "Export Type",
+        "export_type_changes":"Changes",
+        "export_type_all":    "All Translations",
+        "output_fmt_label":   "Output Format",
+        "output_fmt_html":    "HTML (Filters / TMX Export)",
+        "output_fmt_xlsx":    "Excel",
+        "btn_run":            "▶  Start Export",
+        "btn_open":           "📂  Open Report",
+        "status_ready":       "Ready",
+        "status_exporting":   "Exporting…",
+        "status_done":        "✓ Export complete",
+        "status_no_data":     "Done (no data or error)",
+        "log_header":         "Log Output",
+        "footer":             "Tranzor Platform · Internal Tool · v2.0",
+        "lang_toggle":        "中文",
+        # Summary panel
+        "summary_title":      "📋 Platform Task Overview",
+        "summary_total":      "Total Tasks",
+        "summary_recent":     "Latest 7 Tasks",
+        "summary_loading":    "Loading…",
+        "summary_error":      "⚠ Failed to load task data",
+        "summary_refresh":    "🔄 Refresh",
+        "summary_col_id":     "ID",
+        "summary_col_name":   "Task Name",
+        "summary_col_creator":"Creator",
+        # Messages
+        "err_title":          "Input Error",
+        "err_task_id":        "Task ID must be a number (e.g. 53), or leave empty to export all.",
+        "found_records":      "Found {count} {type} records",
+        "no_records":         "No {type} records found, nothing to export.",
+        "export_failed":      "❌ Export failed: {error}",
+        "record_changes":     "change",
+        "record_translations":"translation",
+        # Tab names
+        "tab_file_translation": "📁 File Translation",
+        "tab_mr_pipeline":     "🔀 MR Pipeline",
+        "tab_quality_overview": "📊 Quality Overview",
+        # MR Pipeline tab
+        "mr_project":       "Project",
+        "mr_release":       "Release",
+        "mr_status":        "Status",
+        "mr_date_range":    "Date",
+        "mr_search":        "🔍 Search",
+        "mr_reset":         "Reset",
+        "mr_export":        "📦 Export Selected",
+        "mr_sidebar_title": "📊 MR Pipeline Stats",
+        "mr_stat_total":    "Total Tasks",
+        "mr_stat_completed":"Completed",
+        "mr_stat_failed":   "Failed",
+        "mr_stat_avg_score":"Avg Score",
+        "mr_col_idx":       "#",
+        "mr_col_project":   "Project",
+        "mr_col_mr":        "MR#",
+        "mr_col_release":   "Release",
+        "mr_col_status":    "Status",
+        "mr_col_avg_score": "Avg Score",
+        "mr_col_created":   "Created",
+        "mr_col_duration":  "Duration",
+        # Quality Overview tab
+        "qa_language":      "Language",
+        "qa_export":        "📦 Export Report",
+        "qa_total_tasks":   "Total Tasks",
+        "qa_total_items":   "Translation Items",
+        "qa_avg_score":     "Average Score",
+        "qa_low_score":     "Below Threshold",
+        "qa_score_dist":    "Score Distribution",
+        "qa_error_dist":    "Error Category Distribution",
+        "qa_lang_detail":   "📋 By Language Breakdown",
+        "qa_low_items":     "⚠ Low-Score Items (< 98)",
+        "qa_lang_col_language":  "Language",
+        "qa_lang_col_count":     "Count",
+        "qa_lang_col_avg_score": "Avg Score",
+        "qa_lang_col_critical":  "Critical",
+        "qa_lang_col_major":     "Major",
+        "qa_lang_col_minor":     "Minor",
+        "qa_low_col_idx":        "#",
+        "qa_low_col_opus_id":    "String Key",
+        "qa_low_col_language":   "Language",
+        "qa_low_col_source":     "Source",
+        "qa_low_col_translated": "Translated",
+        "qa_low_col_score":      "Score",
+        "qa_low_col_error_cat":  "Error Category",
+        "qa_low_col_reason":     "Reason",
+    },
+    "zh": {
+        "window_title":       "Tranzor 翻译导出器",
+        "title":              "🌐 Tranzor 翻译导出器",
+        "subtitle":           "导出翻译变更记录或全部翻译，支持 HTML / Excel / TMX 格式",
+        "task_id_label":      "Task ID",
+        "task_id_hint":       "留空 = 全部 Task",
+        "export_type_label":  "导出类型",
+        "export_type_changes":"变更记录",
+        "export_type_all":    "全部翻译",
+        "output_fmt_label":   "输出格式",
+        "output_fmt_html":    "HTML（含筛选/TMX 导出）",
+        "output_fmt_xlsx":    "Excel",
+        "btn_run":            "▶  开始导出",
+        "btn_open":           "📂  打开报告",
+        "status_ready":       "就绪",
+        "status_exporting":   "正在导出…",
+        "status_done":        "✓ 导出完成",
+        "status_no_data":     "完成（无数据或出错）",
+        "log_header":         "运行日志",
+        "footer":             "Tranzor Platform · Internal Tool · v2.0",
+        "lang_toggle":        "English",
+        # Summary panel
+        "summary_title":      "📋 平台任务概览",
+        "summary_total":      "总任务数",
+        "summary_recent":     "最新 7 个任务",
+        "summary_loading":    "加载中…",
+        "summary_error":      "⚠ 加载任务数据失败",
+        "summary_refresh":    "🔄 刷新",
+        "summary_col_id":     "ID",
+        "summary_col_name":   "任务名称",
+        "summary_col_creator":"创建者",
+        # Messages
+        "err_title":          "输入错误",
+        "err_task_id":        "Task ID 必须是纯数字（如 53），或留空导出全部。",
+        "found_records":      "共找到 {count} 条{type}",
+        "no_records":         "没有{type}，无需导出。",
+        "export_failed":      "❌ 导出失败: {error}",
+        "record_changes":     "变更记录",
+        "record_translations":"翻译记录",
+        # Tab names
+        "tab_file_translation": "📁 文件翻译",
+        "tab_mr_pipeline":     "🔀 MR Pipeline",
+        "tab_quality_overview": "📊 质量概览",
+        # MR Pipeline tab
+        "mr_project":       "项目",
+        "mr_release":       "版本",
+        "mr_status":        "状态",
+        "mr_date_range":    "日期",
+        "mr_search":        "🔍 查询",
+        "mr_reset":         "重置",
+        "mr_export":        "📦 导出选中",
+        "mr_sidebar_title": "📊 MR Pipeline 统计",
+        "mr_stat_total":    "总任务数",
+        "mr_stat_completed":"已完成",
+        "mr_stat_failed":   "失败",
+        "mr_stat_avg_score":"平均分",
+        "mr_col_idx":       "#",
+        "mr_col_project":   "项目",
+        "mr_col_mr":        "MR#",
+        "mr_col_release":   "版本",
+        "mr_col_status":    "状态",
+        "mr_col_avg_score": "平均分",
+        "mr_col_created":   "创建时间",
+        "mr_col_duration":  "耗时",
+        # Quality Overview tab
+        "qa_language":      "语言",
+        "qa_export":        "📦 导出报告",
+        "qa_total_tasks":   "总任务数",
+        "qa_total_items":   "翻译条目数",
+        "qa_avg_score":     "平均分",
+        "qa_low_score":     "低于阈值",
+        "qa_score_dist":    "分数分布",
+        "qa_error_dist":    "错误类别分布",
+        "qa_lang_detail":   "📋 按语言明细",
+        "qa_low_items":     "⚠ 低分条目 (< 98)",
+        "qa_lang_col_language":  "语言",
+        "qa_lang_col_count":     "条目数",
+        "qa_lang_col_avg_score": "平均分",
+        "qa_lang_col_critical":  "Critical",
+        "qa_lang_col_major":     "Major",
+        "qa_lang_col_minor":     "Minor",
+        "qa_low_col_idx":        "#",
+        "qa_low_col_opus_id":    "String Key",
+        "qa_low_col_language":   "语言",
+        "qa_low_col_source":     "原文",
+        "qa_low_col_translated": "译文",
+        "qa_low_col_score":      "分数",
+        "qa_low_col_error_cat":  "错误类别",
+        "qa_low_col_reason":     "原因",
+    },
+}
+
+
+# ============================================================
+# TextRedirector — forward print() to tkinter Text widget
+# ============================================================
+class TextRedirector(io.TextIOBase):
+    """Thread-safe stdout → Text widget redirector."""
+
+    def __init__(self, text_widget):
+        self.text_widget = text_widget
+
+    def write(self, s):
+        if s:
+            self.text_widget.after(0, self._append, s)
+        return len(s) if s else 0
+
+    def _append(self, s):
+        self.text_widget.configure(state="normal")
+        self.text_widget.insert(tk.END, s)
+        self.text_widget.see(tk.END)
+        self.text_widget.configure(state="disabled")
+
+    def flush(self):
+        pass
+
+
+# ============================================================
+# Main Window
+# ============================================================
+# ============================================================
+# API helper — fetch tasks for summary panel
+# ============================================================
+def fetch_all_tasks_summary():
+    """Fetch all tasks (no status filter) and return (total, recent_7).
+    Each task dict has: id, task_name, created_by.
+    """
+    if requests is None:
+        raise RuntimeError("requests package not available")
+
+    resp = requests.get(
+        f"{API}/tasks",
+        params={"limit": 200, "offset": 0},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    tasks = data.get("tasks", [])
+    total = data.get("total", len(tasks))
+
+    # Take the latest 7 (API usually returns newest first)
+    recent = tasks[:7]
+    return total, recent
+
+
+class ExportApp:
+    # Color scheme
+    BG = "#1a1a2e"
+    BG_CARD = "#16213e"
+    FG = "#e0e0e0"
+    ACCENT = "#0f3460"
+    ACCENT_BTN = "#e94560"
+    ACCENT_BTN_HOVER = "#ff6b81"
+    SUCCESS = "#2ecc71"
+    BORDER = "#2a2a4a"
+    SUMMARY_HIGHLIGHT = "#1e2d50"  # slightly lighter than BG_CARD for rows
+
+    def __init__(self, root):
+        self.root = root
+        self.root.geometry("1280x1050")
+        self.root.resizable(True, True)
+        self.root.configure(bg=self.BG)
+
+        # Current language
+        self.lang = "en"
+
+        # State
+        self.running = False
+        self.last_output_path = None
+        self.summary_loading = False
+
+        # Setup
+        self._setup_styles()
+        self._build_ui()
+        self._refresh_ui_text()
+
+        # Center window
+        self.root.update_idletasks()
+        w = self.root.winfo_width()
+        h = self.root.winfo_height()
+        x = (self.root.winfo_screenwidth() // 2) - (w // 2)
+        y = (self.root.winfo_screenheight() // 2) - (h // 2)
+        self.root.geometry(f"+{x}+{y}")
+
+        # Auto-load legacy summary data on startup (only this — avoid concurrent API overload)
+        self._load_summary_data()
+
+        # Lazy-load MR Pipeline / Quality Overview data when tabs are first selected
+        self._mr_tab_initialized = False
+        self._qa_tab_initialized = False
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+
+    def _t(self, key):
+        """Get translated string for current language."""
+        return STRINGS[self.lang].get(key, key)
+
+    def _setup_styles(self):
+        style = ttk.Style()
+        style.theme_use("clam")
+
+        style.configure("Card.TFrame", background=self.BG_CARD)
+        style.configure("App.TFrame", background=self.BG)
+
+        style.configure("Title.TLabel",
+                         background=self.BG, foreground="#fff",
+                         font=("Segoe UI", 18, "bold"))
+        style.configure("Subtitle.TLabel",
+                         background=self.BG, foreground="#888",
+                         font=("Segoe UI", 10))
+        style.configure("Card.TLabel",
+                         background=self.BG_CARD, foreground=self.FG,
+                         font=("Segoe UI", 11))
+        style.configure("CardBold.TLabel",
+                         background=self.BG_CARD, foreground="#fff",
+                         font=("Segoe UI", 11, "bold"))
+        style.configure("Status.TLabel",
+                         background=self.BG, foreground="#888",
+                         font=("Segoe UI", 9))
+
+        # Radio button for dark theme
+        style.configure("Card.TRadiobutton",
+                         background=self.BG_CARD, foreground=self.FG,
+                         font=("Segoe UI", 11),
+                         indicatorrelief="flat")
+        style.map("Card.TRadiobutton",
+                  background=[("active", self.ACCENT)])
+
+        # Summary panel styles
+        style.configure("Summary.TFrame", background=self.BG_CARD)
+        style.configure("SummaryTitle.TLabel",
+                         background=self.BG_CARD, foreground="#fff",
+                         font=("Segoe UI", 13, "bold"))
+        style.configure("SummaryCount.TLabel",
+                         background=self.BG_CARD, foreground=self.ACCENT_BTN,
+                         font=("Segoe UI", 28, "bold"))
+        style.configure("SummaryCountLabel.TLabel",
+                         background=self.BG_CARD, foreground="#888",
+                         font=("Segoe UI", 10))
+        style.configure("SummarySection.TLabel",
+                         background=self.BG_CARD, foreground="#aaa",
+                         font=("Segoe UI", 10, "bold"))
+        style.configure("SummaryStatus.TLabel",
+                         background=self.BG_CARD, foreground="#666",
+                         font=("Segoe UI", 9))
+
+        # Treeview for dark theme
+        style.configure("Summary.Treeview",
+                         background="#0d1a30",
+                         foreground=self.FG,
+                         fieldbackground="#0d1a30",
+                         borderwidth=0,
+                         font=("Segoe UI", 9),
+                         rowheight=26)
+        style.configure("Summary.Treeview.Heading",
+                         background=self.ACCENT,
+                         foreground="#ccc",
+                         font=("Segoe UI", 9, "bold"),
+                         borderwidth=0)
+        style.map("Summary.Treeview",
+                  background=[("selected", "#1a3a6a")],
+                  foreground=[("selected", "#fff")])
+        style.map("Summary.Treeview.Heading",
+                  background=[("active", "#1a3a6a")])
+
+    def _build_ui(self):
+        # ── Header ──
+        header = ttk.Frame(self.root, style="App.TFrame")
+        header.pack(fill="x", padx=24, pady=(16, 4))
+
+        # Language toggle button (top-right)
+        self.btn_lang = tk.Button(
+            header, text="中文", font=("Segoe UI", 10),
+            bg=self.ACCENT, fg="#ccc", activebackground="#1a3a6a",
+            activeforeground="#fff", relief="flat", cursor="hand2",
+            bd=0, padx=12, pady=2, command=self._toggle_lang)
+        self.btn_lang.pack(side="right", anchor="ne")
+
+        self.lbl_title = ttk.Label(header, text="", style="Title.TLabel")
+        self.lbl_title.pack(anchor="w")
+        self.lbl_subtitle = ttk.Label(header, text="", style="Subtitle.TLabel")
+        self.lbl_subtitle.pack(anchor="w", pady=(2, 0))
+
+        # ── Notebook (tabbed layout) ──
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill="both", expand=True, padx=24, pady=(8, 0))
+
+        # --- Tab 1: File Translation (existing content) ---
+        tab1 = ttk.Frame(self.notebook, style="App.TFrame")
+        self.notebook.add(tab1, text="")
+
+        # --- Tab 2: MR Pipeline ---
+        tab2 = ttk.Frame(self.notebook, style="App.TFrame")
+        self.notebook.add(tab2, text="")
+        self.mr_tab = gui_tabs.MRPipelineTab(tab2, self)
+
+        # --- Tab 3: Quality Overview ---
+        tab3 = ttk.Frame(self.notebook, style="App.TFrame")
+        self.notebook.add(tab3, text="")
+        self.qa_tab = gui_tabs.QualityOverviewTab(tab3, self)
+
+        # ═══════════════════════════════════════════
+        # TAB 1 CONTENTS (File Translation — preserved)
+        # ═══════════════════════════════════════════
+        content = ttk.Frame(tab1, style="App.TFrame")
+        content.pack(fill="both", expand=True, padx=8, pady=(8, 0))
+
+        left = ttk.Frame(content, style="App.TFrame")
+        left.pack(side="left", fill="both", expand=True)
+
+        right = ttk.Frame(content, style="App.TFrame", width=360)
+        right.pack(side="right", fill="y", padx=(16, 0))
+        right.pack_propagate(False)
+
+        # ── Settings Card ──
+        card = ttk.Frame(left, style="Card.TFrame")
+        card.pack(fill="x", pady=(0, 0))
+        card.configure(borderwidth=1, relief="solid")
+
+        inner = ttk.Frame(card, style="Card.TFrame")
+        inner.pack(fill="x", padx=20, pady=16)
+
+        # Task ID row
+        row1 = ttk.Frame(inner, style="Card.TFrame")
+        row1.pack(fill="x", pady=(0, 12))
+        self.lbl_task_id = ttk.Label(row1, text="", style="CardBold.TLabel", width=12)
+        self.lbl_task_id.pack(side="left")
+        self.task_var = tk.StringVar()
+        self.task_entry = tk.Entry(row1, textvariable=self.task_var,
+                                   font=("Segoe UI", 11),
+                                   bg="#0a0a1a", fg="#fff",
+                                   insertbackground="#fff",
+                                   relief="flat", bd=0,
+                                   highlightthickness=1,
+                                   highlightcolor=self.ACCENT_BTN,
+                                   highlightbackground=self.BORDER)
+        self.task_entry.pack(side="left", fill="x", expand=True, ipady=6, padx=(8, 0))
+
+        self.lbl_task_hint = ttk.Label(row1, text="", style="Status.TLabel")
+        self.lbl_task_hint.configure(background=self.BG_CARD)
+        self.lbl_task_hint.pack(side="left", padx=(10, 0))
+
+        # Export Type row
+        row_type = ttk.Frame(inner, style="Card.TFrame")
+        row_type.pack(fill="x", pady=(0, 12))
+        self.lbl_export_type = ttk.Label(row_type, text="", style="CardBold.TLabel", width=12)
+        self.lbl_export_type.pack(side="left")
+        self.export_type_var = tk.StringVar(value="changes")
+        self.rb_changes = ttk.Radiobutton(row_type, text="",
+                         variable=self.export_type_var, value="changes",
+                         style="Card.TRadiobutton")
+        self.rb_changes.pack(side="left", padx=(8, 16))
+        self.rb_translations = ttk.Radiobutton(row_type, text="",
+                         variable=self.export_type_var, value="translations",
+                         style="Card.TRadiobutton")
+        self.rb_translations.pack(side="left")
+
+        # Output Format row
+        row2 = ttk.Frame(inner, style="Card.TFrame")
+        row2.pack(fill="x")
+        self.lbl_fmt = ttk.Label(row2, text="", style="CardBold.TLabel", width=12)
+        self.lbl_fmt.pack(side="left")
+        self.fmt_var = tk.StringVar(value="html")
+        self.rb_html = ttk.Radiobutton(row2, text="",
+                         variable=self.fmt_var, value="html",
+                         style="Card.TRadiobutton")
+        self.rb_html.pack(side="left", padx=(8, 16))
+        self.rb_xlsx = ttk.Radiobutton(row2, text="",
+                         variable=self.fmt_var, value="xlsx",
+                         style="Card.TRadiobutton")
+        self.rb_xlsx.pack(side="left")
+
+        # ── Button Area ──
+        btn_frame = ttk.Frame(left, style="App.TFrame")
+        btn_frame.pack(fill="x", pady=(16, 0))
+
+        self.btn_run = tk.Button(
+            btn_frame, text="", font=("Segoe UI", 12, "bold"),
+            bg=self.ACCENT_BTN, fg="#fff", activebackground=self.ACCENT_BTN_HOVER,
+            activeforeground="#fff", relief="flat", cursor="hand2",
+            bd=0, padx=20, pady=8, command=self._on_run)
+        self.btn_run.pack(side="left")
+
+        self.btn_open = tk.Button(
+            btn_frame, text="", font=("Segoe UI", 12),
+            bg=self.ACCENT, fg="#888", relief="flat",
+            bd=0, padx=20, pady=8, state="disabled",
+            command=self._on_open)
+        self.btn_open.pack(side="left", padx=(12, 0))
+
+        self.status_label = ttk.Label(btn_frame, text="", style="Status.TLabel")
+        self.status_label.pack(side="right")
+
+        # ── Log Area ──
+        log_frame = ttk.Frame(left, style="App.TFrame")
+        log_frame.pack(fill="both", expand=True, pady=(12, 0))
+
+        self.lbl_log_header = ttk.Label(log_frame, text="", style="Subtitle.TLabel")
+        self.lbl_log_header.pack(anchor="w", pady=(0, 4))
+
+        self.log_text = tk.Text(
+            log_frame, height=12,
+            bg="#0a0a1a", fg="#aaa",
+            font=("Consolas", 10),
+            relief="flat", bd=0,
+            highlightthickness=1,
+            highlightbackground=self.BORDER,
+            wrap="word", state="disabled")
+        self.log_text.pack(fill="both", expand=True)
+
+        # ═══════════════════════════════════════════
+        # RIGHT PANEL — Summary
+        # ═══════════════════════════════════════════
+        self._build_summary_panel(right)
+
+        # ── Progress Bar (inside tab1) ──
+        self.progress = ttk.Progressbar(tab1, mode="indeterminate",
+                                         length=400)
+        self.progress.pack(fill="x", padx=8, pady=(8, 4))
+
+        # ── Footer (full width, outside notebook) ──
+        self.lbl_footer = ttk.Label(self.root, text="", style="Status.TLabel")
+        self.lbl_footer.pack(pady=(0, 8))
+
+    def _build_summary_panel(self, parent):
+        """Build the right-side summary panel."""
+        panel = ttk.Frame(parent, style="Summary.TFrame")
+        panel.pack(fill="both", expand=True)
+        panel.configure(borderwidth=1, relief="solid")
+
+        inner = ttk.Frame(panel, style="Summary.TFrame")
+        inner.pack(fill="both", expand=True, padx=16, pady=16)
+
+        # Panel title
+        self.lbl_summary_title = ttk.Label(
+            inner, text="", style="SummaryTitle.TLabel")
+        self.lbl_summary_title.pack(anchor="w")
+
+        # Separator
+        sep1 = tk.Frame(inner, bg=self.BORDER, height=1)
+        sep1.pack(fill="x", pady=(10, 12))
+
+        # ── Total tasks stat ──
+        stat_frame = ttk.Frame(inner, style="Summary.TFrame")
+        stat_frame.pack(fill="x", pady=(0, 8))
+
+        self.lbl_total_count = ttk.Label(
+            stat_frame, text="—", style="SummaryCount.TLabel")
+        self.lbl_total_count.pack(side="left")
+
+        self.lbl_total_label = ttk.Label(
+            stat_frame, text="", style="SummaryCountLabel.TLabel")
+        self.lbl_total_label.pack(side="left", padx=(10, 0), pady=(8, 0))
+
+        # ── Status message (loading / error) ──
+        self.lbl_summary_status = ttk.Label(
+            inner, text="", style="SummaryStatus.TLabel")
+        self.lbl_summary_status.pack(anchor="w")
+
+        # Separator
+        sep2 = tk.Frame(inner, bg=self.BORDER, height=1)
+        sep2.pack(fill="x", pady=(8, 10))
+
+        # ── Recent tasks section header ──
+        self.lbl_recent_header = ttk.Label(
+            inner, text="", style="SummarySection.TLabel")
+        self.lbl_recent_header.pack(anchor="w", pady=(0, 8))
+
+        # ── Treeview for task list ──
+        tree_frame = ttk.Frame(inner, style="Summary.TFrame")
+        tree_frame.pack(fill="both", expand=True)
+
+        self.task_tree = ttk.Treeview(
+            tree_frame,
+            columns=("id", "name", "creator"),
+            show="headings",
+            style="Summary.Treeview",
+            height=7,
+            selectmode="browse",
+        )
+        self.task_tree.heading("id", text="ID")
+        self.task_tree.heading("name", text="Task Name")
+        self.task_tree.heading("creator", text="Creator")
+
+        self.task_tree.column("id", width=45, minwidth=40, stretch=False, anchor="center")
+        self.task_tree.column("name", width=200, minwidth=100, stretch=True)
+        self.task_tree.column("creator", width=80, minwidth=60, stretch=False)
+
+        # Scrollbar
+        tree_scroll = ttk.Scrollbar(
+            tree_frame, orient="vertical", command=self.task_tree.yview)
+        self.task_tree.configure(yscrollcommand=tree_scroll.set)
+
+        self.task_tree.pack(side="left", fill="both", expand=True)
+        tree_scroll.pack(side="right", fill="y")
+
+        # Bind row click to fill Task ID
+        self.task_tree.bind("<<TreeviewSelect>>", self._on_task_select)
+
+        # ── Refresh button ──
+        btn_bar = ttk.Frame(inner, style="Summary.TFrame")
+        btn_bar.pack(fill="x", pady=(10, 0))
+
+        self.btn_refresh = tk.Button(
+            btn_bar, text="", font=("Segoe UI", 9),
+            bg=self.ACCENT, fg="#ccc", activebackground="#1a3a6a",
+            activeforeground="#fff", relief="flat", cursor="hand2",
+            bd=0, padx=12, pady=4, command=self._load_summary_data)
+        self.btn_refresh.pack(side="right")
+
+    # ── i18n: refresh all visible text ──
+    def _refresh_ui_text(self):
+        """Update all UI widget texts to the current language."""
+        self.root.title(self._t("window_title"))
+        self.lbl_title.configure(text=self._t("title"))
+        self.lbl_subtitle.configure(text=self._t("subtitle"))
+        self.lbl_task_id.configure(text=self._t("task_id_label"))
+        self.lbl_task_hint.configure(text=self._t("task_id_hint"))
+        self.lbl_export_type.configure(text=self._t("export_type_label"))
+        self.rb_changes.configure(text=self._t("export_type_changes"))
+        self.rb_translations.configure(text=self._t("export_type_all"))
+        self.lbl_fmt.configure(text=self._t("output_fmt_label"))
+        self.rb_html.configure(text=self._t("output_fmt_html"))
+        self.rb_xlsx.configure(text=self._t("output_fmt_xlsx"))
+        self.btn_run.configure(text=self._t("btn_run"))
+        self.btn_open.configure(text=self._t("btn_open"))
+        self.lbl_log_header.configure(text=self._t("log_header"))
+        self.lbl_footer.configure(text=self._t("footer"))
+        self.btn_lang.configure(text=self._t("lang_toggle"))
+
+        # Notebook tab titles
+        self.notebook.tab(0, text=self._t("tab_file_translation"))
+        self.notebook.tab(1, text=self._t("tab_mr_pipeline"))
+        self.notebook.tab(2, text=self._t("tab_quality_overview"))
+
+        # Summary panel texts
+        self.lbl_summary_title.configure(text=self._t("summary_title"))
+        self.lbl_total_label.configure(text=self._t("summary_total"))
+        self.lbl_recent_header.configure(text=self._t("summary_recent"))
+        self.btn_refresh.configure(text=self._t("summary_refresh"))
+        self.task_tree.heading("id", text=self._t("summary_col_id"))
+        self.task_tree.heading("name", text=self._t("summary_col_name"))
+        self.task_tree.heading("creator", text=self._t("summary_col_creator"))
+
+        # MR Pipeline & Quality Overview tab texts
+        self.mr_tab.refresh_text()
+        self.qa_tab.refresh_text()
+
+        # Refresh status label only if not running
+        if not self.running:
+            if self.last_output_path:
+                self.status_label.configure(text=self._t("status_done"))
+            else:
+                self.status_label.configure(text=self._t("status_ready"))
+
+    def _toggle_lang(self):
+        """Toggle between English and Chinese."""
+        self.lang = "zh" if self.lang == "en" else "en"
+        self._refresh_ui_text()
+
+    def _on_tab_changed(self, event):
+        """Lazy-load data when MR Pipeline or Quality Overview tab is first selected."""
+        tab_idx = self.notebook.index(self.notebook.select())
+        if tab_idx == 1 and not self._mr_tab_initialized:
+            self._mr_tab_initialized = True
+            self.mr_tab.load_filters()
+            self.mr_tab._load_overview()
+            self.mr_tab.load_initial_tasks()
+        elif tab_idx == 2 and not self._qa_tab_initialized:
+            self._qa_tab_initialized = True
+            self.qa_tab.load_filters()
+
+    # ── Summary panel data loading ──
+    def _load_summary_data(self):
+        """Load task summary data in a background thread."""
+        if self.summary_loading:
+            return
+        self.summary_loading = True
+        self.lbl_summary_status.configure(
+            text=self._t("summary_loading"), foreground="#666")
+        self.btn_refresh.configure(state="disabled")
+        t = threading.Thread(target=self._fetch_summary, daemon=True)
+        t.start()
+
+    def _fetch_summary(self):
+        """Background thread: fetch tasks from API."""
+        try:
+            total, recent = fetch_all_tasks_summary()
+            self.root.after(0, self._on_summary_loaded, total, recent)
+        except Exception as e:
+            self.root.after(0, self._on_summary_error, str(e))
+
+    def _on_summary_loaded(self, total, recent_tasks):
+        """Callback when summary data loads successfully."""
+        self.summary_loading = False
+        self.btn_refresh.configure(state="normal")
+        self.lbl_summary_status.configure(text="", foreground="#666")
+
+        # Update total count
+        self.lbl_total_count.configure(text=str(total))
+
+        # Populate treeview
+        for item in self.task_tree.get_children():
+            self.task_tree.delete(item)
+
+        for task in recent_tasks:
+            tid = task.get("id", "")
+            tname = task.get("task_name", "")
+            creator = task.get("created_by", "") or task.get("creator", "") or "—"
+            self.task_tree.insert("", "end", values=(tid, tname, creator))
+
+    def _on_summary_error(self, error_msg):
+        """Callback when summary data fails to load."""
+        self.summary_loading = False
+        self.btn_refresh.configure(state="normal")
+        self.lbl_summary_status.configure(
+            text=self._t("summary_error"), foreground="#e94560")
+        self.lbl_total_count.configure(text="—")
+
+    def _on_task_select(self, event):
+        """When user clicks a task row, fill the Task ID entry."""
+        sel = self.task_tree.selection()
+        if sel:
+            values = self.task_tree.item(sel[0], "values")
+            if values:
+                task_id = values[0]
+                self.task_var.set(str(task_id))
+
+    # ── Event Handlers ──
+    def _on_run(self):
+        if self.running:
+            return
+
+        # Validate Task ID
+        task_str = self.task_var.get().strip()
+        task_id = None
+        if task_str:
+            try:
+                task_id = int(task_str)
+            except ValueError:
+                messagebox.showwarning(self._t("err_title"), self._t("err_task_id"))
+                return
+
+        self.running = True
+        self.last_output_path = None
+        self.btn_run.configure(state="disabled", bg="#555")
+        self.btn_open.configure(state="disabled", fg="#888")
+        self.progress.start(15)
+        self.status_label.configure(text=self._t("status_exporting"))
+
+        # Clear log
+        self.log_text.configure(state="normal")
+        self.log_text.delete("1.0", tk.END)
+        self.log_text.configure(state="disabled")
+
+        # Run in background thread
+        t = threading.Thread(target=self._run_export,
+                              args=(task_id,), daemon=True)
+        t.start()
+
+    def _run_export(self, task_id):
+        """Execute export in a background thread."""
+        redirector = TextRedirector(self.log_text)
+        old_stdout = sys.stdout
+        sys.stdout = redirector
+
+        export_type = self.export_type_var.get()
+        # Capture language at start (user might toggle mid-export)
+        lang = self.lang
+
+        try:
+            if export_type == "translations":
+                rows = export_translations.collect_translations(task_id=task_id)
+                record_label = STRINGS[lang]["record_translations"]
+            else:
+                rows = export_changes.collect_changes(task_id=task_id)
+                record_label = STRINGS[lang]["record_changes"]
+
+            msg = STRINGS[lang]["found_records"].format(count=len(rows), type=record_label)
+            print(f"\n{msg}")
+
+            if not rows:
+                no_msg = STRINGS[lang]["no_records"].format(type=record_label)
+                print(no_msg)
+                self.root.after(0, self._on_done, None, False)
+                return
+
+            fmt = self.fmt_var.get()
+            ext = ".xlsx" if fmt == "xlsx" else ".html"
+            today_str = date.today().isoformat()
+
+            if export_type == "translations":
+                label = f"All translations (exported {today_str})"
+                if task_id:
+                    filename = f"tranzor_task_{task_id}_translations_{today_str}{ext}"
+                else:
+                    filename = f"tranzor_all_translations_{today_str}{ext}"
+            else:
+                label = f"All changes (exported {today_str})"
+                if task_id:
+                    filename = f"tranzor_task_{task_id}_{today_str}{ext}"
+                else:
+                    filename = f"tranzor_all_changes_{today_str}{ext}"
+
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            filepath = os.path.join(script_dir, filename)
+
+            if export_type == "translations":
+                export_translations.save_file(rows, filepath, label, fmt)
+            else:
+                export_changes.save_file(rows, filepath, label, fmt)
+
+            self.root.after(0, self._on_done, filepath, True)
+
+        except Exception as e:
+            err_msg = STRINGS[lang]["export_failed"].format(error=e)
+            print(f"\n{err_msg}")
+            self.root.after(0, self._on_done, None, False)
+        finally:
+            sys.stdout = old_stdout
+
+    def _on_done(self, filepath, success):
+        """Export completion callback (main thread)."""
+        self.running = False
+        self.progress.stop()
+        self.btn_run.configure(state="normal", bg=self.ACCENT_BTN)
+
+        if success and filepath:
+            self.last_output_path = filepath
+            self.btn_open.configure(state="normal", fg="#fff",
+                                     bg=self.SUCCESS)
+            self.status_label.configure(text=self._t("status_done"))
+        else:
+            self.status_label.configure(text=self._t("status_no_data"))
+
+    def _on_open(self):
+        if self.last_output_path and os.path.exists(self.last_output_path):
+            webbrowser.open(os.path.abspath(self.last_output_path))
+
+
+# ============================================================
+# Entry point
+# ============================================================
+def main():
+    root = tk.Tk()
+    try:
+        root.iconbitmap(default="")
+    except Exception:
+        pass
+    app = ExportApp(root)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
