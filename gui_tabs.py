@@ -451,12 +451,11 @@ class MRPipelineTab:
 
     def _on_export(self):
         sel = self.mr_tree.selection()
-        if not sel:
-            return
-        tags = self.mr_tree.item(sel[0], "tags")
-        if not tags:
-            return
-        task_id = tags[0]
+        if sel:
+            tags = self.mr_tree.item(sel[0], "tags")
+            task_id = tags[0] if tags else None
+        else:
+            task_id = None  # Export all tasks
         fmt = self.mr_fmt_var.get()
         export_type = self.mr_export_type_var.get()
         if IS_MAC:
@@ -468,7 +467,14 @@ class MRPipelineTab:
 
     def _run_export(self, task_id, fmt, export_type="changes"):
         try:
-            results = mr_api.fetch_mr_results(task_id)
+            if task_id:
+                # Single task export
+                results = mr_api.fetch_mr_results(task_id)
+                id_tag = task_id[:8]
+            else:
+                # Export all completed tasks
+                results = mr_api.collect_all_mr_results()
+                id_tag = "all_tasks"
 
             # Filter translations based on export type
             if export_type == "changes":
@@ -486,10 +492,10 @@ class MRPipelineTab:
 
             ext = ".xlsx" if fmt == "xlsx" else ".html"
             today = date.today().isoformat()
-            filename = f"mr_pipeline_{task_id[:8]}_{type_tag}_{today}{ext}"
+            filename = f"mr_pipeline_{id_tag}_{type_tag}_{today}{ext}"
             script_dir = os.path.dirname(os.path.abspath(__file__))
             filepath = os.path.join(script_dir, filename)
-            label = f"MR Pipeline Task {task_id[:8]} — {type_tag} (exported {today})"
+            label = f"MR Pipeline {id_tag} — {type_tag} (exported {today})"
             mr_api.save_mr_file(results, filepath, label, fmt)
             self.parent.after(0, lambda: self.lbl_mr_status_bar.configure(text=self._t("status_done")))
         except Exception as e:

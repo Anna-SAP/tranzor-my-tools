@@ -138,6 +138,76 @@ def fetch_mr_results(task_id, target_language=None,
 
 
 # ---------------------------------------------------------------------------
+# 4b) 聚合所有 completed 任务的翻译结果
+# ---------------------------------------------------------------------------
+MAX_WORKERS = 4
+
+
+def collect_all_mr_results(progress_callback=None):
+    """遍历所有 completed 状态的 MR Pipeline 任务，聚合翻译结果。
+
+    Args:
+        progress_callback: 可选回调 (msg: str) 用于输出进度日志
+
+    Returns:
+        与 fetch_mr_results 相同的结构: { "translations": [...], "summary": {} }
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    log = progress_callback or print
+
+    # Step 1: 分页获取所有 completed 任务
+    log("  正在获取 MR Pipeline 任务列表...")
+    all_tasks = []
+    offset = 0
+    batch_size = 100
+    while True:
+        total, batch = fetch_mr_tasks(status="completed",
+                                      limit=batch_size, offset=offset)
+        all_tasks.extend(batch)
+        if not batch or offset + batch_size >= total:
+            break
+        offset += batch_size
+    log(f"  找到 {len(all_tasks)} 个已完成的 MR 任务")
+
+    if not all_tasks:
+        return {"translations": [], "summary": {}}
+
+    # Step 2: 并发获取每个任务的翻译结果
+    all_translations = []
+    total_count = len(all_tasks)
+
+    def _fetch_one(task_info):
+        idx, task = task_info
+        tid = task.get("task_id")
+        if not tid:
+            return []
+        try:
+            results = fetch_mr_results(tid)
+            trs = results.get("translations", [])
+            if trs:
+                pid = task.get("project_id", "")
+                mr_iid = task.get("merge_request_iid", "")
+                log(f"  [{idx}/{total_count}] Task {tid[:8]}… "
+                    f"(MR#{mr_iid}, {pid}) — {len(trs)} 条翻译")
+            return trs
+        except Exception as e:
+            log(f"  ⚠ [{idx}/{total_count}] Task {tid[:8]}… 获取失败: {e}")
+            return []
+
+    task_infos = [(i + 1, t) for i, t in enumerate(all_tasks)]
+
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        futures = {pool.submit(_fetch_one, info): info for info in task_infos}
+        for f in as_completed(futures):
+            all_translations.extend(f.result())
+
+    log(f"\n  ✓ 共聚合 {len(all_translations)} 条翻译 (来自 {total_count} 个任务)")
+
+    return {"translations": all_translations, "summary": {}}
+
+
+# ---------------------------------------------------------------------------
 # 5) Dashboard 概览
 # ---------------------------------------------------------------------------
 def fetch_dashboard_overview(project_id=None, release=None,
