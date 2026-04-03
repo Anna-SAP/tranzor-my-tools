@@ -125,6 +125,19 @@ class MRPipelineTab:
             bg="#2ecc71", fg="#fff", padx=14, pady=4, state="disabled")
         self.btn_mr_export.pack(side="left")
 
+        # Export Type selector (mirrors File Translation panel)
+        self.lbl_mr_export_type = ttk.Label(action, text="", style="Card.TLabel")
+        self.lbl_mr_export_type.pack(side="left", padx=(16, 4))
+        self.mr_export_type_var = tk.StringVar(value="changes")
+        self.rb_mr_changes = ttk.Radiobutton(
+            action, text="", variable=self.mr_export_type_var, value="changes",
+            style="Card.TRadiobutton")
+        self.rb_mr_changes.pack(side="left", padx=(0, 6))
+        self.rb_mr_translations = ttk.Radiobutton(
+            action, text="", variable=self.mr_export_type_var, value="translations",
+            style="Card.TRadiobutton")
+        self.rb_mr_translations.pack(side="left")
+
         self.lbl_mr_fmt = ttk.Label(action, text="", style="Card.TLabel")
         self.lbl_mr_fmt.pack(side="left", padx=(16, 4))
         self.mr_fmt_var = tk.StringVar(value="html")
@@ -223,6 +236,9 @@ class MRPipelineTab:
         self.btn_mr_search.configure(text=t("mr_search"))
         self.btn_mr_reset.configure(text=t("mr_reset"))
         self.btn_mr_export.configure(text=t("mr_export"))
+        self.lbl_mr_export_type.configure(text=t("export_type_label"))
+        self.rb_mr_changes.configure(text=t("export_type_changes"))
+        self.rb_mr_translations.configure(text=t("export_type_all"))
         self.lbl_mr_fmt.configure(text=t("output_fmt_label"))
         self.btn_mr_refresh.configure(text=t("summary_refresh"))
 
@@ -442,22 +458,38 @@ class MRPipelineTab:
             return
         task_id = tags[0]
         fmt = self.mr_fmt_var.get()
+        export_type = self.mr_export_type_var.get()
         if IS_MAC:
             self.btn_mr_export.state(["disabled"])
         else:
             self.btn_mr_export.configure(state="disabled")
         self.lbl_mr_status_bar.configure(text=self._t("status_exporting"))
-        threading.Thread(target=self._run_export, args=(task_id, fmt), daemon=True).start()
+        threading.Thread(target=self._run_export, args=(task_id, fmt, export_type), daemon=True).start()
 
-    def _run_export(self, task_id, fmt):
+    def _run_export(self, task_id, fmt, export_type="changes"):
         try:
             results = mr_api.fetch_mr_results(task_id)
+
+            # Filter translations based on export type
+            if export_type == "changes":
+                all_translations = results.get("translations", [])
+                filtered = [
+                    t for t in all_translations
+                    if (t.get("final_score") is not None and t.get("final_score") < 100)
+                    or t.get("error_category")
+                ]
+                results = dict(results)  # shallow copy to avoid mutating cached data
+                results["translations"] = filtered
+                type_tag = "changes"
+            else:
+                type_tag = "all"
+
             ext = ".xlsx" if fmt == "xlsx" else ".html"
             today = date.today().isoformat()
-            filename = f"mr_pipeline_{task_id[:8]}_{today}{ext}"
+            filename = f"mr_pipeline_{task_id[:8]}_{type_tag}_{today}{ext}"
             script_dir = os.path.dirname(os.path.abspath(__file__))
             filepath = os.path.join(script_dir, filename)
-            label = f"MR Pipeline Task {task_id[:8]} (exported {today})"
+            label = f"MR Pipeline Task {task_id[:8]} — {type_tag} (exported {today})"
             mr_api.save_mr_file(results, filepath, label, fmt)
             self.parent.after(0, lambda: self.lbl_mr_status_bar.configure(text=self._t("status_done")))
         except Exception as e:
