@@ -64,6 +64,30 @@ def fetch_mr_filters():
     }
 
 
+def fetch_languages():
+    """从最近 completed task 的翻译结果中提取所有可用的 target language 列表"""
+    try:
+        _, tasks = fetch_mr_tasks(status="completed", limit=10)
+        langs = set()
+        for t in tasks:
+            tid = t.get("task_id")
+            if not tid:
+                continue
+            try:
+                results = fetch_mr_results(tid)
+                for tr in results.get("translations", []):
+                    lang = tr.get("target_language", "")
+                    if lang:
+                        langs.add(lang)
+                if langs:
+                    break
+            except Exception:
+                continue
+        return sorted(langs)
+    except Exception:
+        return []
+
+
 # ---------------------------------------------------------------------------
 # 2) 任务列表
 # ---------------------------------------------------------------------------

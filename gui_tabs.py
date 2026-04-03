@@ -602,17 +602,18 @@ class QualityOverviewTab:
     def _fetch_filters(self):
         try:
             data = mr_api.fetch_mr_filters()
-            self.parent.after(0, self._on_filters_loaded, data)
+            langs = mr_api.fetch_languages()
+            self.parent.after(0, self._on_filters_loaded, data, langs)
         except Exception:
             pass
 
-    def _on_filters_loaded(self, data):
+    def _on_filters_loaded(self, data, langs):
         pids = [""] + data.get("project_ids", [])
         rels = [""] + data.get("releases", [])
         self.cmb_qa_project.configure(values=pids)
         self.cmb_qa_release.configure(values=rels)
-        # Auto-load initial data so Language dropdown gets populated
-        self._load_data()
+        if langs:
+            self.cmb_qa_lang.configure(values=[""] + langs)
 
     def _on_search(self):
         self._load_data()
