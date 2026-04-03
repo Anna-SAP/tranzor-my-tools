@@ -101,6 +101,12 @@ class MRPipelineTab:
             bg="#0f3460", fg="#ccc", padx=14, pady=3)
         self.btn_mr_reset.pack(side="left")
 
+        self.mr_hide_empty_var = tk.BooleanVar(value=True)
+        self.chk_mr_hide_empty = ttk.Checkbutton(
+            r2, text="Hide empty MRs", variable=self.mr_hide_empty_var,
+            style="Card.TCheckbutton", command=self._on_search)
+        self.chk_mr_hide_empty.pack(side="left", padx=(16, 0))
+
         # ── Action bar (Export + Pagination) — above table for visibility on macOS ──
         action = ttk.Frame(left, style="App.TFrame")
         action.pack(fill="x", pady=(6, 6))
@@ -294,7 +300,14 @@ class MRPipelineTab:
         for item in self.mr_tree.get_children():
             self.mr_tree.delete(item)
 
+        hide_empty = self.mr_hide_empty_var.get()
+        display_idx = 0
         for i, t in enumerate(tasks):
+            avg = t.get("average_score")
+            # Skip empty MRs (no translations / no score) when checkbox is checked
+            if hide_empty and avg is None:
+                continue
+            display_idx += 1
             idx = self.mr_page * self.mr_page_size + i + 1
             created = (t.get("created_at") or "")[:19].replace("T", " ")
             updated = t.get("updated_at") or ""
@@ -311,7 +324,6 @@ class MRPipelineTab:
             except Exception:
                 pass
 
-            avg = t.get("average_score", "—")
             self.mr_tree.insert("", "end", values=(
                 idx, t.get("project_id", ""), t.get("merge_request_iid", ""),
                 t.get("release", ""), t.get("status", ""),
