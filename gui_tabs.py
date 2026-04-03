@@ -289,6 +289,27 @@ class MRPipelineTab:
             total, tasks = mr_api.fetch_mr_tasks(
                 project_id=proj, release=rel, status=status,
                 limit=self.mr_page_size, offset=self.mr_page * self.mr_page_size)
+
+            # When "Hide empty MRs" is checked, fetch results for each task
+            # to determine translation count (task list API lacks this data)
+            hide_empty = self.mr_hide_empty_var.get()
+            if hide_empty:
+                for t in tasks:
+                    tid = t.get("task_id")
+                    if not tid:
+                        t["_translations_count"] = 0
+                        continue
+                    try:
+                        results = mr_api.fetch_mr_results(tid)
+                        trs = results.get("translations", [])
+                        t["_translations_count"] = len(trs)
+                        if trs and t.get("average_score") is None:
+                            scores = [tr.get("score") for tr in trs if tr.get("score") is not None]
+                            if scores:
+                                t["average_score"] = round(sum(scores) / len(scores), 2)
+                    except Exception:
+                        t["_translations_count"] = 0
+
             self.parent.after(0, self._on_tasks_loaded, total, tasks)
         except Exception as e:
             self.parent.after(0, self._on_tasks_error, str(e))
@@ -301,13 +322,10 @@ class MRPipelineTab:
             self.mr_tree.delete(item)
 
         hide_empty = self.mr_hide_empty_var.get()
-        display_idx = 0
         for i, t in enumerate(tasks):
-            avg = t.get("average_score")
-            # Skip empty MRs (no translations / no score) when checkbox is checked
-            if hide_empty and avg is None:
+            # Skip tasks with 0 translations when Hide empty MRs is checked
+            if hide_empty and t.get("_translations_count", -1) == 0:
                 continue
-            display_idx += 1
             idx = self.mr_page * self.mr_page_size + i + 1
             created = (t.get("created_at") or "")[:19].replace("T", " ")
             updated = t.get("updated_at") or ""
@@ -324,11 +342,13 @@ class MRPipelineTab:
             except Exception:
                 pass
 
+            avg = t.get("average_score")
             self.mr_tree.insert("", "end", values=(
                 idx, t.get("project_id", ""), t.get("merge_request_iid", ""),
                 t.get("release", ""), t.get("status", ""),
                 avg if avg is not None else "—", created, duration
             ), tags=(t.get("task_id", ""),))
+
 
         # Pagination
         total_pages = max(1, (total + self.mr_page_size - 1) // self.mr_page_size)
