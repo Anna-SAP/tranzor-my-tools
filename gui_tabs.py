@@ -26,6 +26,7 @@ class MRPipelineTab:
         self.mr_page = 0
         self.mr_page_size = 20
         self.mr_total = 0
+        self.mr_filtered_total = 0
         self.mr_loading = False
         self.mr_overview_loading = False
         self._build(parent)
@@ -72,7 +73,13 @@ class MRPipelineTab:
         self.mr_status_var = tk.StringVar()
         self.cmb_mr_status = ttk.Combobox(r1, textvariable=self.mr_status_var, width=12, state="readonly",
                                            values=["", "pending", "running", "completed", "failed", "skipped"])
-        self.cmb_mr_status.pack(side="left", padx=(4, 0))
+        self.cmb_mr_status.pack(side="left", padx=(4, 12))
+
+        ttk.Label(r1, text="MR#", style="Card.TLabel").pack(side="left")
+        self.mr_iid_var = tk.StringVar()
+        self.ent_mr_iid = tk.Entry(r1, textvariable=self.mr_iid_var, width=8, font=(FONT_FAMILY, 10),
+                                    bg="#0a0a1a", fg="#fff", insertbackground="#fff", relief="flat")
+        self.ent_mr_iid.pack(side="left", padx=(4, 0), ipady=3)
 
         # Row 2: Date range + buttons
         r2 = ttk.Frame(fi, style="Card.TFrame")
@@ -259,6 +266,7 @@ class MRPipelineTab:
         self.mr_project_var.set("")
         self.mr_release_var.set("")
         self.mr_status_var.set("")
+        self.mr_iid_var.set("")
         self.mr_date_from.delete(0, "end")
         self.mr_date_to.delete(0, "end")
         self.mr_page = 0
@@ -270,7 +278,8 @@ class MRPipelineTab:
             self._load_tasks()
 
     def _next_page(self):
-        if (self.mr_page + 1) * self.mr_page_size < self.mr_total:
+        effective_total = self.mr_filtered_total if self.mr_hide_empty_var.get() or self.mr_iid_var.get().strip() else self.mr_total
+        if (self.mr_page + 1) * self.mr_page_size < effective_total:
             self.mr_page += 1
             self._load_tasks()
 
@@ -281,51 +290,97 @@ class MRPipelineTab:
         self.lbl_mr_status_bar.configure(text=self._t("status_exporting"))
         threading.Thread(target=self._fetch_tasks, daemon=True).start()
 
+    def _check_task_translations(self, t):
+        """Check a task's translation count via API; attach _translations_count and average_score."""
+        tid = t.get("task_id")
+        if not tid:
+            t["_translations_count"] = 0
+            return
+        try:
+            results = mr_api.fetch_mr_results(tid)
+            trs = results.get("translations", [])
+            t["_translations_count"] = len(trs)
+            if trs and t.get("average_score") is None:
+                scores = [tr.get("score") for tr in trs if tr.get("score") is not None]
+                if scores:
+                    t["average_score"] = round(sum(scores) / len(scores), 2)
+        except Exception:
+            t["_translations_count"] = 0
+
     def _fetch_tasks(self):
         try:
             proj = self.mr_project_var.get() or None
             rel = self.mr_release_var.get() or None
             status = self.mr_status_var.get() or None
-            total, tasks = mr_api.fetch_mr_tasks(
-                project_id=proj, release=rel, status=status,
-                limit=self.mr_page_size, offset=self.mr_page * self.mr_page_size)
-
-            # When "Hide empty MRs" is checked, fetch results for each task
-            # to determine translation count (task list API lacks this data)
+            mr_iid_filter = self.mr_iid_var.get().strip()
             hide_empty = self.mr_hide_empty_var.get()
-            if hide_empty:
-                for t in tasks:
-                    tid = t.get("task_id")
-                    if not tid:
-                        t["_translations_count"] = 0
-                        continue
-                    try:
-                        results = mr_api.fetch_mr_results(tid)
-                        trs = results.get("translations", [])
-                        t["_translations_count"] = len(trs)
-                        if trs and t.get("average_score") is None:
-                            scores = [tr.get("score") for tr in trs if tr.get("score") is not None]
-                            if scores:
-                                t["average_score"] = round(sum(scores) / len(scores), 2)
-                    except Exception:
-                        t["_translations_count"] = 0
+            need_filter = hide_empty or bool(mr_iid_filter)
 
-            self.parent.after(0, self._on_tasks_loaded, total, tasks)
+            if not need_filter:
+                # Simple path: no client-side filtering needed
+                total, tasks = mr_api.fetch_mr_tasks(
+                    project_id=proj, release=rel, status=status,
+                    limit=self.mr_page_size, offset=self.mr_page * self.mr_page_size)
+                self.parent.after(0, self._on_tasks_loaded, total, tasks, total)
+            else:
+                # Accumulate non-empty / MR#-matched tasks across multiple API batches
+                batch_size = 100
+                target = self.mr_page_size
+                skip_count = self.mr_page * self.mr_page_size  # items to skip for pagination
+                collected = []
+                offset = 0
+                api_total = 0
+                total_matched = 0
+
+                while True:
+                    api_total, batch = mr_api.fetch_mr_tasks(
+                        project_id=proj, release=rel, status=status,
+                        limit=batch_size, offset=offset)
+                    if not batch:
+                        break
+
+                    for t in batch:
+                        # MR# client-side filter
+                        if mr_iid_filter:
+                            if str(t.get("merge_request_iid", "")) != mr_iid_filter:
+                                continue
+
+                        # Hide empty MRs: check translation count
+                        if hide_empty:
+                            self._check_task_translations(t)
+                            if t.get("_translations_count", 0) == 0:
+                                continue
+
+                        total_matched += 1
+
+                        # Pagination: skip items for previous pages
+                        if skip_count > 0:
+                            skip_count -= 1
+                            continue
+
+                        if len(collected) < target:
+                            collected.append(t)
+
+                    offset += batch_size
+                    # Stop if we have enough items AND have scanned enough for total estimate
+                    if len(collected) >= target and offset >= api_total:
+                        break
+                    if offset >= api_total:
+                        break
+
+                self.parent.after(0, self._on_tasks_loaded, api_total, collected, total_matched)
         except Exception as e:
             self.parent.after(0, self._on_tasks_error, str(e))
 
-    def _on_tasks_loaded(self, total, tasks):
+    def _on_tasks_loaded(self, api_total, tasks, filtered_total):
         self.mr_loading = False
-        self.mr_total = total
+        self.mr_total = api_total
+        self.mr_filtered_total = filtered_total
 
         for item in self.mr_tree.get_children():
             self.mr_tree.delete(item)
 
-        hide_empty = self.mr_hide_empty_var.get()
         for i, t in enumerate(tasks):
-            # Skip tasks with 0 translations when Hide empty MRs is checked
-            if hide_empty and t.get("_translations_count", -1) == 0:
-                continue
             idx = self.mr_page * self.mr_page_size + i + 1
             created = (t.get("created_at") or "")[:19].replace("T", " ")
             updated = t.get("updated_at") or ""
@@ -349,17 +404,18 @@ class MRPipelineTab:
                 avg if avg is not None else "—", created, duration
             ), tags=(t.get("task_id", ""),))
 
-
-        # Pagination
-        total_pages = max(1, (total + self.mr_page_size - 1) // self.mr_page_size)
-        self.lbl_mr_page.configure(text=f"{self.mr_page + 1} / {total_pages}  ({total})")
+        # Pagination — use filtered_total when filters are active
+        effective_total = filtered_total
+        total_pages = max(1, (effective_total + self.mr_page_size - 1) // self.mr_page_size)
+        self.lbl_mr_page.configure(text=f"{self.mr_page + 1} / {total_pages}  ({effective_total})")
+        has_next = (self.mr_page + 1) * self.mr_page_size < effective_total
         if IS_MAC:
             self.btn_mr_prev.state(["!disabled"] if self.mr_page > 0 else ["disabled"])
-            self.btn_mr_next.state(["!disabled"] if (self.mr_page + 1) * self.mr_page_size < total else ["disabled"])
+            self.btn_mr_next.state(["!disabled"] if has_next else ["disabled"])
             self.btn_mr_export.state(["!disabled"] if tasks else ["disabled"])
         else:
             self.btn_mr_prev.configure(state="normal" if self.mr_page > 0 else "disabled")
-            self.btn_mr_next.configure(state="normal" if (self.mr_page + 1) * self.mr_page_size < total else "disabled")
+            self.btn_mr_next.configure(state="normal" if has_next else "disabled")
             self.btn_mr_export.configure(state="normal" if tasks else "disabled")
         self.lbl_mr_status_bar.configure(text=self._t("status_ready"))
 
