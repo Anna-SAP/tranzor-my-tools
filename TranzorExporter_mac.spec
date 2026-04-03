@@ -38,7 +38,7 @@ exe = EXE(
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=True,    # Mac 需要此选项支持双击运行
-    target_arch=None,       # 自动检测: x86_64 或 arm64
+    target_arch='universal2',  # 同时支持 Intel (x86_64) 和 Apple Silicon (arm64)
     codesign_identity=None,
     entitlements_file=None,
 )
