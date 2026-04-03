@@ -331,6 +331,7 @@ class MRPipelineTab:
                 offset = 0
                 api_total = 0
                 total_matched = 0
+                total_scanned = 0
 
                 while True:
                     api_total, batch = mr_api.fetch_mr_tasks(
@@ -340,6 +341,8 @@ class MRPipelineTab:
                         break
 
                     for t in batch:
+                        total_scanned += 1
+
                         # MR# client-side filter
                         if mr_iid_filter:
                             if str(t.get("merge_request_iid", "")) != mr_iid_filter:
@@ -362,13 +365,20 @@ class MRPipelineTab:
                             collected.append(t)
 
                     offset += batch_size
-                    # Stop if we have enough items AND have scanned enough for total estimate
-                    if len(collected) >= target and offset >= api_total:
+
+                    # Stop as soon as we have enough items for this page
+                    if len(collected) >= target:
                         break
                     if offset >= api_total:
                         break
 
-                self.parent.after(0, self._on_tasks_loaded, api_total, collected, total_matched)
+                # Estimate total matches from scanned portion
+                if total_scanned > 0 and total_scanned < api_total:
+                    estimated_total = int(total_matched * api_total / total_scanned)
+                else:
+                    estimated_total = total_matched
+
+                self.parent.after(0, self._on_tasks_loaded, api_total, collected, estimated_total)
         except Exception as e:
             self.parent.after(0, self._on_tasks_error, str(e))
 
