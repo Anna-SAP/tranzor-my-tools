@@ -532,7 +532,8 @@ def save_quality_file(aggregated, filename, label, fmt):
                 write_quality_excel(aggregated, save_path)
             print(f"已导出: {save_path}")
             if fmt == "html":
-                webbrowser.open(os.path.abspath(save_path))
+                from export_gui import open_in_browser
+                open_in_browser(save_path)
             return save_path
         except PermissionError:
             attempt_num = attempt + 1

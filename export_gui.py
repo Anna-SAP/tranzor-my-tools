@@ -11,6 +11,7 @@ import io
 import platform
 import threading
 import webbrowser
+import subprocess
 import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import date
@@ -26,6 +27,19 @@ if IS_MAC:  # macOS
 else:  # Windows / Linux
     FONT_FAMILY = "Segoe UI"
     FONT_MONO = "Consolas"
+
+
+def open_in_browser(filepath):
+    """Open a local file in the default browser — cross-platform."""
+    abspath = os.path.abspath(filepath)
+    if IS_MAC:
+        # macOS: 'open' command works on both Apple Silicon & Intel
+        subprocess.Popen(["open", abspath])
+    else:
+        # Windows / Linux: use file:// URI
+        import pathlib
+        url = pathlib.Path(abspath).as_uri()
+        webbrowser.open(url)
 
 try:
     import requests
@@ -973,13 +987,13 @@ class ExportApp:
             self.status_label.configure(text=self._t("status_done"))
             # Auto-open HTML reports in browser
             if filepath.lower().endswith(".html"):
-                webbrowser.open(os.path.abspath(filepath))
+                open_in_browser(filepath)
         else:
             self.status_label.configure(text=self._t("status_no_data"))
 
     def _on_open(self):
         if self.last_output_path and os.path.exists(self.last_output_path):
-            webbrowser.open(os.path.abspath(self.last_output_path))
+            open_in_browser(self.last_output_path)
 
 
 # ============================================================

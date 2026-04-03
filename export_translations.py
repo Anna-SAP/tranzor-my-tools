@@ -1073,7 +1073,8 @@ def save_file(rows, filename, label, fmt):
             try:
                 _write_index_html(index_path, label, lang_files, len(rows))
                 print(f"\n📑 Index page: {os.path.basename(index_path)}")
-                webbrowser.open(os.path.abspath(index_path))
+                from export_gui import open_in_browser
+                open_in_browser(index_path)
                 return
             except PermissionError:
                 index_path = f"{base}_{attempt+1}{ext}"
@@ -1089,7 +1090,8 @@ def save_file(rows, filename, label, fmt):
                     write_excel(rows, save_path)
                 print(f"已导出: {save_path}")
                 if fmt == "html":
-                    webbrowser.open(os.path.abspath(save_path))
+                    from export_gui import open_in_browser
+                    open_in_browser(save_path)
                 return
             except PermissionError:
                 attempt_num = attempt + 1
