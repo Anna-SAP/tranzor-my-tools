@@ -611,6 +611,8 @@ class QualityOverviewTab:
         rels = [""] + data.get("releases", [])
         self.cmb_qa_project.configure(values=pids)
         self.cmb_qa_release.configure(values=rels)
+        # Auto-load initial data so Language dropdown gets populated
+        self._load_data()
 
     def _on_search(self):
         self._load_data()
