@@ -18,7 +18,9 @@ from datetime import date
 # ---------------------------------------------------------------------------
 # 跨平台字体适配 — Mac 使用系统内置字体，Windows 使用 Segoe UI / Consolas
 # ---------------------------------------------------------------------------
-if platform.system() == "Darwin":  # macOS
+IS_MAC = platform.system() == "Darwin"
+
+if IS_MAC:  # macOS
     FONT_FAMILY = "Helvetica Neue"
     FONT_MONO = "Menlo"
 else:  # Windows / Linux
@@ -401,17 +403,102 @@ class ExportApp:
         style.map("Summary.Treeview.Heading",
                   background=[("active", "#1a3a6a")])
 
+        # ── macOS-compatible ttk.Button styles ──
+        if IS_MAC:
+            style.configure("Accent.TButton",
+                             background="#e94560", foreground="#ffffff",
+                             font=(FONT_FAMILY, 12, "bold"),
+                             padding=(20, 8))
+            style.map("Accent.TButton",
+                      background=[("active", "#ff6b81"), ("disabled", "#555555")],
+                      foreground=[("disabled", "#999999")])
+
+            style.configure("Secondary.TButton",
+                             background="#0f3460", foreground="#cccccc",
+                             font=(FONT_FAMILY, 10),
+                             padding=(12, 4))
+            style.map("Secondary.TButton",
+                      background=[("active", "#1a3a6a")],
+                      foreground=[("active", "#ffffff")])
+
+            style.configure("Success.TButton",
+                             background="#2ecc71", foreground="#ffffff",
+                             font=(FONT_FAMILY, 12),
+                             padding=(20, 8))
+            style.map("Success.TButton",
+                      background=[("active", "#27ae60")])
+
+            style.configure("AccentSmall.TButton",
+                             background="#e94560", foreground="#ffffff",
+                             font=(FONT_FAMILY, 10, "bold"),
+                             padding=(14, 3))
+            style.map("AccentSmall.TButton",
+                      background=[("active", "#ff6b81"), ("disabled", "#555555")],
+                      foreground=[("disabled", "#999999")])
+
+            style.configure("SuccessSmall.TButton",
+                             background="#2ecc71", foreground="#ffffff",
+                             font=(FONT_FAMILY, 10, "bold"),
+                             padding=(14, 4))
+            style.map("SuccessSmall.TButton",
+                      background=[("active", "#27ae60"), ("disabled", "#555555")],
+                      foreground=[("disabled", "#999999")])
+
+            style.configure("SecondarySmall.TButton",
+                             background="#0f3460", foreground="#cccccc",
+                             font=(FONT_FAMILY, 10),
+                             padding=(14, 3))
+            style.map("SecondarySmall.TButton",
+                      background=[("active", "#1a3a6a")],
+                      foreground=[("active", "#ffffff")])
+
+            style.configure("SecondaryTiny.TButton",
+                             background="#0f3460", foreground="#cccccc",
+                             font=(FONT_FAMILY, 9),
+                             padding=(10, 3))
+            style.map("SecondaryTiny.TButton",
+                      background=[("active", "#1a3a6a")],
+                      foreground=[("active", "#ffffff")])
+
+    # ── Cross-platform button factory ──
+    @staticmethod
+    def _create_button(parent, *, text="", command=None, style_name="Secondary",
+                       font=None, bg=None, fg=None, activebackground=None,
+                       activeforeground=None, padx=12, pady=4, state="normal",
+                       cursor="hand2", **extra_kw):
+        """Create a button that renders correctly on both macOS and Windows.
+        On macOS: returns ttk.Button with named style.
+        On Windows: returns tk.Button with explicit bg/fg colors.
+        """
+        if IS_MAC:
+            btn = ttk.Button(parent, text=text, command=command,
+                              style=f"{style_name}.TButton", cursor=cursor)
+            if state == "disabled":
+                btn.state(["disabled"])
+            return btn
+        else:
+            return tk.Button(
+                parent, text=text, command=command,
+                font=font or (FONT_FAMILY, 10),
+                bg=bg or "#0f3460", fg=fg or "#ccc",
+                activebackground=activebackground or "#1a3a6a",
+                activeforeground=activeforeground or "#fff",
+                relief="flat", cursor=cursor,
+                bd=0, padx=padx, pady=pady, state=state,
+                **extra_kw)
+
     def _build_ui(self):
         # ── Header ──
         header = ttk.Frame(self.root, style="App.TFrame")
         header.pack(fill="x", padx=24, pady=(16, 4))
 
         # Language toggle button (top-right)
-        self.btn_lang = tk.Button(
-            header, text="中文", font=(FONT_FAMILY, 10),
+        self.btn_lang = self._create_button(
+            header, text="中文", command=self._toggle_lang,
+            style_name="Secondary",
+            font=(FONT_FAMILY, 10),
             bg=self.ACCENT, fg="#ccc", activebackground="#1a3a6a",
-            activeforeground="#fff", relief="flat", cursor="hand2",
-            bd=0, padx=12, pady=2, command=self._toggle_lang)
+            activeforeground="#fff", padx=12, pady=2)
         self.btn_lang.pack(side="right", anchor="ne")
 
         self.lbl_title = ttk.Label(header, text="", style="Title.TLabel")
@@ -512,18 +599,21 @@ class ExportApp:
         btn_frame = ttk.Frame(left, style="App.TFrame")
         btn_frame.pack(fill="x", pady=(16, 0))
 
-        self.btn_run = tk.Button(
-            btn_frame, text="", font=(FONT_FAMILY, 12, "bold"),
-            bg=self.ACCENT_BTN, fg="#fff", activebackground=self.ACCENT_BTN_HOVER,
-            activeforeground="#fff", relief="flat", cursor="hand2",
-            bd=0, padx=20, pady=8, command=self._on_run)
+        self.btn_run = self._create_button(
+            btn_frame, text="", command=self._on_run,
+            style_name="Accent",
+            font=(FONT_FAMILY, 12, "bold"),
+            bg=self.ACCENT_BTN, fg="#fff",
+            activebackground=self.ACCENT_BTN_HOVER,
+            activeforeground="#fff", padx=20, pady=8)
         self.btn_run.pack(side="left")
 
-        self.btn_open = tk.Button(
-            btn_frame, text="", font=(FONT_FAMILY, 12),
-            bg=self.ACCENT, fg="#888", relief="flat",
-            bd=0, padx=20, pady=8, state="disabled",
-            command=self._on_open)
+        self.btn_open = self._create_button(
+            btn_frame, text="", command=self._on_open,
+            style_name="Secondary",
+            font=(FONT_FAMILY, 12),
+            bg=self.ACCENT, fg="#888",
+            padx=20, pady=8, state="disabled")
         self.btn_open.pack(side="left", padx=(12, 0))
 
         self.status_label = ttk.Label(btn_frame, text="", style="Status.TLabel")
@@ -639,11 +729,12 @@ class ExportApp:
         btn_bar = ttk.Frame(inner, style="Summary.TFrame")
         btn_bar.pack(fill="x", pady=(10, 0))
 
-        self.btn_refresh = tk.Button(
-            btn_bar, text="", font=(FONT_FAMILY, 9),
+        self.btn_refresh = self._create_button(
+            btn_bar, text="", command=self._load_summary_data,
+            style_name="SecondaryTiny",
+            font=(FONT_FAMILY, 9),
             bg=self.ACCENT, fg="#ccc", activebackground="#1a3a6a",
-            activeforeground="#fff", relief="flat", cursor="hand2",
-            bd=0, padx=12, pady=4, command=self._load_summary_data)
+            activeforeground="#fff", padx=12, pady=4)
         self.btn_refresh.pack(side="right")
 
     # ── i18n: refresh all visible text ──
@@ -781,8 +872,13 @@ class ExportApp:
 
         self.running = True
         self.last_output_path = None
-        self.btn_run.configure(state="disabled", bg="#555")
-        self.btn_open.configure(state="disabled", fg="#888")
+        if IS_MAC:
+            self.btn_run.state(["disabled"])
+            self.btn_open.state(["disabled"])
+            self.btn_open.configure(style="Secondary.TButton")
+        else:
+            self.btn_run.configure(state="disabled", bg="#555")
+            self.btn_open.configure(state="disabled", fg="#888")
         self.progress.start(15)
         self.status_label.configure(text=self._t("status_exporting"))
 
@@ -861,13 +957,23 @@ class ExportApp:
         """Export completion callback (main thread)."""
         self.running = False
         self.progress.stop()
-        self.btn_run.configure(state="normal", bg=self.ACCENT_BTN)
+        if IS_MAC:
+            self.btn_run.state(["!disabled"])
+        else:
+            self.btn_run.configure(state="normal", bg=self.ACCENT_BTN)
 
         if success and filepath:
             self.last_output_path = filepath
-            self.btn_open.configure(state="normal", fg="#fff",
-                                     bg=self.SUCCESS)
+            if IS_MAC:
+                self.btn_open.state(["!disabled"])
+                self.btn_open.configure(style="Success.TButton")
+            else:
+                self.btn_open.configure(state="normal", fg="#fff",
+                                         bg=self.SUCCESS)
             self.status_label.configure(text=self._t("status_done"))
+            # Auto-open HTML reports in browser
+            if filepath.lower().endswith(".html"):
+                webbrowser.open(os.path.abspath(filepath))
         else:
             self.status_label.configure(text=self._t("status_no_data"))
 

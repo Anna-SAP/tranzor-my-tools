@@ -11,7 +11,7 @@ from datetime import date, datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import export_mr_pipeline as mr_api
 import quality_overview as qa
-from export_gui import FONT_FAMILY
+from export_gui import FONT_FAMILY, IS_MAC
 
 
 # ============================================================
@@ -88,14 +88,62 @@ class MRPipelineTab:
                                     bg="#0a0a1a", fg="#fff", insertbackground="#fff", relief="flat")
         self.mr_date_to.pack(side="left", padx=(4, 12), ipady=3)
 
-        self.btn_mr_search = tk.Button(r2, text="", font=(FONT_FAMILY, 10, "bold"),
-                                        bg="#e94560", fg="#fff", relief="flat", cursor="hand2",
-                                        bd=0, padx=14, pady=3, command=self._on_search)
+        self.btn_mr_search = self.app._create_button(
+            r2, text="", command=self._on_search,
+            style_name="AccentSmall",
+            font=(FONT_FAMILY, 10, "bold"),
+            bg="#e94560", fg="#fff", padx=14, pady=3)
         self.btn_mr_search.pack(side="left", padx=(0, 6))
-        self.btn_mr_reset = tk.Button(r2, text="", font=(FONT_FAMILY, 10),
-                                       bg="#0f3460", fg="#ccc", relief="flat", cursor="hand2",
-                                       bd=0, padx=14, pady=3, command=self._on_reset)
+        self.btn_mr_reset = self.app._create_button(
+            r2, text="", command=self._on_reset,
+            style_name="SecondarySmall",
+            font=(FONT_FAMILY, 10),
+            bg="#0f3460", fg="#ccc", padx=14, pady=3)
         self.btn_mr_reset.pack(side="left")
+
+        # ── Action bar (Export + Pagination) — above table for visibility on macOS ──
+        action = ttk.Frame(left, style="App.TFrame")
+        action.pack(fill="x", pady=(6, 6))
+
+        self.btn_mr_export = self.app._create_button(
+            action, text="", command=self._on_export,
+            style_name="SuccessSmall",
+            font=(FONT_FAMILY, 10, "bold"),
+            bg="#2ecc71", fg="#fff", padx=14, pady=4, state="disabled")
+        self.btn_mr_export.pack(side="left")
+
+        self.lbl_mr_fmt = ttk.Label(action, text="", style="Card.TLabel")
+        self.lbl_mr_fmt.pack(side="left", padx=(16, 4))
+        self.mr_fmt_var = tk.StringVar(value="html")
+        ttk.Radiobutton(action, text="HTML", variable=self.mr_fmt_var, value="html",
+                         style="Card.TRadiobutton").pack(side="left", padx=(0, 6))
+        ttk.Radiobutton(action, text="Excel", variable=self.mr_fmt_var, value="xlsx",
+                         style="Card.TRadiobutton").pack(side="left")
+
+        self.lbl_mr_status_bar = ttk.Label(action, text="", style="Status.TLabel")
+        self.lbl_mr_status_bar.pack(side="left", padx=(16, 0))
+
+        # Pagination (right-aligned in action bar)
+        self.btn_mr_next = self.app._create_button(
+            action, text="▶", command=self._next_page,
+            style_name="SecondarySmall",
+            font=(FONT_FAMILY, 10), bg="#0f3460", fg="#ccc",
+            padx=8, state="disabled")
+        self.btn_mr_next.pack(side="right")
+        self.lbl_mr_page = ttk.Label(action, text="", style="Status.TLabel")
+        self.lbl_mr_page.pack(side="right", padx=4)
+        self.btn_mr_prev = self.app._create_button(
+            action, text="◀", command=self._prev_page,
+            style_name="SecondarySmall",
+            font=(FONT_FAMILY, 10), bg="#0f3460", fg="#ccc",
+            padx=8, state="disabled")
+        self.btn_mr_prev.pack(side="right")
+        self.btn_mr_refresh = self.app._create_button(
+            action, text="", command=self._refresh_tasks,
+            style_name="SecondaryTiny",
+            font=(FONT_FAMILY, 9), bg="#0f3460", fg="#ccc",
+            padx=10, pady=3)
+        self.btn_mr_refresh.pack(side="right", padx=(0, 8))
 
         # ── Task list table ──
         tree_frame = ttk.Frame(left, style="App.TFrame")
@@ -113,40 +161,6 @@ class MRPipelineTab:
         self.mr_tree.configure(yscrollcommand=scroll.set)
         self.mr_tree.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
-
-        # ── Pagination + Export ──
-        bot = ttk.Frame(left, style="App.TFrame")
-        bot.pack(fill="x")
-
-        self.btn_mr_prev = tk.Button(bot, text="◀", font=(FONT_FAMILY, 10), bg="#0f3460", fg="#ccc",
-                                      relief="flat", bd=0, padx=8, command=self._prev_page, state="disabled")
-        self.btn_mr_prev.pack(side="left")
-        self.lbl_mr_page = ttk.Label(bot, text="", style="Status.TLabel")
-        self.lbl_mr_page.pack(side="left", padx=8)
-        self.btn_mr_next = tk.Button(bot, text="▶", font=(FONT_FAMILY, 10), bg="#0f3460", fg="#ccc",
-                                      relief="flat", bd=0, padx=8, command=self._next_page, state="disabled")
-        self.btn_mr_next.pack(side="left")
-
-        self.btn_mr_refresh = tk.Button(bot, text="", font=(FONT_FAMILY, 9),
-                                         bg="#0f3460", fg="#ccc", relief="flat", cursor="hand2",
-                                         bd=0, padx=10, pady=3, command=self._refresh_tasks)
-        self.btn_mr_refresh.pack(side="left", padx=(12, 0))
-
-        self.lbl_mr_fmt = ttk.Label(bot, text="", style="Card.TLabel")
-        self.lbl_mr_fmt.pack(side="left", padx=(20, 4))
-        self.mr_fmt_var = tk.StringVar(value="html")
-        ttk.Radiobutton(bot, text="HTML", variable=self.mr_fmt_var, value="html",
-                         style="Card.TRadiobutton").pack(side="left", padx=(0, 6))
-        ttk.Radiobutton(bot, text="Excel", variable=self.mr_fmt_var, value="xlsx",
-                         style="Card.TRadiobutton").pack(side="left")
-
-        self.btn_mr_export = tk.Button(bot, text="", font=(FONT_FAMILY, 10, "bold"),
-                                        bg="#2ecc71", fg="#fff", relief="flat", cursor="hand2",
-                                        bd=0, padx=14, pady=4, command=self._on_export, state="disabled")
-        self.btn_mr_export.pack(side="right")
-
-        self.lbl_mr_status_bar = ttk.Label(bot, text="", style="Status.TLabel")
-        self.lbl_mr_status_bar.pack(side="right", padx=8)
 
         # ── Right sidebar: overview stats ──
         self._build_mr_sidebar(right)
@@ -179,10 +193,11 @@ class MRPipelineTab:
         self.lbl_mr_sidebar_status = ttk.Label(inner, text="", style="SummaryStatus.TLabel")
         self.lbl_mr_sidebar_status.pack(anchor="w", pady=(8, 0))
 
-        self.btn_mr_sidebar_refresh = tk.Button(
-            inner, text="", font=(FONT_FAMILY, 9), bg="#0f3460", fg="#ccc",
-            relief="flat", cursor="hand2", bd=0, padx=10, pady=3,
-            command=self._load_overview)
+        self.btn_mr_sidebar_refresh = self.app._create_button(
+            inner, text="", command=self._load_overview,
+            style_name="SecondaryTiny",
+            font=(FONT_FAMILY, 9), bg="#0f3460", fg="#ccc",
+            padx=10, pady=3)
         self.btn_mr_sidebar_refresh.pack(anchor="e", pady=(8, 0))
 
     def refresh_text(self):
@@ -306,9 +321,14 @@ class MRPipelineTab:
         # Pagination
         total_pages = max(1, (total + self.mr_page_size - 1) // self.mr_page_size)
         self.lbl_mr_page.configure(text=f"{self.mr_page + 1} / {total_pages}  ({total})")
-        self.btn_mr_prev.configure(state="normal" if self.mr_page > 0 else "disabled")
-        self.btn_mr_next.configure(state="normal" if (self.mr_page + 1) * self.mr_page_size < total else "disabled")
-        self.btn_mr_export.configure(state="normal" if tasks else "disabled")
+        if IS_MAC:
+            self.btn_mr_prev.state(["!disabled"] if self.mr_page > 0 else ["disabled"])
+            self.btn_mr_next.state(["!disabled"] if (self.mr_page + 1) * self.mr_page_size < total else ["disabled"])
+            self.btn_mr_export.state(["!disabled"] if tasks else ["disabled"])
+        else:
+            self.btn_mr_prev.configure(state="normal" if self.mr_page > 0 else "disabled")
+            self.btn_mr_next.configure(state="normal" if (self.mr_page + 1) * self.mr_page_size < total else "disabled")
+            self.btn_mr_export.configure(state="normal" if tasks else "disabled")
         self.lbl_mr_status_bar.configure(text=self._t("status_ready"))
 
     def _on_tasks_error(self, err):
@@ -324,7 +344,10 @@ class MRPipelineTab:
             return
         task_id = tags[0]
         fmt = self.mr_fmt_var.get()
-        self.btn_mr_export.configure(state="disabled")
+        if IS_MAC:
+            self.btn_mr_export.state(["disabled"])
+        else:
+            self.btn_mr_export.configure(state="disabled")
         self.lbl_mr_status_bar.configure(text=self._t("status_exporting"))
         threading.Thread(target=self._run_export, args=(task_id, fmt), daemon=True).start()
 
@@ -342,7 +365,12 @@ class MRPipelineTab:
         except Exception as e:
             self.parent.after(0, lambda: self.lbl_mr_status_bar.configure(text=f"❌ {str(e)[:50]}"))
         finally:
-            self.parent.after(0, lambda: self.btn_mr_export.configure(state="normal"))
+            def _restore():
+                if IS_MAC:
+                    self.btn_mr_export.state(["!disabled"])
+                else:
+                    self.btn_mr_export.configure(state="normal")
+            self.parent.after(0, _restore)
 
     def _load_overview(self):
         if self.mr_overview_loading:
@@ -440,13 +468,17 @@ class QualityOverviewTab:
         self.cmb_qa_lang = ttk.Combobox(r1, textvariable=self.qa_lang_var, width=12)
         self.cmb_qa_lang.pack(side="left", padx=(4, 12))
 
-        self.btn_qa_search = tk.Button(r1, text="", font=(FONT_FAMILY, 10, "bold"),
-                                        bg="#e94560", fg="#fff", relief="flat", cursor="hand2",
-                                        bd=0, padx=14, pady=3, command=self._on_search)
+        self.btn_qa_search = self.app._create_button(
+            r1, text="", command=self._on_search,
+            style_name="AccentSmall",
+            font=(FONT_FAMILY, 10, "bold"),
+            bg="#e94560", fg="#fff", padx=14, pady=3)
         self.btn_qa_search.pack(side="left", padx=(12, 6))
-        self.btn_qa_reset = tk.Button(r1, text="", font=(FONT_FAMILY, 10),
-                                       bg="#0f3460", fg="#ccc", relief="flat", cursor="hand2",
-                                       bd=0, padx=14, pady=3, command=self._on_reset)
+        self.btn_qa_reset = self.app._create_button(
+            r1, text="", command=self._on_reset,
+            style_name="SecondarySmall",
+            font=(FONT_FAMILY, 10),
+            bg="#0f3460", fg="#ccc", padx=14, pady=3)
         self.btn_qa_reset.pack(side="left")
 
         # ── Summary cards ──
@@ -530,9 +562,11 @@ class QualityOverviewTab:
         ttk.Radiobutton(ebar, text="Excel", variable=self.qa_fmt_var, value="xlsx",
                          style="Card.TRadiobutton").pack(side="left")
 
-        self.btn_qa_export = tk.Button(ebar, text="", font=(FONT_FAMILY, 10, "bold"),
-                                        bg="#2ecc71", fg="#fff", relief="flat", cursor="hand2",
-                                        bd=0, padx=14, pady=4, command=self._on_export, state="disabled")
+        self.btn_qa_export = self.app._create_button(
+            ebar, text="", command=self._on_export,
+            style_name="SuccessSmall",
+            font=(FONT_FAMILY, 10, "bold"),
+            bg="#2ecc71", fg="#fff", padx=14, pady=4, state="disabled")
         self.btn_qa_export.pack(side="right")
         self.lbl_qa_status = ttk.Label(ebar, text="", style="Status.TLabel")
         self.lbl_qa_status.pack(side="right", padx=8)
@@ -610,13 +644,23 @@ class QualityOverviewTab:
         self.qa_loading = False
         self.aggregated = agg
         self.lbl_qa_status.configure(text=self._t("status_ready"))
-        self.btn_qa_export.configure(state="normal")
+        if IS_MAC:
+            self.btn_qa_export.state(["!disabled"])
+        else:
+            self.btn_qa_export.configure(state="normal")
 
         # Update cards
         self.qa_cards["total_tasks"][0].configure(text=str(agg["total_tasks"]))
         self.qa_cards["total_translations"][0].configure(text=str(agg["total_translations"]))
         self.qa_cards["avg_score"][0].configure(text=str(agg["overall_avg_score"]))
         self.qa_cards["low_score"][0].configure(text=str(agg["low_score_count"]))
+
+        # Populate Language combobox from aggregated data
+        langs = sorted(ld["language"] for ld in agg.get("by_language", []) if ld.get("language"))
+        current = self.qa_lang_var.get()
+        self.cmb_qa_lang.configure(values=[""] + langs)
+        if current and current in langs:
+            self.qa_lang_var.set(current)
 
         # Draw charts
         self.bar_canvas.update_idletasks()
@@ -653,7 +697,10 @@ class QualityOverviewTab:
         if not self.aggregated:
             return
         fmt = self.qa_fmt_var.get()
-        self.btn_qa_export.configure(state="disabled")
+        if IS_MAC:
+            self.btn_qa_export.state(["disabled"])
+        else:
+            self.btn_qa_export.configure(state="disabled")
         self.lbl_qa_status.configure(text=self._t("status_exporting"))
         threading.Thread(target=self._run_export, args=(fmt,), daemon=True).start()
 
@@ -670,4 +717,9 @@ class QualityOverviewTab:
         except Exception as e:
             self.parent.after(0, lambda: self.lbl_qa_status.configure(text=f"❌ {str(e)[:50]}"))
         finally:
-            self.parent.after(0, lambda: self.btn_qa_export.configure(state="normal"))
+            def _restore():
+                if IS_MAC:
+                    self.btn_qa_export.state(["!disabled"])
+                else:
+                    self.btn_qa_export.configure(state="normal")
+            self.parent.after(0, _restore)
