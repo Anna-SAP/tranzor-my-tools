@@ -11,11 +11,32 @@ import difflib
 import html as html_mod
 import json
 import os
+import re
 import sys
 import time
 import webbrowser
 from collections import OrderedDict
 from datetime import date
+
+
+def _tokenize(text):
+    """Split text into diff-friendly tokens.
+
+    CJK characters become individual tokens so that character-level diffs work.
+    Latin/space runs stay as whole words so that word-level diffs remain clean.
+    Placeholders like %n, %s, %1$s are kept as atomic tokens.
+    """
+    return re.findall(
+        r'%\d*\$?[sdnf]'           # printf placeholders: %s %n %1$s etc.
+        r'|[A-Za-z0-9_.@:/-]+'     # latin words / numbers / URLs
+        r'|[\u2E80-\u9FFF\uF900-\uFAFF\uFE30-\uFE4F'
+        r'\U00020000-\U0002A6DF'    # CJK unified ideographs
+        r'\u3040-\u309F\u30A0-\u30FF'  # hiragana + katakana
+        r'\uAC00-\uD7AF]'          # hangul
+        r'|\S'                      # any other non-space char (punctuation etc.)
+        r'|\s+',                    # whitespace runs
+        text
+    )
 
 try:
     import requests
@@ -409,44 +430,44 @@ def fetch_dashboard_cases(project_id=None, release=None, language=None,
 # ---------------------------------------------------------------------------
 def _word_diff_html(before, after):
     """HTML word-level diff: red strikethrough = deleted, green highlight = added."""
-    before_words = before.split()
-    after_words = after.split()
-    sm = difflib.SequenceMatcher(None, before_words, after_words)
+    before_tokens = _tokenize(before)
+    after_tokens = _tokenize(after)
+    sm = difflib.SequenceMatcher(None, before_tokens, after_tokens)
     parts = []
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
         if tag == "equal":
-            parts.append(html_mod.escape(" ".join(before_words[i1:i2])))
+            parts.append(html_mod.escape("".join(before_tokens[i1:i2])))
         elif tag == "replace":
-            old = html_mod.escape(" ".join(before_words[i1:i2]))
-            new = html_mod.escape(" ".join(after_words[j1:j2]))
+            old = html_mod.escape("".join(before_tokens[i1:i2]))
+            new = html_mod.escape("".join(after_tokens[j1:j2]))
             parts.append(f'<del style="background:#fdd;text-decoration:line-through;color:#c00;">{old}</del>')
             parts.append(f'<ins style="background:#dfd;text-decoration:none;color:#060;">{new}</ins>')
         elif tag == "delete":
-            old = html_mod.escape(" ".join(before_words[i1:i2]))
+            old = html_mod.escape("".join(before_tokens[i1:i2]))
             parts.append(f'<del style="background:#fdd;text-decoration:line-through;color:#c00;">{old}</del>')
         elif tag == "insert":
-            new = html_mod.escape(" ".join(after_words[j1:j2]))
+            new = html_mod.escape("".join(after_tokens[j1:j2]))
             parts.append(f'<ins style="background:#dfd;text-decoration:none;color:#060;">{new}</ins>')
-    return " ".join(parts)
+    return "".join(parts)
 
 
 def _word_diff_text(before, after):
     """Plain text word-level diff: [-deleted] [+added]."""
-    before_words = before.split()
-    after_words = after.split()
-    sm = difflib.SequenceMatcher(None, before_words, after_words)
+    before_tokens = _tokenize(before)
+    after_tokens = _tokenize(after)
+    sm = difflib.SequenceMatcher(None, before_tokens, after_tokens)
     parts = []
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
         if tag == "equal":
-            parts.append(" ".join(before_words[i1:i2]))
+            parts.append("".join(before_tokens[i1:i2]))
         elif tag == "replace":
-            parts.append("[-" + " ".join(before_words[i1:i2]) + "]")
-            parts.append("[+" + " ".join(after_words[j1:j2]) + "]")
+            parts.append("[-" + "".join(before_tokens[i1:i2]) + "]")
+            parts.append("[+" + "".join(after_tokens[j1:j2]) + "]")
         elif tag == "delete":
-            parts.append("[-" + " ".join(before_words[i1:i2]) + "]")
+            parts.append("[-" + "".join(before_tokens[i1:i2]) + "]")
         elif tag == "insert":
-            parts.append("[+" + " ".join(after_words[j1:j2]) + "]")
-    return " ".join(parts)
+            parts.append("[+" + "".join(after_tokens[j1:j2]) + "]")
+    return "".join(parts)
 
 
 def write_mr_html(results_data, filename, label):
