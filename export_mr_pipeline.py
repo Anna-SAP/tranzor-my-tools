@@ -7,6 +7,7 @@ MR Pipeline API 数据获取与导出模块
 API 基础路径: /api/v1
 """
 
+import difflib
 import html as html_mod
 import json
 import os
@@ -208,6 +209,157 @@ def collect_all_mr_results(progress_callback=None):
 
 
 # ---------------------------------------------------------------------------
+# 4c) 检测同一 MR 下所有 task 之间的翻译变更
+# ---------------------------------------------------------------------------
+def detect_mr_changes(task_id, progress_callback=None):
+    """检测给定 task 所属 MR 的全生命周期翻译变更。
+
+    算法：找到同一 MR 的全部 completed task，按时间排序，
+    逐对相邻 task 比较 (opus_id, target_language) 的 translated_text。
+
+    Returns:
+        list[dict]: 每条记录代表一次翻译文本变更，包含 prev_translated_text 等字段
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    log = progress_callback or print
+
+    # Step 1: 获取当前 task 详情，提取 project_id 和 merge_request_iid
+    log("  正在获取任务详情...")
+    detail = fetch_mr_task_detail(task_id)
+    project_id = detail.get("project_id")
+    mr_iid = detail.get("merge_request_iid")
+    if not project_id or not mr_iid:
+        log("  ⚠ 无法获取 project_id 或 merge_request_iid")
+        return []
+
+    # Step 2: 获取同一 MR 的全部 completed task
+    log(f"  正在获取 {project_id} MR#{mr_iid} 的所有任务...")
+    all_tasks = []
+    offset = 0
+    batch_size = 100
+    while True:
+        total, batch = fetch_mr_tasks(project_id=project_id,
+                                      status="completed",
+                                      limit=batch_size, offset=offset)
+        # 客户端按 mr_iid 过滤（API 不支持 mr_id 参数）
+        for t in batch:
+            if t.get("merge_request_iid") == mr_iid:
+                all_tasks.append(t)
+        if not batch or offset + batch_size >= total:
+            break
+        offset += batch_size
+
+    # 按 created_at 升序排列
+    all_tasks.sort(key=lambda t: t.get("created_at", ""))
+    log(f"  找到 {len(all_tasks)} 个同 MR 的已完成任务")
+
+    if len(all_tasks) < 2:
+        log("  仅有 1 个任务，无法检测变更")
+        return []
+
+    # Step 3: 并发获取每个 task 的翻译结果
+    log("  正在获取各任务的翻译结果...")
+    task_results = {}  # task_id -> translations list
+    total_count = len(all_tasks)
+
+    def _fetch_one(task_info):
+        idx, task = task_info
+        tid = task.get("task_id")
+        if not tid:
+            return tid, []
+        try:
+            results = fetch_mr_results(tid)
+            trs = results.get("translations", [])
+            log(f"  [{idx}/{total_count}] Task {tid[:8]}… — {len(trs)} 条翻译")
+            return tid, trs
+        except Exception as e:
+            log(f"  ⚠ [{idx}/{total_count}] Task {tid[:8]}… 获取失败: {e}")
+            return tid, []
+
+    task_infos = [(i + 1, t) for i, t in enumerate(all_tasks)]
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        futures = {pool.submit(_fetch_one, info): info for info in task_infos}
+        for f in as_completed(futures):
+            tid, trs = f.result()
+            if tid:
+                task_results[tid] = trs
+
+    # Step 4: 尝试从 Dashboard Cases API 获取 fixed_by_lead 信息
+    log("  正在获取 Language Lead 修改记录...")
+    fixed_by_map = {}  # (opus_id, target_language) -> fixed_by_lead
+    try:
+        cases_data = fetch_dashboard_cases(
+            project_id=project_id, mr_limit=50)
+        for mr_item in cases_data.get("mrs", []):
+            if mr_item.get("mr_iid") != mr_iid:
+                continue
+            for case in mr_item.get("cases", []):
+                fixer = case.get("fixed_by_lead")
+                if fixer:
+                    key = (case.get("opus_id", ""),
+                           case.get("target_language", ""))
+                    fixed_by_map[key] = fixer
+    except Exception as e:
+        log(f"  ⚠ 获取 Language Lead 信息失败: {e}")
+
+    # MR-level metadata from task detail
+    mr_meta = {
+        "mr_link": detail.get("mr_link", ""),
+        "project_id": project_id,
+        "mr_iid": mr_iid,
+        "release": detail.get("release", ""),
+        "jira_ticket_id": detail.get("jira_ticket_id", ""),
+    }
+
+    # Step 5: 逐对相邻 task 做 diff
+    changes = []
+    for i in range(len(all_tasks) - 1):
+        prev_task = all_tasks[i]
+        curr_task = all_tasks[i + 1]
+        prev_tid = prev_task.get("task_id")
+        curr_tid = curr_task.get("task_id")
+
+        prev_trs = task_results.get(prev_tid, [])
+        curr_trs = task_results.get(curr_tid, [])
+
+        # Build prev text map: (opus_id, target_language) -> translated_text
+        prev_map = {}
+        for t in prev_trs:
+            key = (t.get("opus_id", ""), t.get("target_language", ""))
+            prev_map[key] = t.get("translated_text", "")
+
+        # Compare current with previous
+        for t in curr_trs:
+            key = (t.get("opus_id", ""), t.get("target_language", ""))
+            curr_text = t.get("translated_text", "")
+            prev_text = prev_map.get(key)
+
+            if prev_text is not None and prev_text != curr_text:
+                changes.append({
+                    **mr_meta,
+                    "opus_id": t.get("opus_id", ""),
+                    "source_text": t.get("source_text", ""),
+                    "target_language": t.get("target_language", ""),
+                    "prev_translated_text": prev_text,
+                    "translated_text": curr_text,
+                    "prev_task_id": prev_tid,
+                    "task_id": curr_tid,
+                    "prev_task_created": prev_task.get("created_at", ""),
+                    "task_created": curr_task.get("created_at", ""),
+                    "fixed_by": fixed_by_map.get(key, ""),
+                    "final_score": t.get("final_score"),
+                    "error_category": t.get("error_category"),
+                    "reason": t.get("reason"),
+                    "iteration": t.get("iteration"),
+                })
+
+    log(f"\n  ✓ 检测到 {len(changes)} 条翻译变更 "
+        f"(跨 {len(all_tasks)} 个任务)")
+    return changes
+
+
+# ---------------------------------------------------------------------------
 # 5) Dashboard 概览
 # ---------------------------------------------------------------------------
 def fetch_dashboard_overview(project_id=None, release=None,
@@ -255,11 +407,56 @@ def fetch_dashboard_cases(project_id=None, release=None, language=None,
 # ---------------------------------------------------------------------------
 # 7) HTML 导出 — MR 翻译结果
 # ---------------------------------------------------------------------------
+def _word_diff_html(before, after):
+    """HTML word-level diff: red strikethrough = deleted, green highlight = added."""
+    before_words = before.split()
+    after_words = after.split()
+    sm = difflib.SequenceMatcher(None, before_words, after_words)
+    parts = []
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            parts.append(html_mod.escape(" ".join(before_words[i1:i2])))
+        elif tag == "replace":
+            old = html_mod.escape(" ".join(before_words[i1:i2]))
+            new = html_mod.escape(" ".join(after_words[j1:j2]))
+            parts.append(f'<del style="background:#fdd;text-decoration:line-through;color:#c00;">{old}</del>')
+            parts.append(f'<ins style="background:#dfd;text-decoration:none;color:#060;">{new}</ins>')
+        elif tag == "delete":
+            old = html_mod.escape(" ".join(before_words[i1:i2]))
+            parts.append(f'<del style="background:#fdd;text-decoration:line-through;color:#c00;">{old}</del>')
+        elif tag == "insert":
+            new = html_mod.escape(" ".join(after_words[j1:j2]))
+            parts.append(f'<ins style="background:#dfd;text-decoration:none;color:#060;">{new}</ins>')
+    return " ".join(parts)
+
+
+def _word_diff_text(before, after):
+    """Plain text word-level diff: [-deleted] [+added]."""
+    before_words = before.split()
+    after_words = after.split()
+    sm = difflib.SequenceMatcher(None, before_words, after_words)
+    parts = []
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            parts.append(" ".join(before_words[i1:i2]))
+        elif tag == "replace":
+            parts.append("[-" + " ".join(before_words[i1:i2]) + "]")
+            parts.append("[+" + " ".join(after_words[j1:j2]) + "]")
+        elif tag == "delete":
+            parts.append("[-" + " ".join(before_words[i1:i2]) + "]")
+        elif tag == "insert":
+            parts.append("[+" + " ".join(after_words[j1:j2]) + "]")
+    return " ".join(parts)
+
+
 def write_mr_html(results_data, filename, label):
     """生成 MR 翻译结果 HTML 报告（含 Filter + TMX 导出 + 评估列）"""
     translations = results_data.get("translations", [])
     summary = results_data.get("summary", {})
     task_id = results_data.get("task_id", "")
+
+    # Detect if this is a "changes" export (translations have prev_translated_text)
+    is_changes = any(t.get("prev_translated_text") is not None for t in translations)
 
     lang_colors = [
         ("#4472C4", "#e8eef7"), ("#E67E22", "#fdf2e6"),
@@ -279,7 +476,7 @@ def write_mr_html(results_data, filename, label):
     all_langs = set()
     for lang_rows_list in groups.values():
         for r in lang_rows_list:
-            js_rows.append({
+            row_data = {
                 "source_text": r.get("source_text", ""),
                 "translated_text": r.get("translated_text", ""),
                 "language": r.get("target_language", ""),
@@ -287,7 +484,14 @@ def write_mr_html(results_data, filename, label):
                 "score": r.get("final_score"),
                 "error_category": r.get("error_category") or "",
                 "reason": r.get("reason") or "",
-            })
+            }
+            if is_changes:
+                row_data["prev_translated_text"] = r.get("prev_translated_text", "")
+                row_data["fixed_by"] = r.get("fixed_by", "")
+                row_data["mr_link"] = r.get("mr_link", "")
+                row_data["release"] = r.get("release", "")
+                row_data["jira_ticket_id"] = r.get("jira_ticket_id", "")
+            js_rows.append(row_data)
             all_langs.add(r.get("target_language", ""))
     rows_json = json.dumps(js_rows, ensure_ascii=False)
     langs_json = json.dumps(sorted(all_langs), ensure_ascii=False)
@@ -315,6 +519,31 @@ def write_mr_html(results_data, filename, label):
             err_cat = r.get("error_category") or "—"
             reason = r.get("reason") or ""
 
+            # Build diff columns for changes mode
+            diff_cols = ""
+            if is_changes:
+                prev_text = r.get("prev_translated_text", "")
+                curr_text = r.get("translated_text", "")
+                diff_html = _word_diff_html(prev_text, curr_text)
+                task_time = r.get("task_created", "")[:16].replace("T", " ")
+                fixed_by = r.get("fixed_by", "")
+                mr_link = r.get("mr_link", "")
+                mr_link_html = (f'<a href="{html_mod.escape(mr_link)}" target="_blank">'
+                                f'MR#{r.get("mr_iid", "")}</a>') if mr_link else "—"
+                release = r.get("release", "") or "—"
+                jira_id = r.get("jira_ticket_id", "")
+                jira_html = (f'<a href="https://jira.ringcentral.com/browse/{html_mod.escape(jira_id)}"'
+                             f' target="_blank">{html_mod.escape(jira_id)}</a>') if jira_id else "—"
+                diff_cols = (
+                    f'<td class="prev-translated">{html_mod.escape(prev_text)}</td>'
+                    f'<td class="diff">{diff_html}</td>'
+                    f'<td class="task-time">{html_mod.escape(task_time)}</td>'
+                    f'<td class="fixed-by">{html_mod.escape(fixed_by) if fixed_by else "—"}</td>'
+                    f'<td class="mr-link">{mr_link_html}</td>'
+                    f'<td class="release">{html_mod.escape(release)}</td>'
+                    f'<td class="jira">{jira_html}</td>'
+                )
+
             rows_html.append(
                 f'<tr>'
                 f'<td class="cb-cell"><input type="checkbox" class="row-cb" data-idx="{global_idx}"></td>'
@@ -322,6 +551,7 @@ def write_mr_html(results_data, filename, label):
                 f'<td class="key">{html_mod.escape(r.get("opus_id", ""))}</td>'
                 f'<td class="lang">{html_mod.escape(lang_name)}</td>'
                 f'<td class="source">{html_mod.escape(r.get("source_text", ""))}</td>'
+                f'{diff_cols}'
                 f'<td class="translated">{html_mod.escape(r.get("translated_text", ""))}</td>'
                 f'<td class="score"{score_class}>{score_str}</td>'
                 f'<td class="err-cat">{html_mod.escape(err_cat)}</td>'
@@ -347,7 +577,10 @@ def write_mr_html(results_data, filename, label):
             f'<table><thead><tr style="background:{header_bg};">'
             f'<th class="cb-cell"><input type="checkbox" class="section-cb"></th>'
             f'<th>#</th><th>String Key</th><th>Lang</th>'
-            f'<th>Source (en-US)</th><th>Translated</th>'
+            f'<th>Source (en-US)</th>'
+            + (f'<th>Previous Translation</th><th>Diff</th><th>Changed At</th>'
+               f'<th>Fixed By</th><th>MR</th><th>Release</th><th>JIRA</th>' if is_changes else '')
+            + f'<th>Translated</th>'
             f'<th>Score</th><th>Error Category</th><th>Reason</th>'
             f'</tr></thead><tbody>{table_rows}</tbody></table></div>'
         )
@@ -906,15 +1139,28 @@ def write_mr_excel(results_data, filename):
         return
 
     translations = results_data.get("translations", [])
+    is_changes = any(t.get("prev_translated_text") is not None for t in translations)
+
     wb = Workbook()
     ws = wb.active
     ws.title = "MR Translations"
 
-    # Header
-    headers = ["#", "String Key", "Language", "Source Text",
-               "Translated Text", "Score", "Error Category", "Reason", "Iteration"]
+    # Header — extra columns for changes mode
+    if is_changes:
+        headers = ["#", "String Key", "Language", "Source Text",
+                   "Previous Translation", "Current Translation", "Diff",
+                   "Changed At", "Fixed By", "MR", "Release", "JIRA",
+                   "Score", "Error Category", "Reason"]
+        widths = [6, 30, 10, 40, 40, 40, 50, 18, 25, 12, 18, 16, 8, 18, 30]
+    else:
+        headers = ["#", "String Key", "Language", "Source Text",
+                   "Translated Text", "Score", "Error Category", "Reason", "Iteration"]
+        widths = [6, 30, 10, 40, 40, 8, 18, 30, 8]
+
     header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
     header_font = Font(bold=True, color="FFFFFF", size=11)
+    diff_del_font = Font(color="CC0000", strikethrough=True)
+    diff_ins_font = Font(color="006600", bold=True)
 
     for col_i, h in enumerate(headers, 1):
         cell = ws.cell(row=1, column=col_i, value=h)
@@ -928,27 +1174,62 @@ def write_mr_excel(results_data, filename):
         ws.cell(row=row_i, column=2, value=t.get("opus_id", ""))
         ws.cell(row=row_i, column=3, value=t.get("target_language", ""))
         ws.cell(row=row_i, column=4, value=t.get("source_text", ""))
-        ws.cell(row=row_i, column=5, value=t.get("translated_text", ""))
-        score = t.get("final_score")
-        ws.cell(row=row_i, column=6, value=score if score is not None else "")
-        ws.cell(row=row_i, column=7, value=t.get("error_category") or "")
-        ws.cell(row=row_i, column=8, value=t.get("reason") or "")
-        ws.cell(row=row_i, column=9, value=t.get("iteration", 1))
 
-        # Color-code score
-        if score is not None:
-            score_cell = ws.cell(row=row_i, column=6)
-            if score < 80:
-                score_cell.font = Font(color="E74C3C", bold=True)
-            elif score < 95:
-                score_cell.font = Font(color="E67E22", bold=True)
-            else:
-                score_cell.font = Font(color="27AE60")
+        if is_changes:
+            ws.cell(row=row_i, column=5, value=t.get("prev_translated_text", ""))
+            ws.cell(row=row_i, column=6, value=t.get("translated_text", ""))
+            diff_text = _word_diff_text(
+                t.get("prev_translated_text", ""),
+                t.get("translated_text", ""))
+            ws.cell(row=row_i, column=7, value=diff_text)
+            task_time = t.get("task_created", "")[:16].replace("T", " ")
+            ws.cell(row=row_i, column=8, value=task_time)
+            ws.cell(row=row_i, column=9, value=t.get("fixed_by") or "")
+            mr_link = t.get("mr_link", "")
+            ws.cell(row=row_i, column=10, value=f'MR#{t.get("mr_iid", "")}')
+            if mr_link:
+                ws.cell(row=row_i, column=10).hyperlink = mr_link
+                ws.cell(row=row_i, column=10).font = Font(color="0563C1", underline="single")
+            ws.cell(row=row_i, column=11, value=t.get("release") or "")
+            jira_id = t.get("jira_ticket_id") or ""
+            ws.cell(row=row_i, column=12, value=jira_id)
+            if jira_id:
+                ws.cell(row=row_i, column=12).hyperlink = f"https://jira.ringcentral.com/browse/{jira_id}"
+                ws.cell(row=row_i, column=12).font = Font(color="0563C1", underline="single")
+            score = t.get("final_score")
+            ws.cell(row=row_i, column=13, value=score if score is not None else "")
+            ws.cell(row=row_i, column=14, value=t.get("error_category") or "")
+            ws.cell(row=row_i, column=15, value=t.get("reason") or "")
+
+            if score is not None:
+                score_cell = ws.cell(row=row_i, column=13)
+                if score < 80:
+                    score_cell.font = Font(color="E74C3C", bold=True)
+                elif score < 95:
+                    score_cell.font = Font(color="E67E22", bold=True)
+                else:
+                    score_cell.font = Font(color="27AE60")
+        else:
+            ws.cell(row=row_i, column=5, value=t.get("translated_text", ""))
+            score = t.get("final_score")
+            ws.cell(row=row_i, column=6, value=score if score is not None else "")
+            ws.cell(row=row_i, column=7, value=t.get("error_category") or "")
+            ws.cell(row=row_i, column=8, value=t.get("reason") or "")
+            ws.cell(row=row_i, column=9, value=t.get("iteration", 1))
+
+            if score is not None:
+                score_cell = ws.cell(row=row_i, column=6)
+                if score < 80:
+                    score_cell.font = Font(color="E74C3C", bold=True)
+                elif score < 95:
+                    score_cell.font = Font(color="E67E22", bold=True)
+                else:
+                    score_cell.font = Font(color="27AE60")
 
     # Column widths
-    widths = [6, 30, 10, 40, 40, 8, 18, 30, 8]
     for i, w in enumerate(widths, 1):
-        ws.column_dimensions[chr(64 + i)].width = w
+        col_letter = chr(64 + i) if i <= 26 else chr(64 + (i - 1) // 26) + chr(65 + (i - 1) % 26)
+        ws.column_dimensions[col_letter].width = w
 
     wb.save(filename)
 

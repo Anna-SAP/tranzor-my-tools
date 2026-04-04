@@ -467,27 +467,21 @@ class MRPipelineTab:
 
     def _run_export(self, task_id, fmt, export_type="changes"):
         try:
-            if task_id:
-                # Single task export
-                results = mr_api.fetch_mr_results(task_id)
-                id_tag = task_id[:8]
-            else:
-                # Export all completed tasks
-                results = mr_api.collect_all_mr_results()
-                id_tag = "all_tasks"
-
-            # Filter translations based on export type
             if export_type == "changes":
-                all_translations = results.get("translations", [])
-                filtered = [
-                    t for t in all_translations
-                    if (t.get("final_score") is not None and t.get("final_score") < 100)
-                    or t.get("error_category")
-                ]
-                results = dict(results)  # shallow copy to avoid mutating cached data
-                results["translations"] = filtered
+                if not task_id:
+                    raise ValueError("请先选择一个翻译任务以导出变更")
+                # 自动关联 MR，汇总该 MR 全部 task 的翻译变更
+                changes = mr_api.detect_mr_changes(task_id)
+                results = {"translations": changes, "summary": {}}
+                id_tag = task_id[:8]
                 type_tag = "changes"
             else:
+                if task_id:
+                    results = mr_api.fetch_mr_results(task_id)
+                    id_tag = task_id[:8]
+                else:
+                    results = mr_api.collect_all_mr_results()
+                    id_tag = "all_tasks"
                 type_tag = "all"
 
             ext = ".xlsx" if fmt == "xlsx" else ".html"
