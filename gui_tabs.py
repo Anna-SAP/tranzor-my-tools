@@ -29,6 +29,8 @@ class MRPipelineTab:
         self.mr_filtered_total = 0
         self.mr_loading = False
         self.mr_overview_loading = False
+        self._loading_anim_id = None
+        self._loading_dot_count = 0
         self._build(parent)
 
     def _t(self, key):
@@ -188,6 +190,16 @@ class MRPipelineTab:
         self.mr_tree.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
 
+        # Loading overlay — large centered text over the Treeview area
+        self.mr_loading_overlay = tk.Label(
+            tree_frame,
+            text="",
+            font=(FONT_FAMILY, 15),
+            fg="#9aa0b0",
+            bg=self.app.BG,
+            anchor="center",
+        )
+
         # ── Right sidebar: overview stats ──
         self._build_mr_sidebar(right)
 
@@ -303,8 +315,44 @@ class MRPipelineTab:
         if self.mr_loading:
             return
         self.mr_loading = True
-        self.lbl_mr_status_bar.configure(text=self._t("status_exporting"))
+        # Show prominent loading overlay in the data grid area
+        self.mr_loading_overlay.configure(text=self._t("status_loading") + "...")
+        self.mr_loading_overlay.place(relx=0.5, rely=0.4, anchor="center")
+        # Disable interactive controls while loading
+        self._set_controls_enabled(False)
+        # Start animated dots in status bar
+        self._loading_dot_count = 0
+        self._animate_loading()
         threading.Thread(target=self._fetch_tasks, daemon=True).start()
+
+    def _animate_loading(self):
+        """Cycle dots in both status bar and overlay: Loading. → Loading.. → Loading..."""
+        if not self.mr_loading:
+            return
+        self._loading_dot_count = (self._loading_dot_count % 3) + 1
+        dots = "." * self._loading_dot_count
+        base = self._t("status_loading")
+        self.lbl_mr_status_bar.configure(text=f"{base}{dots}")
+        self.mr_loading_overlay.configure(text=f"{base}{dots}")
+        self._loading_anim_id = self.parent.after(500, self._animate_loading)
+
+    def _stop_loading_anim(self):
+        if self._loading_anim_id is not None:
+            self.parent.after_cancel(self._loading_anim_id)
+            self._loading_anim_id = None
+        self.mr_loading_overlay.place_forget()
+
+    def _set_controls_enabled(self, enabled):
+        state = "normal" if enabled else "disabled"
+        if IS_MAC:
+            flag = ["!disabled"] if enabled else ["disabled"]
+            self.btn_mr_export.state(flag)
+            self.btn_mr_prev.state(flag)
+            self.btn_mr_next.state(flag)
+        else:
+            self.btn_mr_export.configure(state=state)
+            self.btn_mr_prev.configure(state=state)
+            self.btn_mr_next.configure(state=state)
 
     def _check_task_translations(self, t):
         """Check a task's translation count via API; attach _translations_count and average_score."""
@@ -339,6 +387,8 @@ class MRPipelineTab:
                     limit=self.mr_page_size, offset=self.mr_page * self.mr_page_size)
                 self.parent.after(0, self._on_tasks_loaded, total, tasks, total)
             else:
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+
                 # Accumulate non-empty / MR#-matched tasks across multiple API batches
                 batch_size = 100
                 target = self.mr_page_size
@@ -356,17 +406,21 @@ class MRPipelineTab:
                     if not batch:
                         break
 
+                    # MR# client-side filter first (cheap, no API call)
+                    if mr_iid_filter:
+                        batch = [t for t in batch
+                                 if str(t.get("merge_request_iid", "")) == mr_iid_filter]
+
+                    # Parallel check translation counts (4x faster than sequential)
+                    if hide_empty and batch:
+                        with ThreadPoolExecutor(max_workers=4) as pool:
+                            list(pool.map(self._check_task_translations, batch))
+
                     for t in batch:
                         total_scanned += 1
 
-                        # MR# client-side filter
-                        if mr_iid_filter:
-                            if str(t.get("merge_request_iid", "")) != mr_iid_filter:
-                                continue
-
-                        # Hide empty MRs: check translation count
+                        # Hide empty MRs: use pre-fetched count from parallel check
                         if hide_empty:
-                            self._check_task_translations(t)
                             if t.get("_translations_count", 0) == 0:
                                 continue
 
@@ -400,6 +454,7 @@ class MRPipelineTab:
 
     def _on_tasks_loaded(self, api_total, tasks, filtered_total):
         self.mr_loading = False
+        self._stop_loading_anim()
         self.mr_total = api_total
         self.mr_filtered_total = filtered_total
 
@@ -447,6 +502,8 @@ class MRPipelineTab:
 
     def _on_tasks_error(self, err):
         self.mr_loading = False
+        self._stop_loading_anim()
+        self._set_controls_enabled(True)
         self.lbl_mr_status_bar.configure(text=f"⚠ {err[:60]}")
 
     def _on_export(self):
