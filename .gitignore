@@ -5,5 +5,6 @@ dist/
 *.xlsx
 *.html
 *.spec
+!TranzorExporter.spec
 !TranzorExporter_mac.spec
 *.pdf
