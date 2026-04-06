@@ -593,39 +593,63 @@ class MRPipelineTab:
 # Quality Overview Tab
 # ============================================================
 class QualityOverviewTab:
-    """Builds and manages the Quality Overview tab content."""
+    """Builds and manages the Quality Overview tab with MR / File sub-tabs."""
 
     def __init__(self, parent, app):
         self.app = app
         self.parent = parent
         self.qa_loading = False
-        self.aggregated = None
+        self.aggregated = None          # currently active sub-tab aggregated data
+        self._mr_aggregated = None
+        self._file_aggregated = None
+        self._active_tab = "mr"         # "mr" or "file"
+        self._threshold = qa.DEFAULT_THRESHOLD
+        self._legacy_tasks_cache = []   # cached legacy task list
         self._build(parent)
 
     def _t(self, key):
         return self.app._t(key)
 
+    # ------------------------------------------------------------------
+    # Build UI
+    # ------------------------------------------------------------------
     def _build(self, parent):
-        # Use a canvas with scrollbar for the whole tab
         outer = ttk.Frame(parent, style="App.TFrame")
         outer.pack(fill="both", expand=True)
 
         self._qa_canvas = tk.Canvas(outer, bg="#1a1a2e", highlightthickness=0)
         scrollbar = ttk.Scrollbar(outer, orient="vertical", command=self._qa_canvas.yview)
         self.scroll_frame = ttk.Frame(self._qa_canvas, style="App.TFrame")
-        self.scroll_frame.bind("<Configure>", lambda e: self._qa_canvas.configure(scrollregion=self._qa_canvas.bbox("all")))
+        self.scroll_frame.bind("<Configure>",
+            lambda e: self._qa_canvas.configure(scrollregion=self._qa_canvas.bbox("all")))
         self._qa_canvas_win = self._qa_canvas.create_window((0, 0), window=self.scroll_frame, anchor="nw")
         self._qa_canvas.configure(yscrollcommand=scrollbar.set)
         self._qa_canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
-        # Sync scroll_frame width to canvas width so content fills horizontally
+
         def _on_canvas_resize(e):
             self._qa_canvas.itemconfig(self._qa_canvas_win, width=e.width)
         self._qa_canvas.bind("<Configure>", _on_canvas_resize)
-        # Mouse wheel
-        self._qa_canvas.bind_all("<MouseWheel>", lambda e: self._qa_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units"))
+        self._qa_canvas.bind_all("<MouseWheel>",
+            lambda e: self._qa_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units"))
 
         content = self.scroll_frame
+
+        # ── Sub-tab selector: MR / File ──
+        tab_bar = ttk.Frame(content, style="App.TFrame")
+        tab_bar.pack(fill="x", padx=16, pady=(8, 0))
+
+        self.btn_mr_tab = self.app._create_button(
+            tab_bar, text="MR Translation", command=lambda: self._switch_tab("mr"),
+            style_name="TabActive", font=(FONT_FAMILY, 10, "bold"),
+            bg="#e94560", fg="#fff", padx=18, pady=4)
+        self.btn_mr_tab.pack(side="left", padx=(0, 4))
+
+        self.btn_file_tab = self.app._create_button(
+            tab_bar, text="File Translation", command=lambda: self._switch_tab("file"),
+            style_name="TabInactive", font=(FONT_FAMILY, 10),
+            bg="#0f3460", fg="#ccc", padx=18, pady=4)
+        self.btn_file_tab.pack(side="left")
 
         # ── Filter bar ──
         filt = ttk.Frame(content, style="Card.TFrame")
@@ -634,114 +658,155 @@ class QualityOverviewTab:
         fi = ttk.Frame(filt, style="Card.TFrame")
         fi.pack(fill="x", padx=12, pady=10)
 
+        # Row 1: Project, Release/Task, Language
         r1 = ttk.Frame(fi, style="Card.TFrame")
         r1.pack(fill="x")
 
-        self.lbl_qa_project = ttk.Label(r1, text="", style="Card.TLabel", width=8)
+        self.lbl_qa_project = ttk.Label(r1, text="Project", style="Card.TLabel", width=8)
         self.lbl_qa_project.pack(side="left")
         self.qa_project_var = tk.StringVar()
         self.cmb_qa_project = ttk.Combobox(r1, textvariable=self.qa_project_var, width=20, state="readonly")
         self.cmb_qa_project.pack(side="left", padx=(4, 12))
 
-        self.lbl_qa_release = ttk.Label(r1, text="", style="Card.TLabel", width=8)
+        # Release (MR) / Task (File) — shared slot
+        self.lbl_qa_release = ttk.Label(r1, text="Release", style="Card.TLabel", width=8)
         self.lbl_qa_release.pack(side="left")
         self.qa_release_var = tk.StringVar()
-        self.cmb_qa_release = ttk.Combobox(r1, textvariable=self.qa_release_var, width=12, state="readonly")
+        self.cmb_qa_release = ttk.Combobox(r1, textvariable=self.qa_release_var, width=14, state="readonly")
         self.cmb_qa_release.pack(side="left", padx=(4, 12))
 
-        self.lbl_qa_lang = ttk.Label(r1, text="", style="Card.TLabel", width=8)
+        self.lbl_qa_lang = ttk.Label(r1, text="Language", style="Card.TLabel", width=8)
         self.lbl_qa_lang.pack(side="left")
         self.qa_lang_var = tk.StringVar()
         self.cmb_qa_lang = ttk.Combobox(r1, textvariable=self.qa_lang_var, width=12)
         self.cmb_qa_lang.pack(side="left", padx=(4, 12))
 
         self.btn_qa_search = self.app._create_button(
-            r1, text="", command=self._on_search,
-            style_name="AccentSmall",
-            font=(FONT_FAMILY, 10, "bold"),
+            r1, text="Search", command=self._on_search,
+            style_name="AccentSmall", font=(FONT_FAMILY, 10, "bold"),
             bg="#e94560", fg="#fff", padx=14, pady=3)
         self.btn_qa_search.pack(side="left", padx=(12, 6))
         self.btn_qa_reset = self.app._create_button(
-            r1, text="", command=self._on_reset,
-            style_name="SecondarySmall",
-            font=(FONT_FAMILY, 10),
+            r1, text="Reset", command=self._on_reset,
+            style_name="SecondarySmall", font=(FONT_FAMILY, 10),
             bg="#0f3460", fg="#ccc", padx=14, pady=3)
         self.btn_qa_reset.pack(side="left")
 
-        # ── Summary cards ──
+        # Row 2: Threshold spinner
+        r2 = ttk.Frame(fi, style="Card.TFrame")
+        r2.pack(fill="x", pady=(6, 0))
+
+        self.lbl_qa_threshold = ttk.Label(r2, text="Threshold", style="Card.TLabel", width=8)
+        self.lbl_qa_threshold.pack(side="left")
+        self.threshold_var = tk.IntVar(value=self._threshold)
+        self.spn_threshold = tk.Spinbox(
+            r2, from_=50, to=100, textvariable=self.threshold_var,
+            width=5, font=(FONT_FAMILY, 10), bg="#16213e", fg="#ccc",
+            buttonbackground="#0f3460", insertbackground="#ccc")
+        self.spn_threshold.pack(side="left", padx=(4, 12))
+
+        # ── Summary cards (6) ──
         cards = ttk.Frame(content, style="App.TFrame")
         cards.pack(fill="x", padx=16, pady=(0, 8))
 
         self.qa_cards = {}
         card_defs = [
-            ("total_tasks", "📋", "#4472C4"),
-            ("total_translations", "📝", "#16A085"),
-            ("avg_score", "⭐", "#27AE60"),
-            ("low_score", "⚠", "#E74C3C"),
+            ("total_tasks",),
+            ("total_items",),
+            ("avg_score",),
+            ("below_rate",),
+            ("refined_rate",),
+            ("human_rate",),
         ]
-        for key, icon, color in card_defs:
-            cf = ttk.Frame(cards, style="Card.TFrame", width=200)
+        for (key,) in card_defs:
+            cf = ttk.Frame(cards, style="Card.TFrame", width=160)
             cf.pack(side="left", fill="x", expand=True, padx=4)
             cf.pack_propagate(False)
-            cf.configure(borderwidth=1, relief="solid", height=100)
+            cf.configure(borderwidth=1, relief="solid", height=90)
             val_lbl = ttk.Label(cf, text="—", style="SummaryCount.TLabel")
-            val_lbl.pack(pady=(10, 2))
+            val_lbl.pack(pady=(8, 2))
             name_lbl = ttk.Label(cf, text="", style="SummaryCountLabel.TLabel")
-            name_lbl.pack(pady=(0, 8))
+            name_lbl.pack(pady=(0, 6))
             self.qa_cards[key] = (val_lbl, name_lbl)
 
-        # ── Charts: bar + pie side by side ──
-        chart_frame = ttk.Frame(content, style="App.TFrame")
-        chart_frame.pack(fill="x", padx=16, pady=(0, 8))
+        # ── Charts Row 1: Score Distribution + Error Category ──
+        chart_frame1 = ttk.Frame(content, style="App.TFrame")
+        chart_frame1.pack(fill="x", padx=16, pady=(0, 8))
 
-        # Bar chart (score distribution)
-        bar_outer = ttk.Frame(chart_frame, style="Card.TFrame")
+        bar_outer = ttk.Frame(chart_frame1, style="Card.TFrame")
         bar_outer.pack(side="left", fill="both", expand=True, padx=(0, 4))
         bar_outer.configure(borderwidth=1, relief="solid")
-        self.lbl_bar_title = ttk.Label(bar_outer, text="", style="SummaryTitle.TLabel")
+        self.lbl_bar_title = ttk.Label(bar_outer, text="Score Distribution", style="SummaryTitle.TLabel")
         self.lbl_bar_title.pack(anchor="w", padx=12, pady=(8, 0))
         self.bar_canvas = tk.Canvas(bar_outer, bg="#16213e", highlightthickness=0, height=200)
         self.bar_canvas.pack(fill="x", padx=8, pady=8)
 
-        # Pie chart (error distribution)
-        pie_outer = ttk.Frame(chart_frame, style="Card.TFrame")
+        pie_outer = ttk.Frame(chart_frame1, style="Card.TFrame")
         pie_outer.pack(side="left", fill="both", expand=True, padx=(4, 0))
         pie_outer.configure(borderwidth=1, relief="solid")
-        self.lbl_pie_title = ttk.Label(pie_outer, text="", style="SummaryTitle.TLabel")
+        self.lbl_pie_title = ttk.Label(pie_outer, text="Error Category Distribution", style="SummaryTitle.TLabel")
         self.lbl_pie_title.pack(anchor="w", padx=12, pady=(8, 0))
         self.pie_canvas = tk.Canvas(pie_outer, bg="#16213e", highlightthickness=0, height=200)
         self.pie_canvas.pack(fill="x", padx=8, pady=8)
 
+        # ── Charts Row 2: Trend + Errors by Language ──
+        chart_frame2 = ttk.Frame(content, style="App.TFrame")
+        chart_frame2.pack(fill="x", padx=16, pady=(0, 8))
+
+        trend_outer = ttk.Frame(chart_frame2, style="Card.TFrame")
+        trend_outer.pack(side="left", fill="both", expand=True, padx=(0, 4))
+        trend_outer.configure(borderwidth=1, relief="solid")
+        self.lbl_trend_title = ttk.Label(trend_outer, text="Quality Trend", style="SummaryTitle.TLabel")
+        self.lbl_trend_title.pack(anchor="w", padx=12, pady=(8, 0))
+        self.trend_canvas = tk.Canvas(trend_outer, bg="#16213e", highlightthickness=0, height=200)
+        self.trend_canvas.pack(fill="x", padx=8, pady=8)
+
+        stacked_outer = ttk.Frame(chart_frame2, style="Card.TFrame")
+        stacked_outer.pack(side="left", fill="both", expand=True, padx=(4, 0))
+        stacked_outer.configure(borderwidth=1, relief="solid")
+        self.lbl_stacked_title = ttk.Label(stacked_outer, text="Errors by Language", style="SummaryTitle.TLabel")
+        self.lbl_stacked_title.pack(anchor="w", padx=12, pady=(8, 0))
+        self.stacked_canvas = tk.Canvas(stacked_outer, bg="#16213e", highlightthickness=0, height=200)
+        self.stacked_canvas.pack(fill="x", padx=8, pady=8)
+
         # ── Language detail table ──
-        self.lbl_lang_title = ttk.Label(content, text="", style="Subtitle.TLabel")
+        self.lbl_lang_title = ttk.Label(content, text="By Language Breakdown", style="Subtitle.TLabel")
         self.lbl_lang_title.pack(anchor="w", padx=16, pady=(0, 4))
 
-        lang_cols = ("language", "count", "avg_score", "critical", "major", "minor")
+        lang_cols = ("language", "count", "avg_score", "below_pct", "refined_pct", "human_pct", "warnings")
         self.lang_tree = ttk.Treeview(content, columns=lang_cols, show="headings",
                                        style="Summary.Treeview", height=6)
+        lang_widths = {"language": 120, "count": 80, "avg_score": 90,
+                       "below_pct": 100, "refined_pct": 90, "human_pct": 90, "warnings": 80}
         for c in lang_cols:
-            self.lang_tree.column(c, width=100, anchor="center" if c != "language" else "w")
+            self.lang_tree.column(c, width=lang_widths.get(c, 100),
+                                  anchor="center" if c != "language" else "w")
         self.lang_tree.pack(fill="x", padx=16, pady=(0, 8))
 
         # ── Low-score items ──
-        self.lbl_low_title = ttk.Label(content, text="", style="Subtitle.TLabel")
+        self.lbl_low_title = ttk.Label(content, text="Low-Score Items", style="Subtitle.TLabel")
         self.lbl_low_title.pack(anchor="w", padx=16, pady=(0, 4))
 
-        low_cols = ("idx", "opus_id", "language", "source", "translated", "score", "error_cat", "reason")
+        low_cols = ("idx", "source_type", "scope", "opus_id", "language",
+                    "source", "translated", "score", "error_cat", "reason")
         self.low_tree = ttk.Treeview(content, columns=low_cols, show="headings",
                                       style="Summary.Treeview", height=8)
-        low_widths = {"idx": 35, "opus_id": 180, "language": 70, "source": 200,
-                      "translated": 200, "score": 60, "error_cat": 120, "reason": 180}
+        low_widths = {"idx": 35, "source_type": 50, "scope": 120, "opus_id": 160,
+                      "language": 60, "source": 180, "translated": 180,
+                      "score": 50, "error_cat": 110, "reason": 160}
         for c in low_cols:
             self.low_tree.column(c, width=low_widths.get(c, 100),
-                                 anchor="center" if c in ("idx", "score", "language") else "w")
+                                 anchor="center" if c in ("idx", "score", "language", "source_type") else "w")
         self.low_tree.pack(fill="x", padx=16, pady=(0, 8))
+
+        # Double-click for detail popup
+        self.low_tree.bind("<Double-1>", self._on_low_item_dblclick)
 
         # ── Export bar ──
         ebar = ttk.Frame(content, style="App.TFrame")
         ebar.pack(fill="x", padx=16, pady=(4, 24))
 
-        self.lbl_qa_fmt = ttk.Label(ebar, text="", style="Card.TLabel")
+        self.lbl_qa_fmt = ttk.Label(ebar, text="Format:", style="Card.TLabel")
         self.lbl_qa_fmt.pack(side="left")
         self.qa_fmt_var = tk.StringVar(value="html")
         ttk.Radiobutton(ebar, text="HTML", variable=self.qa_fmt_var, value="html",
@@ -750,39 +815,108 @@ class QualityOverviewTab:
                          style="Card.TRadiobutton").pack(side="left")
 
         self.btn_qa_export = self.app._create_button(
-            ebar, text="", command=self._on_export,
-            style_name="SuccessSmall",
-            font=(FONT_FAMILY, 10, "bold"),
+            ebar, text="Export", command=self._on_export,
+            style_name="SuccessSmall", font=(FONT_FAMILY, 10, "bold"),
             bg="#2ecc71", fg="#fff", padx=14, pady=4, state="disabled")
         self.btn_qa_export.pack(side="right")
         self.lbl_qa_status = ttk.Label(ebar, text="", style="Status.TLabel")
         self.lbl_qa_status.pack(side="right", padx=8)
 
+    # ------------------------------------------------------------------
+    # Sub-tab switching
+    # ------------------------------------------------------------------
+    def _switch_tab(self, tab):
+        if tab == self._active_tab:
+            return
+        self._active_tab = tab
+        if tab == "mr":
+            self.btn_mr_tab.configure(bg="#e94560", fg="#fff")
+            self.btn_file_tab.configure(bg="#0f3460", fg="#ccc")
+            self.lbl_qa_release.configure(text=self._t("mr_release"))
+        else:
+            self.btn_mr_tab.configure(bg="#0f3460", fg="#ccc")
+            self.btn_file_tab.configure(bg="#e94560", fg="#fff")
+            self.lbl_qa_release.configure(text=self._t("qa_task"))
+
+        # Reload filter options for the new tab
+        self._reload_filters_for_tab()
+
+        # Display cached data if available
+        cached = self._mr_aggregated if tab == "mr" else self._file_aggregated
+        if cached:
+            self.aggregated = cached
+            self._display_data(cached)
+
+    def _reload_filters_for_tab(self):
+        if self._active_tab == "mr":
+            self.load_filters()
+        else:
+            threading.Thread(target=self._fetch_legacy_filters, daemon=True).start()
+
+    def _fetch_legacy_filters(self):
+        try:
+            tasks, _ = mr_api.fetch_legacy_tasks_for_quality(limit=500)
+            self._legacy_tasks_cache = tasks
+            task_names = [""] + [t.get("task_name") or t.get("name", "") for t in tasks if t.get("task_name") or t.get("name")]
+            # Collect languages from task info
+            langs = set()
+            for t in tasks:
+                for lang in (t.get("target_languages") or []):
+                    langs.add(lang)
+            lang_list = [""] + sorted(langs) if langs else [""]
+            self.parent.after(0, self._on_legacy_filters_loaded, task_names, lang_list)
+        except Exception:
+            pass
+
+    def _on_legacy_filters_loaded(self, task_names, lang_list):
+        self.cmb_qa_release.configure(values=task_names)
+        self.qa_release_var.set("")
+        if lang_list and len(lang_list) > 1:
+            self.cmb_qa_lang.configure(values=lang_list)
+
+    # ------------------------------------------------------------------
+    # i18n refresh
+    # ------------------------------------------------------------------
     def refresh_text(self):
         t = self._t
         self.lbl_qa_project.configure(text=t("mr_project"))
-        self.lbl_qa_release.configure(text=t("mr_release"))
+        if self._active_tab == "mr":
+            self.lbl_qa_release.configure(text=t("mr_release"))
+        else:
+            self.lbl_qa_release.configure(text=t("qa_task"))
         self.lbl_qa_lang.configure(text=t("qa_language"))
+        self.lbl_qa_threshold.configure(text=t("qa_threshold"))
         self.btn_qa_search.configure(text=t("mr_search"))
         self.btn_qa_reset.configure(text=t("mr_reset"))
         self.btn_qa_export.configure(text=t("qa_export"))
         self.lbl_qa_fmt.configure(text=t("output_fmt_label"))
 
+        self.btn_mr_tab.configure(text=t("qa_mr_tab"))
+        self.btn_file_tab.configure(text=t("qa_file_tab"))
+
         self.qa_cards["total_tasks"][1].configure(text=t("qa_total_tasks"))
-        self.qa_cards["total_translations"][1].configure(text=t("qa_total_items"))
+        self.qa_cards["total_items"][1].configure(text=t("qa_total_items"))
         self.qa_cards["avg_score"][1].configure(text=t("qa_avg_score"))
-        self.qa_cards["low_score"][1].configure(text=t("qa_low_score"))
+        self.qa_cards["below_rate"][1].configure(text=t("qa_below_rate"))
+        self.qa_cards["refined_rate"][1].configure(text=t("qa_refined_rate"))
+        self.qa_cards["human_rate"][1].configure(text=t("qa_human_rate"))
 
         self.lbl_bar_title.configure(text=t("qa_score_dist"))
         self.lbl_pie_title.configure(text=t("qa_error_dist"))
+        self.lbl_trend_title.configure(text=t("qa_trend"))
+        self.lbl_stacked_title.configure(text=t("qa_err_by_lang"))
         self.lbl_lang_title.configure(text=t("qa_lang_detail"))
         self.lbl_low_title.configure(text=t("qa_low_items"))
 
-        for c in ("language", "count", "avg_score", "critical", "major", "minor"):
+        for c in ("language", "count", "avg_score", "below_pct", "refined_pct", "human_pct", "warnings"):
             self.lang_tree.heading(c, text=t(f"qa_lang_col_{c}"))
-        for c in ("idx", "opus_id", "language", "source", "translated", "score", "error_cat", "reason"):
+        for c in ("idx", "source_type", "scope", "opus_id", "language",
+                   "source", "translated", "score", "error_cat", "reason"):
             self.low_tree.heading(c, text=t(f"qa_low_col_{c}"))
 
+    # ------------------------------------------------------------------
+    # Filter loading (MR)
+    # ------------------------------------------------------------------
     def load_filters(self):
         threading.Thread(target=self._fetch_filters, daemon=True).start()
 
@@ -802,34 +936,98 @@ class QualityOverviewTab:
         if langs:
             self.cmb_qa_lang.configure(values=[""] + langs)
 
+    # ------------------------------------------------------------------
+    # Search / Reset
+    # ------------------------------------------------------------------
     def _on_search(self):
+        self._threshold = self.threshold_var.get()
         self._load_data()
 
     def _on_reset(self):
         self.qa_project_var.set("")
         self.qa_release_var.set("")
         self.qa_lang_var.set("")
+        self.threshold_var.set(qa.DEFAULT_THRESHOLD)
+        self._threshold = qa.DEFAULT_THRESHOLD
         self._load_data()
 
+    # ------------------------------------------------------------------
+    # Data loading (dispatches to MR or Legacy)
+    # ------------------------------------------------------------------
     def _load_data(self):
         if self.qa_loading:
             return
         self.qa_loading = True
         self.lbl_qa_status.configure(text=self._t("status_exporting"))
-        threading.Thread(target=self._fetch_data, daemon=True).start()
+        if self._active_tab == "mr":
+            threading.Thread(target=self._fetch_mr_data, daemon=True).start()
+        else:
+            threading.Thread(target=self._fetch_file_data, daemon=True).start()
 
-    def _fetch_data(self):
+    def _fetch_mr_data(self):
         try:
             proj = self.qa_project_var.get() or None
             rel = self.qa_release_var.get() or None
             lang = self.qa_lang_var.get() or None
             overview = mr_api.fetch_dashboard_overview(project_id=proj, release=rel)
             cases = mr_api.fetch_dashboard_cases(project_id=proj, release=rel, language=lang)
-            agg = qa.aggregate_quality_data(overview, cases)
+            agg = qa.aggregate_mr_quality(overview, cases, self._threshold)
+            self._mr_aggregated = agg
             self.parent.after(0, self._on_data_loaded, agg)
         except Exception as e:
             self.parent.after(0, self._on_data_error, str(e))
 
+    def _fetch_file_data(self):
+        try:
+            proj = self.qa_project_var.get() or None
+            task_name_filter = self.qa_release_var.get() or None
+            lang_filter = self.qa_lang_var.get() or None
+
+            # Get tasks (use cache if available, otherwise fetch)
+            if self._legacy_tasks_cache:
+                tasks = self._legacy_tasks_cache
+            else:
+                tasks, _ = mr_api.fetch_legacy_tasks_for_quality(
+                    project_name=proj, limit=200)
+
+            # Filter by task name if specified
+            if task_name_filter:
+                tasks = [t for t in tasks
+                         if task_name_filter in (t.get("task_name") or t.get("name", ""))]
+
+            # Limit to most recent 20 tasks to avoid excessive API calls
+            tasks = tasks[:20]
+
+            # Fetch translations for each task
+            translations_map = {}
+            warnings_map = {}
+            for t in tasks:
+                tid = str(t.get("task_id") or t.get("id", ""))
+                if not tid:
+                    continue
+                try:
+                    trans = mr_api.fetch_all_legacy_translations_quality(tid)
+                    # Filter by language if needed
+                    if lang_filter:
+                        trans = [tr for tr in trans if tr.get("target_language") == lang_filter]
+                    translations_map[tid] = trans
+
+                    # Fetch warnings
+                    warns = mr_api.fetch_legacy_translation_warnings(tid)
+                    warnings_map[tid] = warns
+                except Exception:
+                    continue
+
+            agg = qa.aggregate_legacy_quality(tasks, translations_map, warnings_map,
+                                              self._threshold)
+            self._file_aggregated = agg
+            self.parent.after(0, self._on_data_loaded, agg)
+        except Exception as e:
+            self.parent.after(0, self._on_data_error, str(e))
+
+    # ------------------------------------------------------------------
+    # Display data
+    # ------------------------------------------------------------------
     def _on_data_loaded(self, agg):
         self.qa_loading = False
         self.aggregated = agg
@@ -838,12 +1036,21 @@ class QualityOverviewTab:
             self.btn_qa_export.state(["!disabled"])
         else:
             self.btn_qa_export.configure(state="normal")
+        self._display_data(agg)
+
+    def _display_data(self, agg):
+        threshold = agg.get("threshold", self._threshold)
 
         # Update cards
-        self.qa_cards["total_tasks"][0].configure(text=str(agg["total_tasks"]))
-        self.qa_cards["total_translations"][0].configure(text=str(agg["total_translations"]))
-        self.qa_cards["avg_score"][0].configure(text=str(agg["overall_avg_score"]))
-        self.qa_cards["low_score"][0].configure(text=str(agg["low_score_count"]))
+        self.qa_cards["total_tasks"][0].configure(text=str(agg.get("total_tasks", 0)))
+        self.qa_cards["total_items"][0].configure(text=str(agg.get("total_items", 0)))
+        self.qa_cards["avg_score"][0].configure(text=str(agg.get("overall_avg_score", 0)))
+        self.qa_cards["below_rate"][0].configure(
+            text=f'{agg.get("below_threshold_rate", 0)}%')
+        self.qa_cards["refined_rate"][0].configure(
+            text=f'{agg.get("refined_rate", 0)}%')
+        self.qa_cards["human_rate"][0].configure(
+            text=f'{agg.get("human_touch_rate", 0)}%')
 
         # Populate Language combobox from aggregated data
         langs = sorted(ld["language"] for ld in agg.get("by_language", []) if ld.get("language"))
@@ -855,34 +1062,151 @@ class QualityOverviewTab:
         # Draw charts
         self.bar_canvas.update_idletasks()
         w = max(self.bar_canvas.winfo_width(), 300)
-        qa.draw_bar_chart(self.bar_canvas, agg["score_distribution"], w, 200,
+
+        qa.draw_bar_chart(self.bar_canvas, agg.get("score_distribution", {}), w, 200,
                           title=self._t("qa_score_dist"))
-        qa.draw_pie_chart(self.pie_canvas, agg["error_distribution"], w, 200,
+        qa.draw_pie_chart(self.pie_canvas, agg.get("error_distribution", {}), w, 200,
                           title=self._t("qa_error_dist"))
+
+        # Trend chart — build from by_language data as a proxy
+        # (Real trend would need time-series data; here we show per-language avg as points)
+        trend_points = [
+            {"label": ld["language"][:8], "avg_score": ld["average_score"]}
+            for ld in agg.get("by_language", [])
+            if ld.get("average_score") is not None
+        ]
+        self.trend_canvas.update_idletasks()
+        tw = max(self.trend_canvas.winfo_width(), 300)
+        qa.draw_trend_chart(self.trend_canvas, trend_points, tw, 200,
+                            threshold=threshold, title=self._t("qa_trend"))
+
+        # Stacked bar: errors by language
+        err_by_lang = {}
+        for it in agg.get("low_items", []):
+            lang = it.get("target_language", "(unknown)")
+            cat = it.get("error_category") or "Other"
+            if lang not in err_by_lang:
+                err_by_lang[lang] = {}
+            err_by_lang[lang][cat] = err_by_lang[lang].get(cat, 0) + 1
+        self.stacked_canvas.update_idletasks()
+        sw = max(self.stacked_canvas.winfo_width(), 300)
+        qa.draw_stacked_bar_chart(self.stacked_canvas, err_by_lang, sw, 200,
+                                  title=self._t("qa_err_by_lang"))
 
         # Language table
         for item in self.lang_tree.get_children():
             self.lang_tree.delete(item)
-        for ld in agg["by_language"]:
-            avg = f'{ld["average_score"]}' if ld["average_score"] else "—"
+        for ld in agg.get("by_language", []):
+            avg = f'{ld["average_score"]}' if ld.get("average_score") is not None else "—"
             self.lang_tree.insert("", "end", values=(
                 ld["language"], ld["count"], avg,
-                ld["critical"], ld["major"], ld["minor"]))
+                f'{ld["below_threshold_pct"]}%',
+                f'{ld["refined_pct"]}%',
+                f'{ld["human_touched_pct"]}%',
+                ld["warnings"]))
 
         # Low-score table
         for item in self.low_tree.get_children():
             self.low_tree.delete(item)
-        for i, it in enumerate(agg["low_items"][:200]):
+        for i, it in enumerate(agg.get("low_items", [])[:200]):
             score = it.get("final_score", "—")
             self.low_tree.insert("", "end", values=(
-                i + 1, it.get("opus_id", ""), it.get("target_language", ""),
-                it.get("source_text", "")[:80], it.get("translated_text", "")[:80],
-                score, it.get("error_category") or "—", (it.get("reason") or "")[:60]))
+                i + 1,
+                it.get("_source_type", ""),
+                it.get("_scope_name", "")[:30],
+                it.get("opus_id", ""),
+                it.get("target_language", ""),
+                (it.get("source_text") or "")[:80],
+                (it.get("translated_text") or "")[:80],
+                score,
+                it.get("error_category") or "—",
+                (it.get("reason") or "")[:60]))
+
+        # Update low-score title with threshold
+        self.lbl_low_title.configure(
+            text=f'{self._t("qa_low_items")} (< {threshold})')
 
     def _on_data_error(self, err):
         self.qa_loading = False
-        self.lbl_qa_status.configure(text=f"⚠ {err[:60]}")
+        self.lbl_qa_status.configure(text=f"Error: {err[:60]}")
 
+    # ------------------------------------------------------------------
+    # Low-score item detail popup
+    # ------------------------------------------------------------------
+    def _on_low_item_dblclick(self, event):
+        sel = self.low_tree.selection()
+        if not sel:
+            return
+        item_idx_str = self.low_tree.item(sel[0], "values")[0]
+        try:
+            idx = int(item_idx_str) - 1
+        except (ValueError, TypeError):
+            return
+        if not self.aggregated:
+            return
+        low_items = self.aggregated.get("low_items", [])
+        if idx < 0 or idx >= len(low_items):
+            return
+        it = low_items[idx]
+        self._show_item_detail(it)
+
+    def _show_item_detail(self, it):
+        """Show a detail window for a low-score item."""
+        win = tk.Toplevel(self.parent)
+        win.title(f"Detail — {it.get('opus_id', '')[:40]}")
+        win.geometry("700x520")
+        win.configure(bg="#1a1a2e")
+
+        pad = {"padx": 16, "pady": 4}
+
+        def _add_row(parent, label, value, **kwargs):
+            f = ttk.Frame(parent, style="App.TFrame")
+            f.pack(fill="x", **pad)
+            ttk.Label(f, text=label, style="Card.TLabel", width=16,
+                      anchor="e").pack(side="left")
+            val_widget = tk.Text(f, height=kwargs.get("height", 1), width=60,
+                                 bg="#16213e", fg="#ccc", font=(FONT_FAMILY, 10),
+                                 wrap="word", relief="flat", borderwidth=0)
+            val_widget.insert("1.0", str(value or "—"))
+            val_widget.configure(state="disabled")
+            val_widget.pack(side="left", padx=(8, 0), fill="x", expand=True)
+
+        _add_row(win, "String Key:", it.get("opus_id", ""))
+        _add_row(win, "Language:", it.get("target_language", ""))
+        _add_row(win, "Source:", it.get("source_text", ""), height=3)
+        _add_row(win, "Translated:", it.get("translated_text", ""), height=3)
+        _add_row(win, "Score:", it.get("final_score", "—"))
+        _add_row(win, "Error Category:", it.get("error_category", "—"))
+        _add_row(win, "Reason:", it.get("reason", ""), height=3)
+        _add_row(win, "Iteration:", it.get("iteration", 1))
+
+        # Iteration history
+        hist = it.get("iteration_history")
+        if hist and isinstance(hist, dict):
+            iter1_score = hist.get("iteration_1", {}).get("final_score")
+            if iter1_score is not None:
+                _add_row(win, "Iter 1 Score:", iter1_score)
+                _add_row(win, "Iter 1 Reason:",
+                         hist.get("iteration_1", {}).get("reason", ""))
+
+        # Reviewer / human touch
+        comment = it.get("reviewer_comment") or it.get("reviewer_notes") or ""
+        if comment:
+            _add_row(win, "Reviewer:", comment, height=2)
+        if it.get("fixed_by_lead"):
+            _add_row(win, "Fixed by:", it.get("fixed_by_lead", ""))
+            _add_row(win, "Fixed text:", it.get("fixed_text", ""), height=2)
+
+        # Close button
+        btn_close = self.app._create_button(
+            win, text="Close", command=win.destroy,
+            style_name="SecondarySmall", font=(FONT_FAMILY, 10),
+            bg="#0f3460", fg="#ccc", padx=20, pady=4)
+        btn_close.pack(pady=12)
+
+    # ------------------------------------------------------------------
+    # Export
+    # ------------------------------------------------------------------
     def _on_export(self):
         if not self.aggregated:
             return
@@ -898,14 +1222,17 @@ class QualityOverviewTab:
         try:
             ext = ".xlsx" if fmt == "xlsx" else ".html"
             today = date.today().isoformat()
-            filename = f"quality_overview_{today}{ext}"
+            tab_label = "MR" if self._active_tab == "mr" else "File"
+            filename = f"quality_overview_{tab_label}_{today}{ext}"
             script_dir = os.path.dirname(os.path.abspath(__file__))
             filepath = os.path.join(script_dir, filename)
-            label = f"Quality Overview (exported {today})"
+            label = f"Quality Overview — {tab_label} (exported {today})"
             qa.save_quality_file(self.aggregated, filepath, label, fmt)
-            self.parent.after(0, lambda: self.lbl_qa_status.configure(text=self._t("status_done")))
+            self.parent.after(0,
+                lambda: self.lbl_qa_status.configure(text=self._t("status_done")))
         except Exception as e:
-            self.parent.after(0, lambda: self.lbl_qa_status.configure(text=f"❌ {str(e)[:50]}"))
+            self.parent.after(0,
+                lambda: self.lbl_qa_status.configure(text=f"Error: {str(e)[:50]}"))
         finally:
             def _restore():
                 if IS_MAC:

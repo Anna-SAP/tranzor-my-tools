@@ -426,6 +426,83 @@ def fetch_dashboard_cases(project_id=None, release=None, language=None,
 
 
 # ---------------------------------------------------------------------------
+# 6b) Dashboard MRs（MR 列表 + per-MR 质量统计）
+# ---------------------------------------------------------------------------
+def fetch_dashboard_mrs(project_id=None, release=None, language=None,
+                        min_score=None, max_score=None,
+                        mr_limit=100, mr_offset=0):
+    """GET /dashboard/mrs"""
+    params = {"mr_limit": mr_limit, "mr_offset": mr_offset}
+    if project_id:
+        params["project_id"] = project_id
+    if release:
+        params["release"] = release
+    if language:
+        params["language"] = language
+    if min_score is not None:
+        params["min_score"] = min_score
+    if max_score is not None:
+        params["max_score"] = max_score
+
+    resp = _api_get(f"{MR_API}/dashboard/mrs", params=params)
+    resp.raise_for_status()
+    return resp.json()
+
+
+# ---------------------------------------------------------------------------
+# 6c) Legacy (File Translation) 质量数据获取
+# ---------------------------------------------------------------------------
+LEGACY_API = f"{TRANZOR_URL}/api/v1/legacy"
+
+
+def fetch_legacy_tasks_for_quality(project_name=None, status="Completed",
+                                   limit=200, offset=0):
+    """GET /legacy/tasks — 获取文件翻译任务列表"""
+    params = {"limit": limit, "offset": offset}
+    if status:
+        params["status"] = status
+    if project_name:
+        params["project_name"] = project_name
+
+    resp = _api_get(f"{LEGACY_API}/tasks", params=params)
+    resp.raise_for_status()
+    data = resp.json()
+    return data.get("tasks", []), data.get("total", 0)
+
+
+def fetch_legacy_translations_quality(task_id, limit=500, offset=0):
+    """GET /legacy/tasks/{task_id}/translations — 翻译结果含质量评分"""
+    params = {"limit": limit, "offset": offset}
+    resp = _api_get(f"{LEGACY_API}/tasks/{task_id}/translations", params=params)
+    resp.raise_for_status()
+    data = resp.json()
+    return data.get("translations", []), data.get("total", 0)
+
+
+def fetch_legacy_translation_warnings(task_id):
+    """GET /legacy/tasks/{task_id}/translation-warnings"""
+    try:
+        resp = _api_get(f"{LEGACY_API}/tasks/{task_id}/translation-warnings")
+        resp.raise_for_status()
+        return resp.json()
+    except Exception:
+        return {"warnings": []}
+
+
+def fetch_all_legacy_translations_quality(task_id, page_size=500):
+    """分页获取某个 legacy task 的全部翻译（含质量数据）"""
+    all_items = []
+    offset = 0
+    while True:
+        items, total = fetch_legacy_translations_quality(task_id, limit=page_size, offset=offset)
+        all_items.extend(items)
+        offset += len(items)
+        if offset >= total or not items:
+            break
+    return all_items
+
+
+# ---------------------------------------------------------------------------
 # 7) HTML 导出 — MR 翻译结果
 # ---------------------------------------------------------------------------
 def _word_diff_html(before, after):
