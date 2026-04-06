@@ -5,6 +5,7 @@ import os
 import sys
 import threading
 import tkinter as tk
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from tkinter import ttk
 from datetime import date, datetime
 
@@ -855,22 +856,39 @@ class QualityOverviewTab:
 
     def _fetch_legacy_filters(self):
         try:
-            tasks, _ = mr_api.fetch_legacy_tasks_for_quality(limit=500)
+            tasks = mr_api.fetch_all_legacy_tasks_for_quality()
             self._legacy_tasks_cache = tasks
-            task_names = [""] + [t.get("task_name") or t.get("name", "") for t in tasks if t.get("task_name") or t.get("name")]
-            # Collect languages from task info
+            projects = sorted({
+                t.get("project_name", "")
+                for t in tasks
+                if t.get("project_name")
+            })
+            task_names = sorted({
+                t.get("task_name") or t.get("name", "")
+                for t in tasks
+                if t.get("task_name") or t.get("name")
+            })
             langs = set()
             for t in tasks:
                 for lang in (t.get("target_languages") or []):
                     langs.add(lang)
-            lang_list = [""] + sorted(langs) if langs else [""]
-            self.parent.after(0, self._on_legacy_filters_loaded, task_names, lang_list)
+            self.parent.after(
+                0,
+                self._on_legacy_filters_loaded,
+                [""] + projects,
+                [""] + task_names,
+                [""] + sorted(langs) if langs else [""],
+            )
         except Exception:
             pass
 
-    def _on_legacy_filters_loaded(self, task_names, lang_list):
+    def _on_legacy_filters_loaded(self, projects, task_names, lang_list):
+        self.cmb_qa_project.configure(values=projects)
         self.cmb_qa_release.configure(values=task_names)
-        self.qa_release_var.set("")
+        if self.qa_project_var.get() not in projects:
+            self.qa_project_var.set("")
+        if self.qa_release_var.get() not in task_names:
+            self.qa_release_var.set("")
         if lang_list and len(lang_list) > 1:
             self.cmb_qa_lang.configure(values=lang_list)
 
@@ -964,13 +982,41 @@ class QualityOverviewTab:
         else:
             threading.Thread(target=self._fetch_file_data, daemon=True).start()
 
+    def _get_legacy_tasks(self):
+        if not self._legacy_tasks_cache:
+            self._legacy_tasks_cache = mr_api.fetch_all_legacy_tasks_for_quality()
+        return list(self._legacy_tasks_cache)
+
+    @staticmethod
+    def _task_matches_language(task, language):
+        if not language:
+            return True
+        task_langs = task.get("target_languages") or []
+        return not task_langs or language in task_langs
+
+    @staticmethod
+    def _fetch_legacy_task_bundle(task_id, language):
+        translations = mr_api.fetch_all_legacy_translations_quality(
+            task_id,
+            target_language=language,
+        )
+        try:
+            warnings = mr_api.fetch_legacy_translation_warnings(task_id)
+        except Exception:
+            warnings = {"inconsistent": [], "untranslated": []}
+        return task_id, translations, warnings
+
     def _fetch_mr_data(self):
         try:
             proj = self.qa_project_var.get() or None
             rel = self.qa_release_var.get() or None
             lang = self.qa_lang_var.get() or None
             overview = mr_api.fetch_dashboard_overview(project_id=proj, release=rel)
-            cases = mr_api.fetch_dashboard_cases(project_id=proj, release=rel, language=lang)
+            cases = mr_api.fetch_all_dashboard_cases(
+                project_id=proj,
+                release=rel,
+                language=lang,
+            )
             agg = qa.aggregate_mr_quality(overview, cases, self._threshold)
             self._mr_aggregated = agg
             self.parent.after(0, self._on_data_loaded, agg)
@@ -983,40 +1029,42 @@ class QualityOverviewTab:
             task_name_filter = self.qa_release_var.get() or None
             lang_filter = self.qa_lang_var.get() or None
 
-            # Get tasks (use cache if available, otherwise fetch)
-            if self._legacy_tasks_cache:
-                tasks = self._legacy_tasks_cache
-            else:
-                tasks, _ = mr_api.fetch_legacy_tasks_for_quality(
-                    project_name=proj, limit=200)
-
-            # Filter by task name if specified
+            tasks = self._get_legacy_tasks()
+            if proj:
+                tasks = [
+                    task for task in tasks
+                    if (task.get("project_name") or "") == proj
+                ]
             if task_name_filter:
-                tasks = [t for t in tasks
-                         if task_name_filter in (t.get("task_name") or t.get("name", ""))]
+                tasks = [
+                    task for task in tasks
+                    if task_name_filter in (task.get("task_name") or task.get("name", ""))
+                ]
+            if lang_filter:
+                tasks = [
+                    task for task in tasks
+                    if self._task_matches_language(task, lang_filter)
+                ]
 
-            # Limit to most recent 20 tasks to avoid excessive API calls
-            tasks = tasks[:20]
-
-            # Fetch translations for each task
             translations_map = {}
             warnings_map = {}
-            for t in tasks:
-                tid = str(t.get("task_id") or t.get("id", ""))
-                if not tid:
-                    continue
-                try:
-                    trans = mr_api.fetch_all_legacy_translations_quality(tid)
-                    # Filter by language if needed
-                    if lang_filter:
-                        trans = [tr for tr in trans if tr.get("target_language") == lang_filter]
-                    translations_map[tid] = trans
+            if tasks:
+                max_workers = min(6, len(tasks))
+                with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                    futures = {}
+                    for task in tasks:
+                        tid = str(task.get("task_id") or task.get("id", ""))
+                        if tid:
+                            futures[pool.submit(self._fetch_legacy_task_bundle, tid, lang_filter)] = tid
 
-                    # Fetch warnings
-                    warns = mr_api.fetch_legacy_translation_warnings(tid)
-                    warnings_map[tid] = warns
-                except Exception:
-                    continue
+                    for future in as_completed(futures):
+                        tid = futures[future]
+                        try:
+                            tid, translations, warnings = future.result()
+                        except Exception:
+                            continue
+                        translations_map[tid] = translations
+                        warnings_map[tid] = warnings
 
             agg = qa.aggregate_legacy_quality(tasks, translations_map, warnings_map,
                                               self._threshold)
@@ -1038,10 +1086,7 @@ class QualityOverviewTab:
             self.btn_qa_export.configure(state="normal")
         self._display_data(agg)
 
-    def _display_data(self, agg):
-        threshold = agg.get("threshold", self._threshold)
-
-        # Update cards
+    def _update_metric_cards(self, agg):
         self.qa_cards["total_tasks"][0].configure(text=str(agg.get("total_tasks", 0)))
         self.qa_cards["total_items"][0].configure(text=str(agg.get("total_items", 0)))
         self.qa_cards["avg_score"][0].configure(text=str(agg.get("overall_avg_score", 0)))
@@ -1052,77 +1097,99 @@ class QualityOverviewTab:
         self.qa_cards["human_rate"][0].configure(
             text=f'{agg.get("human_touch_rate", 0)}%')
 
-        # Populate Language combobox from aggregated data
-        langs = sorted(ld["language"] for ld in agg.get("by_language", []) if ld.get("language"))
+    def _update_language_filter_options(self, agg):
+        languages = sorted(
+            row["language"]
+            for row in agg.get("by_language", [])
+            if row.get("language")
+        )
         current = self.qa_lang_var.get()
-        self.cmb_qa_lang.configure(values=[""] + langs)
-        if current and current in langs:
+        self.cmb_qa_lang.configure(values=[""] + languages)
+        if current and current in languages:
             self.qa_lang_var.set(current)
 
-        # Draw charts
+    def _render_quality_charts(self, agg, threshold):
         self.bar_canvas.update_idletasks()
-        w = max(self.bar_canvas.winfo_width(), 300)
+        chart_width = max(self.bar_canvas.winfo_width(), 300)
+        qa.draw_bar_chart(
+            self.bar_canvas,
+            agg.get("score_distribution", {}),
+            chart_width,
+            200,
+            title=self._t("qa_score_dist"),
+        )
+        qa.draw_pie_chart(
+            self.pie_canvas,
+            agg.get("error_distribution", {}),
+            chart_width,
+            200,
+            title=self._t("qa_error_dist"),
+        )
 
-        qa.draw_bar_chart(self.bar_canvas, agg.get("score_distribution", {}), w, 200,
-                          title=self._t("qa_score_dist"))
-        qa.draw_pie_chart(self.pie_canvas, agg.get("error_distribution", {}), w, 200,
-                          title=self._t("qa_error_dist"))
-
-        # Trend chart — build from by_language data as a proxy
-        # (Real trend would need time-series data; here we show per-language avg as points)
-        trend_points = [
-            {"label": ld["language"][:8], "avg_score": ld["average_score"]}
-            for ld in agg.get("by_language", [])
-            if ld.get("average_score") is not None
-        ]
         self.trend_canvas.update_idletasks()
-        tw = max(self.trend_canvas.winfo_width(), 300)
-        qa.draw_trend_chart(self.trend_canvas, trend_points, tw, 200,
-                            threshold=threshold, title=self._t("qa_trend"))
+        trend_width = max(self.trend_canvas.winfo_width(), 300)
+        qa.draw_trend_chart(
+            self.trend_canvas,
+            agg.get("trend_points", []),
+            trend_width,
+            200,
+            threshold=threshold,
+            title=self._t("qa_trend"),
+        )
 
-        # Stacked bar: errors by language
-        err_by_lang = {}
-        for it in agg.get("low_items", []):
-            lang = it.get("target_language", "(unknown)")
-            cat = it.get("error_category") or "Other"
-            if lang not in err_by_lang:
-                err_by_lang[lang] = {}
-            err_by_lang[lang][cat] = err_by_lang[lang].get(cat, 0) + 1
         self.stacked_canvas.update_idletasks()
-        sw = max(self.stacked_canvas.winfo_width(), 300)
-        qa.draw_stacked_bar_chart(self.stacked_canvas, err_by_lang, sw, 200,
-                                  title=self._t("qa_err_by_lang"))
+        stacked_width = max(self.stacked_canvas.winfo_width(), 300)
+        qa.draw_stacked_bar_chart(
+            self.stacked_canvas,
+            agg.get("error_by_language", {}),
+            stacked_width,
+            200,
+            title=self._t("qa_err_by_lang"),
+        )
 
-        # Language table
+    def _render_language_table(self, agg):
         for item in self.lang_tree.get_children():
             self.lang_tree.delete(item)
-        for ld in agg.get("by_language", []):
-            avg = f'{ld["average_score"]}' if ld.get("average_score") is not None else "—"
+        for row in agg.get("by_language", []):
+            avg = f'{row["average_score"]}' if row.get("average_score") is not None else "-"
             self.lang_tree.insert("", "end", values=(
-                ld["language"], ld["count"], avg,
-                f'{ld["below_threshold_pct"]}%',
-                f'{ld["refined_pct"]}%',
-                f'{ld["human_touched_pct"]}%',
-                ld["warnings"]))
+                row["language"],
+                row["count"],
+                avg,
+                f'{row["below_threshold_pct"]}%',
+                f'{row["refined_pct"]}%',
+                f'{row["human_touched_pct"]}%',
+                row["warnings"],
+            ))
 
-        # Low-score table
+    def _render_low_items_table(self, agg):
         for item in self.low_tree.get_children():
             self.low_tree.delete(item)
-        for i, it in enumerate(agg.get("low_items", [])[:200]):
-            score = it.get("final_score", "—")
+        for index, row in enumerate(agg.get("low_items", [])[:200], start=1):
+            score = row.get("final_score", "-")
             self.low_tree.insert("", "end", values=(
-                i + 1,
-                it.get("_source_type", ""),
-                it.get("_scope_name", "")[:30],
-                it.get("opus_id", ""),
-                it.get("target_language", ""),
-                (it.get("source_text") or "")[:80],
-                (it.get("translated_text") or "")[:80],
+                index,
+                row.get("_source_type", ""),
+                row.get("_scope_name", "")[:30],
+                row.get("opus_id", ""),
+                row.get("target_language", ""),
+                (row.get("source_text") or "")[:80],
+                (row.get("translated_text") or "")[:80],
                 score,
-                it.get("error_category") or "—",
-                (it.get("reason") or "")[:60]))
+                row.get("error_category") or "-",
+                (row.get("reason") or "")[:60],
+            ))
 
-        # Update low-score title with threshold
+    def _display_data(self, agg):
+        threshold = agg.get("threshold", self._threshold)
+
+        self._update_metric_cards(agg)
+
+        self._update_language_filter_options(agg)
+
+        self._render_quality_charts(agg, threshold)
+        self._render_language_table(agg)
+        self._render_low_items_table(agg)
         self.lbl_low_title.configure(
             text=f'{self._t("qa_low_items")} (< {threshold})')
 
@@ -1148,61 +1215,109 @@ class QualityOverviewTab:
         if idx < 0 or idx >= len(low_items):
             return
         it = low_items[idx]
-        self._show_item_detail(it)
+        self._show_quality_item_detail(it)
 
-    def _show_item_detail(self, it):
-        """Show a detail window for a low-score item."""
+    @staticmethod
+    def _set_text_widget_value(widget, value):
+        widget.configure(state="normal")
+        widget.delete("1.0", "end")
+        widget.insert("1.0", str(value or "-"))
+        widget.configure(state="disabled")
+
+    def _load_legacy_edit_logs(self, task_id, translation_id, widget):
+        try:
+            logs = mr_api.fetch_legacy_translation_edit_logs(task_id, translation_id)
+        except Exception:
+            logs = []
+
+        if not logs:
+            text = "No edit logs"
+        else:
+            chunks = []
+            for log in logs[:10]:
+                user = log.get("user_name") or "Unknown"
+                created_at = log.get("created_at") or ""
+                notes = log.get("notes") or ""
+                edited_text = log.get("edited_text") or ""
+                chunks.append(f"[{created_at}] {user}\n{edited_text}")
+                if notes:
+                    chunks.append(f"Notes: {notes}")
+            text = "\n\n".join(chunks)
+
+        self.parent.after(0, lambda: self._set_text_widget_value(widget, text))
+
+    def _show_quality_item_detail(self, it):
+        """Show a normalized detail window for a low-score item."""
         win = tk.Toplevel(self.parent)
-        win.title(f"Detail — {it.get('opus_id', '')[:40]}")
-        win.geometry("700x520")
+        win.title(f"Detail - {it.get('opus_id', '')[:40]}")
+        win.geometry("700x560")
         win.configure(bg="#1a1a2e")
 
         pad = {"padx": 16, "pady": 4}
 
         def _add_row(parent, label, value, **kwargs):
-            f = ttk.Frame(parent, style="App.TFrame")
-            f.pack(fill="x", **pad)
-            ttk.Label(f, text=label, style="Card.TLabel", width=16,
+            frame = ttk.Frame(parent, style="App.TFrame")
+            frame.pack(fill="x", **pad)
+            ttk.Label(frame, text=label, style="Card.TLabel", width=16,
                       anchor="e").pack(side="left")
-            val_widget = tk.Text(f, height=kwargs.get("height", 1), width=60,
-                                 bg="#16213e", fg="#ccc", font=(FONT_FAMILY, 10),
-                                 wrap="word", relief="flat", borderwidth=0)
-            val_widget.insert("1.0", str(value or "—"))
-            val_widget.configure(state="disabled")
-            val_widget.pack(side="left", padx=(8, 0), fill="x", expand=True)
+            widget = tk.Text(
+                frame,
+                height=kwargs.get("height", 1),
+                width=60,
+                bg="#16213e",
+                fg="#ccc",
+                font=(FONT_FAMILY, 10),
+                wrap="word",
+                relief="flat",
+                borderwidth=0,
+            )
+            widget.insert("1.0", str(value or "-"))
+            widget.configure(state="disabled")
+            widget.pack(side="left", padx=(8, 0), fill="x", expand=True)
+            return widget
 
         _add_row(win, "String Key:", it.get("opus_id", ""))
         _add_row(win, "Language:", it.get("target_language", ""))
         _add_row(win, "Source:", it.get("source_text", ""), height=3)
         _add_row(win, "Translated:", it.get("translated_text", ""), height=3)
-        _add_row(win, "Score:", it.get("final_score", "—"))
-        _add_row(win, "Error Category:", it.get("error_category", "—"))
+        _add_row(win, "Score:", it.get("final_score", "-"))
+        _add_row(win, "Error Category:", it.get("error_category", "-"))
         _add_row(win, "Reason:", it.get("reason", ""), height=3)
         _add_row(win, "Iteration:", it.get("iteration", 1))
 
-        # Iteration history
-        hist = it.get("iteration_history")
-        if hist and isinstance(hist, dict):
-            iter1_score = hist.get("iteration_1", {}).get("final_score")
-            if iter1_score is not None:
-                _add_row(win, "Iter 1 Score:", iter1_score)
-                _add_row(win, "Iter 1 Reason:",
-                         hist.get("iteration_1", {}).get("reason", ""))
+        iter1 = qa.get_iteration_snapshot(it, "iteration_1")
+        if iter1.get("final_score") is not None:
+            _add_row(win, "Iter 1 Score:", iter1.get("final_score"))
+            if iter1.get("translation"):
+                _add_row(win, "Iter 1 Text:", iter1.get("translation"), height=2)
+            _add_row(win, "Iter 1 Reason:", iter1.get("reason", ""), height=2)
 
-        # Reviewer / human touch
         comment = it.get("reviewer_comment") or it.get("reviewer_notes") or ""
         if comment:
             _add_row(win, "Reviewer:", comment, height=2)
         if it.get("fixed_by_lead"):
             _add_row(win, "Fixed by:", it.get("fixed_by_lead", ""))
             _add_row(win, "Fixed text:", it.get("fixed_text", ""), height=2)
+        if it.get("warning_types"):
+            _add_row(win, "Warnings:", ", ".join(it.get("warning_types", [])))
 
-        # Close button
+        if it.get("_source_type") == "File" and it.get("_task_id") and it.get("translation_id"):
+            edit_widget = _add_row(win, "Edit Logs:", "Loading...", height=6)
+            threading.Thread(
+                target=self._load_legacy_edit_logs,
+                args=(it.get("_task_id"), it.get("translation_id"), edit_widget),
+                daemon=True,
+            ).start()
+
         btn_close = self.app._create_button(
             win, text="Close", command=win.destroy,
             style_name="SecondarySmall", font=(FONT_FAMILY, 10),
             bg="#0f3460", fg="#ccc", padx=20, pady=4)
         btn_close.pack(pady=12)
+
+    def _show_item_detail(self, it):
+        """Backward-compatible wrapper."""
+        self._show_quality_item_detail(it)
 
     # ------------------------------------------------------------------
     # Export

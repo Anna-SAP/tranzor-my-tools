@@ -11,6 +11,7 @@ import os
 import platform
 import webbrowser
 from collections import OrderedDict
+from datetime import date, datetime
 
 # ---------------------------------------------------------------------------
 # 跨平台字体适配
@@ -27,12 +28,12 @@ else:  # Windows / Linux
 DEFAULT_THRESHOLD = 98
 
 SCORE_BINS = [
-    ("0–79",   0,  80),
-    ("80–89",  80, 90),
-    ("90–94",  90, 95),
-    ("95–97",  95, 98),
-    ("98–99",  98, 100),
-    ("100",    100, 101),
+    ("0-79", 0, 80),
+    ("80-89", 80, 90),
+    ("90-94", 90, 95),
+    ("95-97", 95, 98),
+    ("98-99", 98, 100),
+    ("100", 100, 101),
 ]
 
 ERROR_CATEGORIES = [
@@ -44,109 +45,247 @@ ERROR_CATEGORIES = [
 # ---------------------------------------------------------------------------
 # 2) 数据聚合 — 通用内部函数
 # ---------------------------------------------------------------------------
+def _as_score(value):
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_error_category(category):
+    if category in (None, "", "None"):
+        return None
+    return str(category)
+
+
+def _has_refinement(item):
+    iteration = item.get("iteration")
+    if iteration is not None:
+        try:
+            if int(iteration) >= 2:
+                return True
+        except (TypeError, ValueError):
+            pass
+    return bool(item.get("iteration_history"))
+
+
+def _has_human_touch(item):
+    for field in ("reviewer_comment", "reviewer_notes"):
+        value = item.get(field)
+        if value and str(value).strip():
+            return True
+    if item.get("fixed_by_lead"):
+        return True
+    try:
+        return int(item.get("edit_log_count") or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _warning_key(source_id, language):
+    return str(source_id or ""), str(language or "")
+
+
+def _parse_event_date(value):
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if not isinstance(value, str):
+        return None
+
+    text = value.strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+
+    try:
+        return datetime.fromisoformat(text).date()
+    except ValueError:
+        try:
+            return datetime.fromisoformat(text.split("T")[0]).date()
+        except ValueError:
+            return None
+
+
+def get_iteration_snapshot(item, iteration_key="iteration_1"):
+    """Return a normalized iteration snapshot from iteration_history."""
+    history = item.get("iteration_history")
+    if not isinstance(history, dict):
+        return {}
+
+    raw = history.get(iteration_key) or {}
+    evaluation = raw.get("evaluation") or {}
+    return {
+        "translation": raw.get("translation"),
+        "final_score": _as_score(evaluation.get("final_score", raw.get("final_score"))),
+        "error_category": evaluation.get("error_category", raw.get("error_category")),
+        "reason": evaluation.get("reason", raw.get("reason")),
+        "penalty_points": evaluation.get("penalty_points", raw.get("penalty_points")),
+        "critical_count": evaluation.get("critical_count", raw.get("critical_count")),
+        "major_count": evaluation.get("major_count", raw.get("major_count")),
+        "minor_count": evaluation.get("minor_count", raw.get("minor_count")),
+    }
+
+
+def _build_trend_points(items, threshold):
+    buckets = {}
+    for item in items:
+        event_date = _parse_event_date(item.get("_quality_event_at"))
+        score = _as_score(item.get("final_score"))
+        if event_date is None or score is None:
+            continue
+        bucket = buckets.setdefault(event_date, {"scores": [], "below": 0})
+        bucket["scores"].append(score)
+        if score < threshold:
+            bucket["below"] += 1
+
+    trend_points = []
+    for event_date, bucket in sorted(buckets.items()):
+        count = len(bucket["scores"])
+        if count == 0:
+            continue
+        trend_points.append({
+            "date": event_date.isoformat(),
+            "label": event_date.strftime("%m-%d"),
+            "avg_score": round(sum(bucket["scores"]) / count, 2),
+            "below_rate": round(bucket["below"] / count * 100, 1),
+            "count": count,
+        })
+    return trend_points
+
+
+def _build_error_by_language(items):
+    grouped = {}
+    for item in items:
+        category = _normalize_error_category(item.get("error_category"))
+        if not category:
+            continue
+        language = item.get("target_language") or "(unknown)"
+        lang_bucket = grouped.setdefault(language, {})
+        lang_bucket[category] = lang_bucket.get(category, 0) + 1
+
+    ranked = sorted(
+        grouped.items(),
+        key=lambda pair: (-sum(pair[1].values()), pair[0])
+    )
+    return OrderedDict(ranked[:10])
+
+
+def _build_legacy_warning_index(warnings):
+    index = {}
+    for warning in warnings.get("inconsistent", []) or []:
+        language = warning.get("target_language")
+        for source_id in warning.get("source_ids") or []:
+            key = _warning_key(source_id, language)
+            index.setdefault(key, set()).add("inconsistent")
+
+    for warning in warnings.get("untranslated", []) or []:
+        key = _warning_key(warning.get("source_id"), warning.get("target_language"))
+        index.setdefault(key, set()).add("untranslated")
+
+    return index
+
+
 def _compute_metrics(items, threshold=DEFAULT_THRESHOLD):
-    """从翻译条目列表计算通用质量指标。
-
-    items: list of dicts, 每条至少含 final_score, error_category, target_language,
-           以及可选的 iteration, iteration_history, reviewer_comment/reviewer_notes,
-           fixed_by_lead, cached, ice_match 等字段。
-
-    Returns: dict with all aggregated metrics.
-    """
+    """从归一化后的条目列表计算质量概览指标。"""
     total_items = len(items)
-    scored = [it for it in items if it.get("final_score") is not None]
-    scores = [it["final_score"] for it in scored]
+    scored = []
+    for item in items:
+        score = _as_score(item.get("final_score"))
+        if score is None:
+            continue
+        normalized = dict(item)
+        normalized["final_score"] = score
+        scored.append(normalized)
 
+    scores = [item["final_score"] for item in scored]
     avg_score = round(sum(scores) / len(scores), 2) if scores else None
 
-    low_items = [it for it in scored if it["final_score"] < threshold]
+    low_items = sorted(
+        [item for item in scored if item["final_score"] < threshold],
+        key=lambda item: (
+            item["final_score"],
+            item.get("target_language", ""),
+            item.get("opus_id", ""),
+        ),
+    )
     below_count = len(low_items)
     below_rate = round(below_count / len(scored) * 100, 1) if scored else 0
 
-    # Refinement: items that went through iteration 2
-    refined_count = sum(
-        1 for it in items
-        if it.get("iteration", 1) >= 2 or it.get("iteration_history")
-    )
+    refined_count = sum(1 for item in items if _has_refinement(item))
     refined_rate = round(refined_count / total_items * 100, 1) if total_items else 0
 
-    # Human touch: has reviewer comment/notes or fixed_by_lead
-    human_count = sum(
-        1 for it in items
-        if (it.get("reviewer_comment") and str(it["reviewer_comment"]).strip())
-        or (it.get("reviewer_notes") and str(it["reviewer_notes"]).strip())
-        or it.get("fixed_by_lead")
-    )
+    human_count = sum(1 for item in items if _has_human_touch(item))
     human_rate = round(human_count / total_items * 100, 1) if total_items else 0
 
-    # Cache / ICE rate
     cached_count = sum(
-        1 for it in items
-        if it.get("cached") or it.get("ice_match")
+        1 for item in items
+        if item.get("cached") or item.get("ice_match")
     )
 
-    # Error category distribution
-    err_dist = OrderedDict()
-    for cat in ERROR_CATEGORIES:
-        err_dist[cat] = 0
-    for it in items:
-        cat = it.get("error_category")
-        if cat and cat in err_dist:
-            err_dist[cat] += 1
-        elif cat and cat != "None":
-            err_dist[cat] = err_dist.get(cat, 0) + 1
+    err_dist = OrderedDict((category, 0) for category in ERROR_CATEGORIES)
+    for item in items:
+        category = _normalize_error_category(item.get("error_category"))
+        if not category:
+            continue
+        err_dist[category] = err_dist.get(category, 0) + 1
 
-    # Score distribution
-    score_dist = OrderedDict()
-    for label, lo, hi in SCORE_BINS:
-        score_dist[label] = 0
-    for it in scored:
-        s = it["final_score"]
-        for label, lo, hi in SCORE_BINS:
-            if lo <= s < hi:
+    score_dist = OrderedDict((label, 0) for label, _, _ in SCORE_BINS)
+    for item in scored:
+        score = item["final_score"]
+        for label, lower, upper in SCORE_BINS:
+            if lower <= score < upper:
                 score_dist[label] += 1
                 break
 
-    # By-language breakdown
     by_lang = {}
-    for it in items:
-        lang = it.get("target_language", "(unknown)")
-        if lang not in by_lang:
-            by_lang[lang] = {
-                "count": 0, "score_sum": 0, "scored_count": 0,
-                "below": 0, "refined": 0, "human": 0, "warnings": 0,
-            }
-        entry = by_lang[lang]
+    for item in items:
+        language = item.get("target_language") or "(unknown)"
+        entry = by_lang.setdefault(language, {
+            "count": 0,
+            "score_sum": 0,
+            "scored_count": 0,
+            "below": 0,
+            "refined": 0,
+            "human": 0,
+            "warnings": 0,
+        })
         entry["count"] += 1
-        score = it.get("final_score")
+        score = _as_score(item.get("final_score"))
         if score is not None:
             entry["score_sum"] += score
             entry["scored_count"] += 1
             if score < threshold:
                 entry["below"] += 1
-        if it.get("iteration", 1) >= 2 or it.get("iteration_history"):
+        if _has_refinement(item):
             entry["refined"] += 1
-        if ((it.get("reviewer_comment") and str(it["reviewer_comment"]).strip())
-                or (it.get("reviewer_notes") and str(it["reviewer_notes"]).strip())
-                or it.get("fixed_by_lead")):
+        if _has_human_touch(item):
             entry["human"] += 1
-        if it.get("warning_flags"):
+        if item.get("warning_flags"):
             entry["warnings"] += 1
 
     lang_details = []
-    for lang, d in sorted(by_lang.items()):
-        avg = d["score_sum"] / d["scored_count"] if d["scored_count"] else None
-        below_pct = round(d["below"] / d["scored_count"] * 100, 1) if d["scored_count"] else 0
-        refined_pct = round(d["refined"] / d["count"] * 100, 1) if d["count"] else 0
-        human_pct = round(d["human"] / d["count"] * 100, 1) if d["count"] else 0
+    for language, data in sorted(by_lang.items()):
+        avg = data["score_sum"] / data["scored_count"] if data["scored_count"] else None
+        below_pct = round(data["below"] / data["scored_count"] * 100, 1) if data["scored_count"] else 0
+        refined_pct = round(data["refined"] / data["count"] * 100, 1) if data["count"] else 0
+        human_pct = round(data["human"] / data["count"] * 100, 1) if data["count"] else 0
         lang_details.append({
-            "language": lang,
-            "count": d["count"],
+            "language": language,
+            "count": data["count"],
             "average_score": round(avg, 1) if avg is not None else None,
             "below_threshold_pct": below_pct,
             "refined_pct": refined_pct,
             "human_touched_pct": human_pct,
-            "warnings": d["warnings"],
+            "warnings": data["warnings"],
         })
 
     return {
@@ -162,6 +301,8 @@ def _compute_metrics(items, threshold=DEFAULT_THRESHOLD):
         "score_distribution": score_dist,
         "by_language": lang_details,
         "low_items": low_items,
+        "trend_points": _build_trend_points(scored, threshold),
+        "error_by_language": _build_error_by_language(items),
     }
 
 
@@ -169,32 +310,31 @@ def _compute_metrics(items, threshold=DEFAULT_THRESHOLD):
 # 3) 数据聚合 — MR 链路
 # ---------------------------------------------------------------------------
 def aggregate_mr_quality(overview_data, cases_data, threshold=DEFAULT_THRESHOLD):
-    """从 dashboard overview + cases 聚合 MR 链路质量数据"""
-    total_tasks = overview_data.get("total_tasks", 0)
-    completed = overview_data.get("completed", 0)
-    failed = overview_data.get("failed", 0)
-
-    # Flatten all translations from MR-grouped cases
+    """从 dashboard overview + cases 聚合 MR 链路质量数据。"""
     all_items = []
-    mrs = cases_data.get("merge_requests", [])
-    for mr in mrs:
+    for mr in cases_data.get("mrs", []) or []:
         mr_iid = mr.get("mr_iid", "")
         project_id = mr.get("project_id", "")
-        for item in mr.get("translations", []):
-            item["_source_type"] = "MR"
-            item["_scope_name"] = f"MR !{mr_iid}" if mr_iid else ""
-            item["_project_id"] = project_id
-            all_items.append(item)
+        merged_at = mr.get("merged_at")
+        for item in mr.get("cases", []) or []:
+            normalized = dict(item)
+            normalized["final_score"] = _as_score(item.get("final_score"))
+            normalized["error_category"] = _normalize_error_category(item.get("error_category"))
+            normalized["_source_type"] = "MR"
+            normalized["_scope_name"] = f"MR !{mr_iid}" if mr_iid else ""
+            normalized["_project_id"] = project_id
+            normalized["_quality_event_at"] = merged_at
+            all_items.append(normalized)
 
     metrics = _compute_metrics(all_items, threshold)
-    metrics["total_tasks"] = total_tasks
-    metrics["completed"] = completed
-    metrics["failed"] = failed
+    metrics["total_tasks"] = overview_data.get("total_tasks", 0)
+    metrics["completed"] = overview_data.get("completed", 0)
+    metrics["failed"] = overview_data.get("failed", 0)
     return metrics
 
 
 def aggregate_quality_data(overview_data, cases_data, threshold=DEFAULT_THRESHOLD):
-    """向后兼容入口 — 等同于 aggregate_mr_quality"""
+    """向后兼容入口。"""
     return aggregate_mr_quality(overview_data, cases_data, threshold)
 
 
@@ -203,12 +343,7 @@ def aggregate_quality_data(overview_data, cases_data, threshold=DEFAULT_THRESHOL
 # ---------------------------------------------------------------------------
 def aggregate_legacy_quality(tasks, translations_map, warnings_map=None,
                              threshold=DEFAULT_THRESHOLD):
-    """聚合 Legacy 文件翻译链路质量数据。
-
-    tasks: list of task dicts (from /legacy/tasks)
-    translations_map: dict { task_id: [translation_items, ...] }
-    warnings_map: optional dict { task_id: warnings_response }
-    """
+    """聚合 Legacy 文件翻译链路质量数据。"""
     if warnings_map is None:
         warnings_map = {}
 
@@ -216,36 +351,42 @@ def aggregate_legacy_quality(tasks, translations_map, warnings_map=None,
     for task in tasks:
         task_id = task.get("task_id") or task.get("id")
         task_name = task.get("task_name") or task.get("name", "")
+        project_name = task.get("project_name", "")
+        created_at = task.get("created_at")
         trans_list = translations_map.get(str(task_id), [])
-
-        # Build warning set for this task
-        warn_set = set()
-        warns = warnings_map.get(str(task_id), {})
-        for w in warns.get("warnings", []):
-            key = (w.get("opus_id", ""), w.get("target_language", ""))
-            warn_set.add(key)
+        warning_index = _build_legacy_warning_index(
+            warnings_map.get(str(task_id), {}) or {}
+        )
 
         for item in trans_list:
-            item["_source_type"] = "File"
-            item["_scope_name"] = task_name
-            item["_task_id"] = str(task_id)
-            # Map legacy field names
-            if "opus_id" not in item and "unit_id" in item:
-                item["opus_id"] = item["unit_id"]
-            # Check warnings
-            key = (item.get("opus_id", ""), item.get("target_language", ""))
-            if key in warn_set:
-                item["warning_flags"] = True
-            all_items.append(item)
+            normalized = dict(item)
+            normalized["final_score"] = _as_score(item.get("final_score"))
+            normalized["error_category"] = _normalize_error_category(item.get("error_category"))
+            normalized["_source_type"] = "File"
+            normalized["_scope_name"] = task_name
+            normalized["_task_id"] = str(task_id)
+            normalized["_project_name"] = project_name
+            normalized["_quality_event_at"] = created_at
+            if not normalized.get("opus_id") and normalized.get("unit_id"):
+                normalized["opus_id"] = normalized["unit_id"]
 
-    total_tasks = len(tasks)
+            warning_key = _warning_key(
+                normalized.get("source_id"),
+                normalized.get("target_language"),
+            )
+            warning_types = sorted(warning_index.get(warning_key, set()))
+            if warning_types:
+                normalized["warning_flags"] = True
+                normalized["warning_types"] = warning_types
+            all_items.append(normalized)
+
     metrics = _compute_metrics(all_items, threshold)
-    metrics["total_tasks"] = total_tasks
+    metrics["total_tasks"] = len(tasks)
     metrics["completed"] = sum(
-        1 for t in tasks if (t.get("status") or "").lower() == "completed"
+        1 for task in tasks if (task.get("status") or "").lower() == "completed"
     )
     metrics["failed"] = sum(
-        1 for t in tasks if (t.get("status") or "").lower() == "failed"
+        1 for task in tasks if (task.get("status") or "").lower() == "failed"
     )
     return metrics
 

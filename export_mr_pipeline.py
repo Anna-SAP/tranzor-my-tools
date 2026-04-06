@@ -428,6 +428,38 @@ def fetch_dashboard_cases(project_id=None, release=None, language=None,
 # ---------------------------------------------------------------------------
 # 6b) Dashboard MRs（MR 列表 + per-MR 质量统计）
 # ---------------------------------------------------------------------------
+def fetch_all_dashboard_cases(project_id=None, release=None, language=None,
+                              min_score=None, max_score=None,
+                              page_size=100):
+    """Fetch the complete MR-grouped cases dataset for Quality Overview."""
+    all_mrs = []
+    offset = 0
+    total_mrs = 0
+
+    while True:
+        page = fetch_dashboard_cases(
+            project_id=project_id,
+            release=release,
+            language=language,
+            min_score=min_score,
+            max_score=max_score,
+            mr_limit=page_size,
+            mr_offset=offset,
+        )
+        page_mrs = page.get("mrs", [])
+        total_mrs = page.get("total_mrs", total_mrs)
+        all_mrs.extend(page_mrs)
+        if not page.get("has_more") or not page_mrs:
+            break
+        offset += len(page_mrs)
+
+    return {
+        "total_mrs": total_mrs or len(all_mrs),
+        "has_more": False,
+        "mrs": all_mrs,
+    }
+
+
 def fetch_dashboard_mrs(project_id=None, release=None, language=None,
                         min_score=None, max_score=None,
                         mr_limit=100, mr_offset=0):
@@ -470,13 +502,38 @@ def fetch_legacy_tasks_for_quality(project_name=None, status="Completed",
     return data.get("tasks", []), data.get("total", 0)
 
 
-def fetch_legacy_translations_quality(task_id, limit=500, offset=0):
+def fetch_all_legacy_tasks_for_quality(project_name=None, status="Completed",
+                                       page_size=200):
+    """Fetch the complete legacy task list for Quality Overview."""
+    all_tasks = []
+    offset = 0
+    total = 0
+
+    while True:
+        tasks, total = fetch_legacy_tasks_for_quality(
+            project_name=project_name,
+            status=status,
+            limit=page_size,
+            offset=offset,
+        )
+        all_tasks.extend(tasks)
+        offset += len(tasks)
+        if offset >= total or not tasks:
+            break
+
+    return all_tasks
+
+
+def fetch_legacy_translations_quality(task_id, limit=500, offset=0,
+                                      target_language=None):
     """GET /legacy/tasks/{task_id}/translations — 翻译结果含质量评分"""
     params = {"limit": limit, "offset": offset}
+    if target_language:
+        params["target_language"] = target_language
     resp = _api_get(f"{LEGACY_API}/tasks/{task_id}/translations", params=params)
     resp.raise_for_status()
     data = resp.json()
-    return data.get("translations", []), data.get("total", 0)
+    return data.get("entries", []), data.get("total", 0)
 
 
 def fetch_legacy_translation_warnings(task_id):
@@ -486,15 +543,30 @@ def fetch_legacy_translation_warnings(task_id):
         resp.raise_for_status()
         return resp.json()
     except Exception:
-        return {"warnings": []}
+        return {"inconsistent": [], "untranslated": []}
 
 
-def fetch_all_legacy_translations_quality(task_id, page_size=500):
+def fetch_legacy_translation_edit_logs(task_id, translation_id):
+    """GET /legacy/tasks/{task_id}/translations/{translation_id}/edit-logs"""
+    resp = _api_get(
+        f"{LEGACY_API}/tasks/{task_id}/translations/{translation_id}/edit-logs"
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def fetch_all_legacy_translations_quality(task_id, page_size=500,
+                                          target_language=None):
     """分页获取某个 legacy task 的全部翻译（含质量数据）"""
     all_items = []
     offset = 0
     while True:
-        items, total = fetch_legacy_translations_quality(task_id, limit=page_size, offset=offset)
+        items, total = fetch_legacy_translations_quality(
+            task_id,
+            limit=page_size,
+            offset=offset,
+            target_language=target_language,
+        )
         all_items.extend(items)
         offset += len(items)
         if offset >= total or not items:
