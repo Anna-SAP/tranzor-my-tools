@@ -162,6 +162,27 @@ def _build_trend_points(items, threshold):
     return trend_points
 
 
+def _normalize_trend_points(data_points):
+    """Keep only dated time-series points so non-time buckets cannot masquerade as trends."""
+    normalized = []
+    for point in data_points or []:
+        if not isinstance(point, dict):
+            continue
+        event_date = _parse_event_date(point.get("date"))
+        score = _as_score(point.get("avg_score"))
+        if event_date is None or score is None:
+            continue
+        normalized.append({
+            "date": event_date.isoformat(),
+            "label": point.get("label") or event_date.strftime("%m-%d"),
+            "avg_score": score,
+            "below_rate": _as_score(point.get("below_rate")),
+            "count": point.get("count"),
+        })
+    normalized.sort(key=lambda point: point["date"])
+    return normalized
+
+
 def _build_error_by_language(items):
     grouped = {}
     for item in items:
@@ -521,9 +542,10 @@ def draw_trend_chart(canvas, data_points, width, height,
                      threshold=DEFAULT_THRESHOLD, title=""):
     """在 tkinter Canvas 上绘制质量趋势折线图。
 
-    data_points: list of {"label": str, "avg_score": float, "below_rate": float}
+    data_points: list of {"date": "2026-04-06", "label": "04-06", "avg_score": 98.6}
     """
     canvas.delete("all")
+    data_points = _normalize_trend_points(data_points)
 
     if title:
         canvas.create_text(width // 2, 16, text=title,
@@ -531,7 +553,7 @@ def draw_trend_chart(canvas, data_points, width, height,
 
     if not data_points or len(data_points) < 2:
         canvas.create_text(width // 2, height // 2,
-                           text="Insufficient data for trend",
+                           text="Need at least 2 dated points",
                            fill="#666", font=(FONT_FAMILY, 10))
         return
 

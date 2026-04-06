@@ -611,6 +611,9 @@ class QualityOverviewTab:
     def _t(self, key):
         return self.app._t(key)
 
+    def _quality_trend_title(self):
+        return f"{self._t('qa_trend')} (By Date)"
+
     # ------------------------------------------------------------------
     # Build UI
     # ------------------------------------------------------------------
@@ -757,7 +760,11 @@ class QualityOverviewTab:
         trend_outer = ttk.Frame(chart_frame2, style="Card.TFrame")
         trend_outer.pack(side="left", fill="both", expand=True, padx=(0, 4))
         trend_outer.configure(borderwidth=1, relief="solid")
-        self.lbl_trend_title = ttk.Label(trend_outer, text="Quality Trend", style="SummaryTitle.TLabel")
+        self.lbl_trend_title = ttk.Label(
+            trend_outer,
+            text=self._quality_trend_title(),
+            style="SummaryTitle.TLabel",
+        )
         self.lbl_trend_title.pack(anchor="w", padx=12, pady=(8, 0))
         self.trend_canvas = tk.Canvas(trend_outer, bg="#16213e", highlightthickness=0, height=200)
         self.trend_canvas.pack(fill="x", padx=8, pady=8)
@@ -921,7 +928,7 @@ class QualityOverviewTab:
 
         self.lbl_bar_title.configure(text=t("qa_score_dist"))
         self.lbl_pie_title.configure(text=t("qa_error_dist"))
-        self.lbl_trend_title.configure(text=t("qa_trend"))
+        self.lbl_trend_title.configure(text=self._quality_trend_title())
         self.lbl_stacked_title.configure(text=t("qa_err_by_lang"))
         self.lbl_lang_title.configure(text=t("qa_lang_detail"))
         self.lbl_low_title.configure(text=t("qa_low_items"))
@@ -1134,7 +1141,7 @@ class QualityOverviewTab:
             trend_width,
             200,
             threshold=threshold,
-            title=self._t("qa_trend"),
+            title=self._quality_trend_title(),
         )
 
         self.stacked_canvas.update_idletasks()
