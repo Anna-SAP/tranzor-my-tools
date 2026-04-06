@@ -1,0 +1,844 @@
+{
+  "query_date": "2026-04-03",
+  "total_mrs_checked": 2313,
+  "total_cases_checked": 101578,
+  "fix_edits": [],
+  "reviewer_comments": [
+    {
+      "project_id": "engage-voice/frontend/frontend",
+      "mr_iid": 8007,
+      "opus_id": "RingCentral.evFrontend.e57ea868a687c54149470dd72360df8c.AGENT_MONITOR.PREVIEW_NOTIF",
+      "target_language": "zh-CN",
+      "reviewer_comment": "good correction"
+    },
+    {
+      "project_id": "engage-voice/frontend/frontend",
+      "mr_iid": 8227,
+      "opus_id": "RingCentral.evFrontend.523dc5cbb2c529eec08ca121e7e84e7d.AGENT_ROLES.CONFIG.DESCRIPTION.DIGITAL.DEFAULT_AUTO_ACCEPT_DIGITAL_INTERACTIONS_ON",
+      "target_language": "zh-CN",
+      "reviewer_comment": "座席"
+    }
+  ],
+  "apr3_tasks": [
+    {
+      "task_id": "4905e91c-38b4-4236-bce9-48ca6962108b",
+      "project_id": "CoreLib/rcvrooms-android",
+      "merge_request_iid": 8694,
+      "release": null,
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T20:44:41.061939",
+      "updated_at": "2026-04-03T20:44:53.450950"
+    },
+    {
+      "task_id": "6ff4c740-3374-4b27-86d4-c4adf26d30cb",
+      "project_id": "CoreLib/RoomsController",
+      "merge_request_iid": 5465,
+      "release": null,
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T14:01:30.261812",
+      "updated_at": "2026-04-03T14:01:54.960248"
+    },
+    {
+      "task_id": "0f6dfb07-23a2-4e3b-9d75-25e44fd93d32",
+      "project_id": "dpw-xmn/apw-in-jupiter",
+      "merge_request_iid": 2315,
+      "release": null,
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T10:27:49.872601",
+      "updated_at": "2026-04-03T10:28:09.274498"
+    },
+    {
+      "task_id": "ccef7c58-8460-4cab-91ed-63d810514d8b",
+      "project_id": "dpw-xmn/apw-in-jupiter",
+      "merge_request_iid": 2315,
+      "release": null,
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T09:50:16.820220",
+      "updated_at": "2026-04-03T09:50:35.813335"
+    },
+    {
+      "task_id": "5dcd649d-9ab4-4443-b480-701dd8ba6613",
+      "project_id": "dpw-xmn/apw-in-jupiter",
+      "merge_request_iid": 2315,
+      "release": null,
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T09:40:50.651435",
+      "updated_at": "2026-04-03T09:41:13.315876"
+    },
+    {
+      "task_id": "a45cc5f8-d49e-4335-b844-b89b6f5d7bdf",
+      "project_id": "copilot-platform/nova/agentic-integration-frontend",
+      "merge_request_iid": 838,
+      "release": null,
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T09:31:30.228884",
+      "updated_at": "2026-04-03T09:31:56.536388"
+    },
+    {
+      "task_id": "86066734-a254-4208-badd-32d7aa0530e0",
+      "project_id": "dpw-xmn/apw-in-jupiter",
+      "merge_request_iid": 2316,
+      "release": null,
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T09:23:42.665435",
+      "updated_at": "2026-04-03T09:24:13.812527"
+    },
+    {
+      "task_id": "3779bad2-5eec-498c-aa61-1c923ee2a4dc",
+      "project_id": "copilot-platform/nova/agentic-integration-frontend",
+      "merge_request_iid": 840,
+      "release": "Nova 26.2.120",
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T09:00:46.086966",
+      "updated_at": "2026-04-03T09:01:09.630629"
+    },
+    {
+      "task_id": "0cb2e649-f350-4c9b-9db0-b0bc8ea0f73e",
+      "project_id": "dpw-xmn/apw-in-jupiter",
+      "merge_request_iid": 2315,
+      "release": null,
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T08:57:50.146849",
+      "updated_at": "2026-04-03T08:58:08.947977"
+    },
+    {
+      "task_id": "e4f5c8d7-bb83-4e14-a306-68274e722c1f",
+      "project_id": "CoreLib/rcvrooms-android",
+      "merge_request_iid": 8689,
+      "release": "Rooms 26.2.10",
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T08:39:51.162724",
+      "updated_at": "2026-04-03T08:40:14.561817"
+    },
+    {
+      "task_id": "e024d2df-df9e-4df2-9b24-ab53f3174ccc",
+      "project_id": "copilot-platform/nova/agentic-integration-frontend",
+      "merge_request_iid": 838,
+      "release": null,
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T08:37:29.919913",
+      "updated_at": "2026-04-03T08:37:53.601866"
+    },
+    {
+      "task_id": "a670f33a-ad0f-4c69-893a-294d27b4a147",
+      "project_id": "integration/integration-apps",
+      "merge_request_iid": 28266,
+      "release": "unknown",
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T08:35:22.869696",
+      "updated_at": "2026-04-03T08:35:58.574180"
+    },
+    {
+      "task_id": "06430a20-d025-4049-97dc-8354c9b5b8a1",
+      "project_id": "integration/integration-apps",
+      "merge_request_iid": 28266,
+      "release": "unknown",
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T08:30:24.215693",
+      "updated_at": "2026-04-03T08:31:18.128925"
+    },
+    {
+      "task_id": "a7c441e4-3167-4984-b904-29284bd439a7",
+      "project_id": "CoreLib/rcvrooms-android",
+      "merge_request_iid": 8689,
+      "release": "Rooms 26.2.10",
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T08:19:12.834517",
+      "updated_at": "2026-04-03T08:19:36.893953"
+    },
+    {
+      "task_id": "714017aa-684e-4611-a6ad-5a02e373aec0",
+      "project_id": "integration/uif",
+      "merge_request_iid": 1649,
+      "release": "unknown",
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T08:15:25.229156",
+      "updated_at": "2026-04-03T08:15:51.674801"
+    },
+    {
+      "task_id": "b39e094d-0881-41b8-8728-e7233299c1b3",
+      "project_id": "integration/uif",
+      "merge_request_iid": 1651,
+      "release": "Release 26.2.10",
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T08:01:43.786479",
+      "updated_at": "2026-04-03T08:02:27.751149"
+    },
+    {
+      "task_id": "991e4e72-a15c-451e-b5c9-2c9e7739ae32",
+      "project_id": "dpw-xmn/apw-in-jupiter",
+      "merge_request_iid": 2314,
+      "release": "NWB 26.2.110",
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T08:01:35.022037",
+      "updated_at": "2026-04-03T08:02:02.417911"
+    },
+    {
+      "task_id": "74099422-f4aa-41a1-91da-718eed0cc1f7",
+      "project_id": "integration/uif",
+      "merge_request_iid": 1649,
+      "release": "unknown",
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T07:59:27.337554",
+      "updated_at": "2026-04-03T07:59:53.710352"
+    },
+    {
+      "task_id": "97828f2b-86b3-43ea-8762-1ee007ff9867",
+      "project_id": "dpw-xmn/apw-in-jupiter",
+      "merge_request_iid": 2314,
+      "release": "NWB 26.2.110",
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T07:54:37.568242",
+      "updated_at": "2026-04-03T07:54:58.927313"
+    },
+    {
+      "task_id": "cbb06dd2-de7a-4433-9466-32d43006be05",
+      "project_id": "CoreLib/rcvrooms-android",
+      "merge_request_iid": 8689,
+      "release": "Rooms 26.2.10",
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T07:50:38.605902",
+      "updated_at": "2026-04-03T07:50:55.687707"
+    },
+    {
+      "task_id": "d1fbba08-fedb-4a86-bc25-bb5d9c5d41b7",
+      "project_id": "copilot-platform/nova/agentic-integration-frontend",
+      "merge_request_iid": 840,
+      "release": "Nova 26.2.120",
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T07:47:33.684719",
+      "updated_at": "2026-04-03T07:47:54.687170"
+    },
+    {
+      "task_id": "b83a816e-6b6d-4345-a8c4-05125c633e91",
+      "project_id": "copilot-platform/nova/agentic-integration-frontend",
+      "merge_request_iid": 839,
+      "release": "unknown",
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T07:39:23.460354",
+      "updated_at": "2026-04-03T07:39:33.975520"
+    },
+    {
+      "task_id": "e46397c6-37da-4cb7-a494-79467dbfb4b4",
+      "project_id": "copilot-platform/nova/agentic-integration-frontend",
+      "merge_request_iid": 840,
+      "release": "Nova 26.2.120",
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T07:35:38.394930",
+      "updated_at": "2026-04-03T07:35:49.487579"
+    },
+    {
+      "task_id": "97df2cee-52f3-489e-a39d-7b33289fd060",
+      "project_id": "copilot-platform/nova/agentic-integration-frontend",
+      "merge_request_iid": 839,
+      "release": "unknown",
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T07:34:50.921559",
+      "updated_at": "2026-04-03T07:35:05.322859"
+    },
+    {
+      "task_id": "596be119-e315-4779-a98c-0e7aefc7a2c1",
+      "project_id": "CoreLib/rcvrooms-android",
+      "merge_request_iid": 8689,
+      "release": "Rooms 26.2.10",
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T07:31:58.958307",
+      "updated_at": "2026-04-03T07:32:32.892211"
+    },
+    {
+      "task_id": "5f972494-4905-4011-aeb0-cf687205817b",
+      "project_id": "copilot-platform/nova/agentic-integration-frontend",
+      "merge_request_iid": 840,
+      "release": "Nova 26.2.120",
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T07:31:42.306877",
+      "updated_at": "2026-04-03T07:32:07.174709"
+    },
+    {
+      "task_id": "cbcb8f09-fe90-44c8-ab30-4c318e41d1af",
+      "project_id": "dpw-xmn/apw-in-jupiter",
+      "merge_request_iid": 2314,
+      "release": "NWB 26.2.110",
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T07:20:55.569524",
+      "updated_at": "2026-04-03T07:21:11.881739"
+    },
+    {
+      "task_id": "ba25b580-d9e6-4149-89f5-c0c7499a76fb",
+      "project_id": "copilot-platform/nova/agentic-integration-frontend",
+      "merge_request_iid": 840,
+      "release": "Nova 26.2.120",
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T07:18:48.937149",
+      "updated_at": "2026-04-03T07:19:03.000294"
+    },
+    {
+      "task_id": "a400c003-7036-40ea-81cb-a6370466702e",
+      "project_id": "dpw-xmn/apw-in-jupiter",
+      "merge_request_iid": 2314,
+      "release": "NWB 26.2.110",
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T07:18:27.862295",
+      "updated_at": "2026-04-03T07:20:54.550958"
+    },
+    {
+      "task_id": "0cd544d5-c370-4699-9913-ce75365d21f2",
+      "project_id": "copilot-platform/nova/agentic-integration-frontend",
+      "merge_request_iid": 839,
+      "release": "unknown",
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T07:18:25.126483",
+      "updated_at": "2026-04-03T07:18:48.226736"
+    },
+    {
+      "task_id": "7c9625c8-d513-4f53-9528-db558a0d7a4d",
+      "project_id": "integration/integration-apps",
+      "merge_request_iid": 28268,
+      "release": "Localization 26.2.10",
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T07:12:03.967112",
+      "updated_at": "2026-04-03T07:12:57.184236"
+    },
+    {
+      "task_id": "d6babf06-605b-4206-ab27-190684360138",
+      "project_id": "dpw-xmn/apw-in-jupiter",
+      "merge_request_iid": 2314,
+      "release": "NWB 26.2.110",
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T07:10:35.013921",
+      "updated_at": "2026-04-03T07:10:52.262583"
+    },
+    {
+      "task_id": "89d7a2df-10bb-4ca2-b4d1-7500546a6189",
+      "project_id": "dpw-xmn/apw-in-jupiter",
+      "merge_request_iid": 2314,
+      "release": "NWB 26.2.110",
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T07:05:26.187606",
+      "updated_at": "2026-04-03T07:10:33.911355"
+    },
+    {
+      "task_id": "833997e1-4b3f-4d34-b8e3-2f55f5b51c30",
+      "project_id": "copilot-platform/nova/agentic-integration-frontend",
+      "merge_request_iid": 839,
+      "release": "unknown",
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T07:00:27.224103",
+      "updated_at": "2026-04-03T07:00:49.316591"
+    },
+    {
+      "task_id": "bcf9ed96-fbef-4238-a0b9-7a68d0e1b380",
+      "project_id": "copilot-platform/nova/agentic-integration-frontend",
+      "merge_request_iid": 838,
+      "release": null,
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T06:43:55.040726",
+      "updated_at": "2026-04-03T06:44:18.558427"
+    },
+    {
+      "task_id": "32e40d09-c318-4f79-8a6d-f97f76dd8f93",
+      "project_id": "CoreLib/rcvrooms-android",
+      "merge_request_iid": 8692,
+      "release": "Rooms 26.2.10",
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T06:42:16.508511",
+      "updated_at": "2026-04-03T06:43:21.433291"
+    },
+    {
+      "task_id": "66a31931-afb5-4d65-8071-5fb83fd8665b",
+      "project_id": "CoreLib/rcvrooms-android",
+      "merge_request_iid": 8690,
+      "release": null,
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T06:26:54.379202",
+      "updated_at": "2026-04-03T06:27:18.501430"
+    },
+    {
+      "task_id": "00ca9976-ef8c-4b9f-b4fa-5f249ada2429",
+      "project_id": "CoreLib/rcvrooms-android",
+      "merge_request_iid": 8689,
+      "release": "Rooms 26.2.10",
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T06:25:24.179370",
+      "updated_at": "2026-04-03T06:25:53.375835"
+    },
+    {
+      "task_id": "1aee24cf-c66a-4c41-ac6e-8280debe169a",
+      "project_id": "integration/uif",
+      "merge_request_iid": 1651,
+      "release": "Release 26.2.10",
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T05:59:53.847536",
+      "updated_at": "2026-04-03T06:00:07.757283"
+    },
+    {
+      "task_id": "b8708c0d-3c55-4684-85a6-0e5d888e4276",
+      "project_id": "integration/uif",
+      "merge_request_iid": 1651,
+      "release": "Release 26.2.10",
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T05:59:21.159246",
+      "updated_at": "2026-04-03T05:59:52.967828"
+    },
+    {
+      "task_id": "0b1351e2-4014-4078-9adf-f0416fcd0b85",
+      "project_id": "CoreLib/mthor",
+      "merge_request_iid": 9790,
+      "release": "mThor 26.2.10",
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T05:50:46.955893",
+      "updated_at": "2026-04-03T06:02:10.183271"
+    },
+    {
+      "task_id": "7049fc85-58b5-463f-b7d8-cdc4d46f10c2",
+      "project_id": "dpw-xmn/apw-in-jupiter",
+      "merge_request_iid": 2313,
+      "release": "NWB 26.2.110",
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T05:39:28.824729",
+      "updated_at": "2026-04-03T05:39:56.531100"
+    },
+    {
+      "task_id": "86a4e828-6bf4-45ba-b0ad-fe6154071d00",
+      "project_id": "dpw-xmn/apw-in-jupiter",
+      "merge_request_iid": 2312,
+      "release": "NWB 26.2.110",
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T05:02:40.251787",
+      "updated_at": "2026-04-03T05:02:55.802581"
+    },
+    {
+      "task_id": "52947621-7b5b-4167-aedd-2f7edd2c0614",
+      "project_id": "dpw-xmn/apw-in-jupiter",
+      "merge_request_iid": 2313,
+      "release": "NWB 26.2.110",
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T04:19:02.780463",
+      "updated_at": "2026-04-03T04:19:24.607397"
+    },
+    {
+      "task_id": "895255b2-8e8a-419f-a16b-134e5cb6b415",
+      "project_id": "copilot-platform/nova/agentic-integration-frontend",
+      "merge_request_iid": 833,
+      "release": "unknown",
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T04:05:35.223333",
+      "updated_at": "2026-04-03T04:05:44.221273"
+    },
+    {
+      "task_id": "16528072-b1c3-4909-b19e-85e400f0fc2c",
+      "project_id": "copilot-platform/nova/agentic-integration-frontend",
+      "merge_request_iid": 833,
+      "release": "unknown",
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T04:05:06.388801",
+      "updated_at": "2026-04-03T04:05:30.800082"
+    },
+    {
+      "task_id": "979d4931-ea51-498b-ac2b-ddcef56c3062",
+      "project_id": "dpw-xmn/apw-in-jupiter",
+      "merge_request_iid": 2313,
+      "release": "NWB 26.2.110",
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T03:42:59.819618",
+      "updated_at": "2026-04-03T03:43:26.102021"
+    },
+    {
+      "task_id": "7f90f90b-5177-4cf5-af1f-3e26f6483573",
+      "project_id": "dpw-xmn/apw-in-jupiter",
+      "merge_request_iid": 2312,
+      "release": "NWB 26.2.110",
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T03:26:23.208987",
+      "updated_at": "2026-04-03T03:26:39.150475"
+    },
+    {
+      "task_id": "da7abd54-e035-421d-8c18-67907ff26872",
+      "project_id": "dpw-xmn/apw-in-jupiter",
+      "merge_request_iid": 2310,
+      "release": null,
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T03:22:13.877571",
+      "updated_at": "2026-04-03T03:22:36.296208"
+    },
+    {
+      "task_id": "7f209ace-136e-49d0-aa93-2db647b5b04d",
+      "project_id": "integration/uif",
+      "merge_request_iid": 1651,
+      "release": "Release 26.2.10",
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T03:13:52.837562",
+      "updated_at": "2026-04-03T03:14:06.866686"
+    },
+    {
+      "task_id": "9eabc424-f3bb-4be8-9ca7-38938e153c75",
+      "project_id": "integration/uif",
+      "merge_request_iid": 1651,
+      "release": "Release 26.2.10",
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T03:13:26.529896",
+      "updated_at": "2026-04-03T03:13:51.909792"
+    },
+    {
+      "task_id": "9527a184-e32c-480b-84e0-3eeb0f18b41c",
+      "project_id": "CoreLib/rcvrooms-windows",
+      "merge_request_iid": 5202,
+      "release": "Rooms 26.2.10",
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T03:04:30.393770",
+      "updated_at": "2026-04-03T03:04:49.593851"
+    },
+    {
+      "task_id": "8e774d30-deb7-43e4-8daf-0d30cff3adb4",
+      "project_id": "copilot-platform/nova/agentic-integration-frontend",
+      "merge_request_iid": 832,
+      "release": null,
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T02:56:50.048437",
+      "updated_at": "2026-04-03T02:57:01.057752"
+    },
+    {
+      "task_id": "1291064e-1b7e-4102-967f-d4eda8c8c71a",
+      "project_id": "integration/integration-apps",
+      "merge_request_iid": 28267,
+      "release": "Release 26.2.10",
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T02:55:18.663475",
+      "updated_at": "2026-04-03T02:55:42.393801"
+    },
+    {
+      "task_id": "eb12de82-7b5c-4f83-9e60-f820f06626f9",
+      "project_id": "Fiji/video",
+      "merge_request_iid": 1573,
+      "release": "Jupiter Web 26.2.10",
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T02:40:46.656900",
+      "updated_at": "2026-04-03T02:41:00.153499"
+    },
+    {
+      "task_id": "6a900847-d3d8-43b4-9fb1-bf2d0601c371",
+      "project_id": "Fiji/video",
+      "merge_request_iid": 1573,
+      "release": "Jupiter Web 26.2.10",
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T02:40:13.904198",
+      "updated_at": "2026-04-03T02:40:44.030797"
+    },
+    {
+      "task_id": "6aa51a58-317e-40eb-aee8-c0bdf5064906",
+      "project_id": "integration/integration-apps",
+      "merge_request_iid": 28267,
+      "release": "Release 26.2.10",
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T02:28:13.715784",
+      "updated_at": "2026-04-03T02:28:39.432125"
+    },
+    {
+      "task_id": "4e1fffc2-80d0-4875-90bb-9599dcd7b82a",
+      "project_id": "Fiji/video",
+      "merge_request_iid": 1573,
+      "release": "Jupiter Web 26.2.10",
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T01:59:44.950674",
+      "updated_at": "2026-04-03T02:00:01.216625"
+    },
+    {
+      "task_id": "f81d80ed-3ae9-40ad-af34-d274f6969d4e",
+      "project_id": "Fiji/video",
+      "merge_request_iid": 1573,
+      "release": "Jupiter Web 26.2.10",
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T01:59:20.264617",
+      "updated_at": "2026-04-03T01:59:43.845034"
+    },
+    {
+      "task_id": "9a483689-c959-4d72-8009-1f35ac0c90ac",
+      "project_id": "copilot-platform/nova/agentic-integration-frontend",
+      "merge_request_iid": 837,
+      "release": null,
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T01:43:32.665242",
+      "updated_at": "2026-04-03T01:43:45.734486"
+    },
+    {
+      "task_id": "c6c576a8-f6a5-499a-a7dd-77164aa9db6f",
+      "project_id": "copilot-platform/nova/agentic-integration-frontend",
+      "merge_request_iid": 836,
+      "release": null,
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T01:05:35.742437",
+      "updated_at": "2026-04-03T01:05:45.506886"
+    },
+    {
+      "task_id": "decbfeb7-72de-459d-869e-18f63b76f78d",
+      "project_id": "integration/integration-apps",
+      "merge_request_iid": 28148,
+      "release": null,
+      "status": "completed",
+      "current_step": "COMPLETED",
+      "created_at": "2026-04-03T00:52:58.492920",
+      "updated_at": "2026-04-03T00:53:26.651415"
+    },
+    {
+      "task_id": "22d7e2db-420c-4e83-b72b-ff0ae00053cf",
+      "project_id": "Fiji/webinar",
+      "merge_request_iid": 1901,
+      "release": null,
+      "status": "failed",
+      "current_step": "FAILED",
+      "created_at": "2026-04-03T17:23:23.417492",
+      "updated_at": "2026-04-03T17:23:26.991917"
+    },
+    {
+      "task_id": "99589879-0fc9-4ae2-92b2-e40d8464a0f0",
+      "project_id": "web/stc",
+      "merge_request_iid": 338,
+      "release": "Release 26.2",
+      "status": "failed",
+      "current_step": "FAILED",
+      "created_at": "2026-04-03T05:28:41.117638",
+      "updated_at": "2026-04-03T05:30:33.055281"
+    },
+    {
+      "task_id": "c62bccfc-45ef-4c0e-af7a-be2ca019b8bf",
+      "project_id": "web/stc",
+      "merge_request_iid": 338,
+      "release": null,
+      "status": "failed",
+      "current_step": "FAILED",
+      "created_at": "2026-04-03T03:14:23.842011",
+      "updated_at": "2026-04-03T03:14:43.043856"
+    },
+    {
+      "task_id": "d10a8fb1-f239-44eb-bce6-c3086ef180f2",
+      "project_id": "dpw-xmn/apw-in-jupiter",
+      "merge_request_iid": 2214,
+      "release": null,
+      "status": "skipped",
+      "current_step": "SKIPPED",
+      "created_at": "2026-04-03T17:41:41.336677",
+      "updated_at": "2026-04-03T17:41:57.207381"
+    },
+    {
+      "task_id": "bba047df-0006-4200-9df2-5a6cb068b491",
+      "project_id": "Fiji/video",
+      "merge_request_iid": 1396,
+      "release": null,
+      "status": "skipped",
+      "current_step": "SKIPPED",
+      "created_at": "2026-04-03T17:17:39.257979",
+      "updated_at": "2026-04-03T17:17:42.227863"
+    },
+    {
+      "task_id": "2a9cef04-3f3c-4fa1-8a15-cf81fb93c202",
+      "project_id": "CoreLib/rcvrooms-android",
+      "merge_request_iid": 8691,
+      "release": null,
+      "status": "skipped",
+      "current_step": "SKIPPED",
+      "created_at": "2026-04-03T08:56:10.876999",
+      "updated_at": "2026-04-03T08:56:24.913682"
+    },
+    {
+      "task_id": "f8a2e603-b5cb-4f75-bd09-6bae636b525f",
+      "project_id": "CoreLib/rcvrooms-android",
+      "merge_request_iid": 8693,
+      "release": null,
+      "status": "skipped",
+      "current_step": "SKIPPED",
+      "created_at": "2026-04-03T08:27:28.719355",
+      "updated_at": "2026-04-03T08:27:40.018201"
+    },
+    {
+      "task_id": "60757ca9-68a9-4c5b-8c71-693af445ebdb",
+      "project_id": "CoreLib/rcvrooms-android",
+      "merge_request_iid": 8691,
+      "release": null,
+      "status": "skipped",
+      "current_step": "SKIPPED",
+      "created_at": "2026-04-03T08:17:51.314619",
+      "updated_at": "2026-04-03T08:17:55.842812"
+    },
+    {
+      "task_id": "f89df836-489e-4c46-baa5-434372976436",
+      "project_id": "CoreLib/rcvrooms-android",
+      "merge_request_iid": 8691,
+      "release": null,
+      "status": "skipped",
+      "current_step": "SKIPPED",
+      "created_at": "2026-04-03T07:50:22.833492",
+      "updated_at": "2026-04-03T07:50:25.476390"
+    },
+    {
+      "task_id": "2ecd62bb-e955-4c62-9b8e-7bf07be52081",
+      "project_id": "CoreLib/rcvrooms-android",
+      "merge_request_iid": 8691,
+      "release": null,
+      "status": "skipped",
+      "current_step": "SKIPPED",
+      "created_at": "2026-04-03T07:27:00.951059",
+      "updated_at": "2026-04-03T07:27:10.035796"
+    },
+    {
+      "task_id": "a06a53e0-e60f-40ae-8653-5c486a8d1cda",
+      "project_id": "Fiji/video",
+      "merge_request_iid": 1571,
+      "release": null,
+      "status": "skipped",
+      "current_step": "SKIPPED",
+      "created_at": "2026-04-03T07:26:56.879696",
+      "updated_at": "2026-04-03T07:27:12.055499"
+    },
+    {
+      "task_id": "46324964-d825-4ead-84a4-72a1d2980107",
+      "project_id": "CoreLib/rcvrooms-android",
+      "merge_request_iid": 8691,
+      "release": null,
+      "status": "skipped",
+      "current_step": "SKIPPED",
+      "created_at": "2026-04-03T06:59:10.446197",
+      "updated_at": "2026-04-03T06:59:24.936505"
+    },
+    {
+      "task_id": "021347df-7e4c-481e-8ecb-533c824b1605",
+      "project_id": "CoreLib/rcvrooms-android",
+      "merge_request_iid": 8691,
+      "release": null,
+      "status": "skipped",
+      "current_step": "SKIPPED",
+      "created_at": "2026-04-03T06:50:20.656883",
+      "updated_at": "2026-04-03T06:50:24.196128"
+    },
+    {
+      "task_id": "6bcb4848-a3f4-4924-ae8d-420c91c0b709",
+      "project_id": "CoreLib/rcvrooms-android",
+      "merge_request_iid": 8691,
+      "release": null,
+      "status": "skipped",
+      "current_step": "SKIPPED",
+      "created_at": "2026-04-03T06:37:19.886030",
+      "updated_at": "2026-04-03T06:37:24.196685"
+    },
+    {
+      "task_id": "a00d6a3a-ae1b-426b-b708-07965b6d3ab2",
+      "project_id": "CoreLib/rcvrooms-android",
+      "merge_request_iid": 8691,
+      "release": null,
+      "status": "skipped",
+      "current_step": "SKIPPED",
+      "created_at": "2026-04-03T06:36:19.115362",
+      "updated_at": "2026-04-03T06:36:24.128750"
+    },
+    {
+      "task_id": "bf885fb8-b6d2-412f-8596-30dd1903cdf6",
+      "project_id": "Fiji/video",
+      "merge_request_iid": 1574,
+      "release": null,
+      "status": "skipped",
+      "current_step": "SKIPPED",
+      "created_at": "2026-04-03T06:31:08.287775",
+      "updated_at": "2026-04-03T06:31:25.147152"
+    },
+    {
+      "task_id": "eec971e4-629c-4fac-8851-cbc3870fd877",
+      "project_id": "Fiji/video",
+      "merge_request_iid": 1574,
+      "release": null,
+      "status": "skipped",
+      "current_step": "SKIPPED",
+      "created_at": "2026-04-03T06:20:51.919091",
+      "updated_at": "2026-04-03T06:21:18.413079"
+    },
+    {
+      "task_id": "dc856bdf-88df-4775-8b14-e7247790828c",
+      "project_id": "Fiji/video",
+      "merge_request_iid": 1571,
+      "release": null,
+      "status": "skipped",
+      "current_step": "SKIPPED",
+      "created_at": "2026-04-03T04:57:03.972702",
+      "updated_at": "2026-04-03T04:57:14.785492"
+    },
+    {
+      "task_id": "57a95f1e-1939-4b9c-acb4-90b741c6ae57",
+      "project_id": "Fiji/video",
+      "merge_request_iid": 1571,
+      "release": null,
+      "status": "skipped",
+      "current_step": "SKIPPED",
+      "created_at": "2026-04-03T04:28:06.543191",
+      "updated_at": "2026-04-03T04:28:09.789001"
+    },
+    {
+      "task_id": "f3971f89-6008-48d8-952e-6b6a4974b551",
+      "project_id": "Fiji/video",
+      "merge_request_iid": 1574,
+      "release": null,
+      "status": "skipped",
+      "current_step": "SKIPPED",
+      "created_at": "2026-04-03T04:26:19.124485",
+      "updated_at": "2026-04-03T04:26:24.204844"
+    }
+  ]
+}
