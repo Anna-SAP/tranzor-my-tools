@@ -88,10 +88,14 @@ STRINGS = {
         # Summary panel
         "summary_title":      "📋 Platform Task Overview",
         "summary_total":      "Total Tasks",
-        "summary_recent":     "Latest 7 Tasks",
+        "summary_recent":     "Tasks",
         "summary_loading":    "Loading…",
         "summary_error":      "⚠ Failed to load task data",
         "summary_refresh":    "🔄 Refresh",
+        "summary_prev":       "Previous",
+        "summary_next":       "Next",
+        "summary_page_info":  "Page {page} / {total_pages}  Showing {start}-{end} of {total}",
+        "summary_page_empty": "Page 0 / 0  No tasks",
         "summary_col_id":     "ID",
         "summary_col_name":   "Task Name",
         "summary_col_creator":"Creator",
@@ -194,10 +198,14 @@ STRINGS = {
         # Summary panel
         "summary_title":      "📋 平台任务概览",
         "summary_total":      "总任务数",
-        "summary_recent":     "最新 7 个任务",
+        "summary_recent":     "任务列表",
         "summary_loading":    "加载中…",
         "summary_error":      "⚠ 加载任务数据失败",
         "summary_refresh":    "🔄 刷新",
+        "summary_prev":       "上一页",
+        "summary_next":       "下一页",
+        "summary_page_info":  "第 {page} / {total_pages} 页  显示 {start}-{end} / {total}",
+        "summary_page_empty": "第 0 / 0 页  暂无任务",
         "summary_col_id":     "ID",
         "summary_col_name":   "任务名称",
         "summary_col_creator":"创建者",
@@ -309,25 +317,58 @@ class TextRedirector(io.TextIOBase):
 # API helper — fetch tasks for summary panel
 # ============================================================
 def fetch_all_tasks_summary():
-    """Fetch all tasks (no status filter) and return (total, recent_7).
+    """Fetch all tasks (no status filter) and return (total, all_tasks).
     Each task dict has: id, task_name, created_by.
     """
     if requests is None:
         raise RuntimeError("requests package not available")
 
-    resp = requests.get(
-        f"{API}/tasks",
-        params={"limit": 200, "offset": 0},
-        timeout=15,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    tasks = data.get("tasks", [])
-    total = data.get("total", len(tasks))
+    page_size = 200
+    offset = 0
+    total = None
+    all_tasks = []
+    seen_ids = set()
 
-    # Take the latest 7 (API usually returns newest first)
-    recent = tasks[:7]
-    return total, recent
+    while True:
+        resp = requests.get(
+            f"{API}/tasks",
+            params={"limit": page_size, "offset": offset},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        batch = data.get("tasks", [])
+
+        if total is None:
+            total = data.get("total")
+
+        for task in batch:
+            task_id = task.get("id")
+            dedupe_key = task_id if task_id is not None else (offset, len(all_tasks))
+            if dedupe_key in seen_ids:
+                continue
+            seen_ids.add(dedupe_key)
+            all_tasks.append(task)
+
+        if not batch:
+            break
+
+        offset += len(batch)
+        if total is not None and offset >= total:
+            break
+        if len(batch) < page_size:
+            break
+
+    def _sort_key(task):
+        task_id = task.get("id")
+        try:
+            return (1, int(task_id))
+        except (TypeError, ValueError):
+            return (0, str(task_id or ""))
+
+    all_tasks.sort(key=_sort_key, reverse=True)
+    total = max(int(total or 0), len(all_tasks))
+    return total, all_tasks
 
 
 class ExportApp:
@@ -341,6 +382,8 @@ class ExportApp:
     SUCCESS = "#2ecc71"
     BORDER = "#2a2a4a"
     SUMMARY_HIGHLIGHT = "#1e2d50"  # slightly lighter than BG_CARD for rows
+    SUMMARY_ROW_HEIGHT = 26
+    SUMMARY_DEFAULT_PAGE_SIZE = 7
 
     def __init__(self, root):
         self.root = root
@@ -355,6 +398,12 @@ class ExportApp:
         self.running = False
         self.last_output_path = None
         self.summary_loading = False
+        self.summary_tasks = []
+        self.summary_total = 0
+        self.summary_page = 0
+        self.summary_page_size = self.SUMMARY_DEFAULT_PAGE_SIZE
+        self.summary_selected_task_id = None
+        self.summary_resize_job = None
 
         # Setup
         self._setup_styles()
@@ -368,8 +417,10 @@ class ExportApp:
         x = (self.root.winfo_screenwidth() // 2) - (w // 2)
         y = (self.root.winfo_screenheight() // 2) - (h // 2)
         self.root.geometry(f"+{x}+{y}")
+        self._recalculate_summary_page_size()
+        self.root.after(250, self._recalculate_summary_page_size)
 
-        # Auto-load legacy summary data on startup (only this — avoid concurrent API overload)
+        # Auto-load legacy summary data on startup (only this – avoid concurrent API overload)
         self._load_summary_data()
 
         # Lazy-load MR Pipeline / Quality Overview data when tabs are first selected
@@ -437,7 +488,7 @@ class ExportApp:
                          fieldbackground="#0d1a30",
                          borderwidth=0,
                          font=(FONT_FAMILY, 9),
-                         rowheight=26)
+                         rowheight=self.SUMMARY_ROW_HEIGHT)
         style.configure("Summary.Treeview.Heading",
                          background=self.ACCENT,
                          foreground="#ccc",
@@ -741,15 +792,16 @@ class ExportApp:
         self.lbl_recent_header.pack(anchor="w", pady=(0, 8))
 
         # ── Treeview for task list ──
-        tree_frame = ttk.Frame(inner, style="Summary.TFrame")
-        tree_frame.pack(fill="both", expand=True)
+        self.summary_tree_frame = ttk.Frame(inner, style="Summary.TFrame")
+        self.summary_tree_frame.pack(fill="both", expand=True)
+        self.summary_tree_frame.bind("<Configure>", self._schedule_summary_resize)
 
         self.task_tree = ttk.Treeview(
-            tree_frame,
+            self.summary_tree_frame,
             columns=("id", "name", "creator"),
             show="headings",
             style="Summary.Treeview",
-            height=7,
+            height=self.summary_page_size,
             selectmode="browse",
         )
         self.task_tree.heading("id", text="ID")
@@ -762,7 +814,7 @@ class ExportApp:
 
         # Scrollbar
         tree_scroll = ttk.Scrollbar(
-            tree_frame, orient="vertical", command=self.task_tree.yview)
+            self.summary_tree_frame, orient="vertical", command=self.task_tree.yview)
         self.task_tree.configure(yscrollcommand=tree_scroll.set)
 
         self.task_tree.pack(side="left", fill="both", expand=True)
@@ -771,17 +823,42 @@ class ExportApp:
         # Bind row click to fill Task ID
         self.task_tree.bind("<<TreeviewSelect>>", self._on_task_select)
 
-        # ── Refresh button ──
+        # ── Pagination + refresh controls ──
         btn_bar = ttk.Frame(inner, style="Summary.TFrame")
         btn_bar.pack(fill="x", pady=(10, 0))
 
+        self.lbl_summary_page = ttk.Label(
+            btn_bar, text="", style="SummaryStatus.TLabel")
+        self.lbl_summary_page.pack(side="left")
+
+        actions_bar = ttk.Frame(btn_bar, style="Summary.TFrame")
+        actions_bar.pack(side="right")
+
+        self.btn_summary_prev = self._create_button(
+            actions_bar, text="", command=self._prev_summary_page,
+            style_name="SecondaryTiny",
+            font=(FONT_FAMILY, 9),
+            bg=self.ACCENT, fg="#ccc", activebackground="#1a3a6a",
+            activeforeground="#fff", padx=12, pady=4, state="disabled")
+        self.btn_summary_prev.pack(side="left", padx=(0, 8))
+
+        self.btn_summary_next = self._create_button(
+            actions_bar, text="", command=self._next_summary_page,
+            style_name="SecondaryTiny",
+            font=(FONT_FAMILY, 9),
+            bg=self.ACCENT, fg="#ccc", activebackground="#1a3a6a",
+            activeforeground="#fff", padx=12, pady=4, state="disabled")
+        self.btn_summary_next.pack(side="left", padx=(0, 8))
+
         self.btn_refresh = self._create_button(
-            btn_bar, text="", command=self._load_summary_data,
+            actions_bar, text="", command=self._load_summary_data,
             style_name="SecondaryTiny",
             font=(FONT_FAMILY, 9),
             bg=self.ACCENT, fg="#ccc", activebackground="#1a3a6a",
             activeforeground="#fff", padx=12, pady=4)
-        self.btn_refresh.pack(side="right")
+        self.btn_refresh.pack(side="left")
+
+        self._update_summary_pager()
 
     # ── i18n: refresh all visible text ──
     def _refresh_ui_text(self):
@@ -812,10 +889,13 @@ class ExportApp:
         self.lbl_summary_title.configure(text=self._t("summary_title"))
         self.lbl_total_label.configure(text=self._t("summary_total"))
         self.lbl_recent_header.configure(text=self._t("summary_recent"))
+        self.btn_summary_prev.configure(text=self._t("summary_prev"))
+        self.btn_summary_next.configure(text=self._t("summary_next"))
         self.btn_refresh.configure(text=self._t("summary_refresh"))
         self.task_tree.heading("id", text=self._t("summary_col_id"))
         self.task_tree.heading("name", text=self._t("summary_col_name"))
         self.task_tree.heading("creator", text=self._t("summary_col_creator"))
+        self._update_summary_pager()
 
         # MR Pipeline & Quality Overview tab texts
         self.mr_tab.refresh_text()
@@ -832,6 +912,125 @@ class ExportApp:
         """Toggle between English and Chinese."""
         self.lang = "zh" if self.lang == "en" else "en"
         self._refresh_ui_text()
+
+    def _schedule_summary_resize(self, event=None):
+        """Debounce resize events before recalculating the summary page size."""
+        if self.summary_resize_job is not None:
+            self.root.after_cancel(self.summary_resize_job)
+        self.summary_resize_job = self.root.after(120, self._recalculate_summary_page_size)
+
+    def _recalculate_summary_page_size(self):
+        """Adapt the number of visible summary rows to the available panel height."""
+        self.summary_resize_job = None
+        if not hasattr(self, "summary_tree_frame") or not self.summary_tree_frame.winfo_exists():
+            return
+
+        available_height = self.summary_tree_frame.winfo_height()
+        if available_height <= 1:
+            self.summary_resize_job = self.root.after(120, self._recalculate_summary_page_size)
+            return
+
+        current_size = max(1, int(self.task_tree.cget("height")))
+        chrome_height = max(
+            32,
+            self.task_tree.winfo_reqheight() - (current_size * self.SUMMARY_ROW_HEIGHT),
+        )
+        usable_height = max(0, available_height - chrome_height - 4)
+        page_size = max(1, usable_height // self.SUMMARY_ROW_HEIGHT)
+
+        if page_size == self.summary_page_size:
+            return
+
+        first_visible_index = self.summary_page * self.summary_page_size
+        self.summary_page_size = page_size
+        self.task_tree.configure(height=self.summary_page_size)
+
+        if self.summary_tasks:
+            max_page = max(0, (len(self.summary_tasks) - 1) // self.summary_page_size)
+            self.summary_page = min(first_visible_index // self.summary_page_size, max_page)
+        else:
+            self.summary_page = 0
+
+        self._render_summary_page()
+
+    def _get_summary_total_pages(self):
+        if not self.summary_tasks:
+            return 0
+        return (len(self.summary_tasks) + self.summary_page_size - 1) // self.summary_page_size
+
+    def _update_summary_pager(self):
+        total_pages = self._get_summary_total_pages()
+        if total_pages == 0:
+            page_text = self._t("summary_page_empty")
+            prev_enabled = False
+            next_enabled = False
+        else:
+            start = self.summary_page * self.summary_page_size + 1
+            end = min(start + self.summary_page_size - 1, len(self.summary_tasks))
+            page_text = self._t("summary_page_info").format(
+                page=self.summary_page + 1,
+                total_pages=total_pages,
+                start=start,
+                end=end,
+                total=len(self.summary_tasks),
+            )
+            prev_enabled = self.summary_page > 0
+            next_enabled = self.summary_page < total_pages - 1
+
+        self.lbl_summary_page.configure(text=page_text)
+        self.btn_summary_prev.configure(state="normal" if prev_enabled else "disabled")
+        self.btn_summary_next.configure(state="normal" if next_enabled else "disabled")
+
+    def _restore_summary_selection_if_possible(self):
+        if self.summary_selected_task_id is None:
+            return
+
+        selected_item = None
+        for item in self.task_tree.get_children():
+            values = self.task_tree.item(item, "values")
+            if values and str(values[0]) == str(self.summary_selected_task_id):
+                selected_item = item
+                break
+
+        if selected_item is not None:
+            self.task_tree.selection_set(selected_item)
+            self.task_tree.focus(selected_item)
+            self.task_tree.see(selected_item)
+
+    def _render_summary_page(self):
+        total_pages = self._get_summary_total_pages()
+        if total_pages == 0:
+            self.summary_page = 0
+            page_tasks = []
+        else:
+            self.summary_page = min(self.summary_page, total_pages - 1)
+            start = self.summary_page * self.summary_page_size
+            end = start + self.summary_page_size
+            page_tasks = self.summary_tasks[start:end]
+
+        for item in self.task_tree.get_children():
+            self.task_tree.delete(item)
+
+        for task in page_tasks:
+            tid = task.get("id", "")
+            tname = task.get("task_name", "")
+            creator = task.get("created_by", "") or task.get("creator", "") or "-"
+            self.task_tree.insert("", "end", values=(tid, tname, creator))
+
+        self._restore_summary_selection_if_possible()
+        self._update_summary_pager()
+
+    def _prev_summary_page(self):
+        if self.summary_page <= 0:
+            return
+        self.summary_page -= 1
+        self._render_summary_page()
+
+    def _next_summary_page(self):
+        if self.summary_page >= self._get_summary_total_pages() - 1:
+            return
+        self.summary_page += 1
+        self._render_summary_page()
 
     def _on_tab_changed(self, event):
         """Lazy-load data when MR Pipeline or Quality Overview tab is first selected."""
@@ -860,29 +1059,27 @@ class ExportApp:
     def _fetch_summary(self):
         """Background thread: fetch tasks from API."""
         try:
-            total, recent = fetch_all_tasks_summary()
-            self.root.after(0, self._on_summary_loaded, total, recent)
+            total, tasks = fetch_all_tasks_summary()
+            self.root.after(0, self._on_summary_loaded, total, tasks)
         except Exception as e:
             self.root.after(0, self._on_summary_error, str(e))
 
-    def _on_summary_loaded(self, total, recent_tasks):
+    def _on_summary_loaded(self, total, all_tasks):
         """Callback when summary data loads successfully."""
         self.summary_loading = False
         self.btn_refresh.configure(state="normal")
         self.lbl_summary_status.configure(text="", foreground="#666")
 
-        # Update total count
+        self.summary_total = total
+        self.summary_tasks = all_tasks
         self.lbl_total_count.configure(text=str(total))
 
-        # Populate treeview
-        for item in self.task_tree.get_children():
-            self.task_tree.delete(item)
-
-        for task in recent_tasks:
-            tid = task.get("id", "")
-            tname = task.get("task_name", "")
-            creator = task.get("created_by", "") or task.get("creator", "") or "—"
-            self.task_tree.insert("", "end", values=(tid, tname, creator))
+        total_pages = self._get_summary_total_pages()
+        if total_pages == 0:
+            self.summary_page = 0
+        else:
+            self.summary_page = min(self.summary_page, total_pages - 1)
+        self._render_summary_page()
 
     def _on_summary_error(self, error_msg):
         """Callback when summary data fails to load."""
@@ -890,7 +1087,6 @@ class ExportApp:
         self.btn_refresh.configure(state="normal")
         self.lbl_summary_status.configure(
             text=self._t("summary_error"), foreground="#e94560")
-        self.lbl_total_count.configure(text="—")
 
     def _on_task_select(self, event):
         """When user clicks a task row, fill the Task ID entry."""
@@ -899,6 +1095,7 @@ class ExportApp:
             values = self.task_tree.item(sel[0], "values")
             if values:
                 task_id = values[0]
+                self.summary_selected_task_id = task_id
                 self.task_var.set(str(task_id))
 
     # ── Event Handlers ──
