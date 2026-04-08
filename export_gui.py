@@ -52,6 +52,15 @@ import export_changes
 import export_translations
 import gui_tabs
 
+# Optional: Full Translation Export Tab (nested module, must not break GUI if missing)
+try:
+    import gui_tab_full_translations as _ft_tab_mod
+except Exception as _ft_e:  # pragma: no cover
+    _ft_tab_mod = None
+    _ft_import_error = _ft_e
+else:
+    _ft_import_error = None
+
 # ---------------------------------------------------------------------------
 # Tranzor API config (reuse from export_changes)
 # ---------------------------------------------------------------------------
@@ -284,6 +293,14 @@ STRINGS = {
         "qa_low_col_reason":     "原因",
     },
 }
+
+# Merge in strings from the optional Full Translations tab (non-destructive).
+if _ft_tab_mod is not None:
+    try:
+        for _lang_code, _extra in _ft_tab_mod.STRINGS.items():
+            STRINGS.setdefault(_lang_code, {}).update(_extra)
+    except Exception:
+        pass
 
 
 # ============================================================
@@ -621,6 +638,18 @@ class ExportApp:
         self.notebook.add(tab3, text="")
         self.qa_tab = gui_tabs.QualityOverviewTab(tab3, self)
 
+        # --- Tab 4: Full Translations (optional, pure additive) ---
+        self.ft_tab = None
+        if _ft_tab_mod is not None:
+            try:
+                tab4 = ttk.Frame(self.notebook, style="App.TFrame")
+                self.notebook.add(tab4, text="")
+                self.ft_tab = _ft_tab_mod.FullTranslationsTab(tab4, self)
+            except Exception as _e:
+                # Never let the optional tab break the main GUI.
+                print(f"[Full Translations tab] init failed: {_e}")
+                self.ft_tab = None
+
         # ═══════════════════════════════════════════
         # TAB 1 CONTENTS (File Translation — preserved)
         # ═══════════════════════════════════════════
@@ -884,6 +913,12 @@ class ExportApp:
         self.notebook.tab(0, text=self._t("tab_file_translation"))
         self.notebook.tab(1, text=self._t("tab_mr_pipeline"))
         self.notebook.tab(2, text=self._t("tab_quality_overview"))
+        if self.ft_tab is not None:
+            try:
+                self.notebook.tab(3, text=self._t("tab_full_translations"))
+                self.ft_tab.refresh_text()
+            except Exception:
+                pass
 
         # Summary panel texts
         self.lbl_summary_title.configure(text=self._t("summary_title"))
