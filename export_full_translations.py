@@ -607,12 +607,16 @@ def build_ap_zip(
         "locales": 0,
         "files": 0,
         "entries": 0,
-        # Stats for the GUI result dialog: total entries grouped by axis.
-        "per_product": {},   # product -> total entries (sum across selected locales)
-        "per_locale": {},    # locale -> total entries (sum across selected products)
+        # Stats for the GUI result dialog. To stay consistent with the
+        # merged-JSON view (and what the user actually cares about), the
+        # per_product breakdown reports en-US source key counts — i.e.
+        # how many distinct opus_ids each product contributes — rather
+        # than the sum across selected target languages.
+        "per_product": {},   # product -> en-US source key count
+        "per_locale": {},    # locale  -> total entries written for this locale
     }
-    per_product: Counter = Counter()
     per_locale: Counter = Counter()
+    exported_products: Set[str] = set()
 
     with zipfile.ZipFile(out_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         with inv._lock:  # noqa: SLF001  — 内部快照，避免写 zip 期间数据变动
@@ -644,13 +648,23 @@ def build_ap_zip(
 
                 summary["files"] += 1
                 summary["entries"] += len(entries)
-                per_product[product] += len(entries)
                 per_locale[locale] += len(entries)
+                exported_products.add(product)
                 _log(progress_cb, f"  + {product}/{locale}: {len(entries)}")
 
-    summary["products"] = len(per_product)
+    # per_product = number of distinct opus_ids per product whose en-US
+    # source value exists in the inventory snapshot. Computed from the
+    # inventory directly (not from what was written) so the column stays
+    # meaningful even when the user excludes en-US from the locale filter.
+    per_product: Dict[str, int] = {}
+    for product in exported_products:
+        src_map = (data_snapshot.get(product) or {}).get(SOURCE_LOCALE) or {}
+        per_product[product] = sum(
+            1 for v in src_map.values() if v not in (None, ""))
+
+    summary["products"] = len(exported_products)
     summary["locales"] = len(per_locale)
-    summary["per_product"] = dict(per_product)
+    summary["per_product"] = per_product
     summary["per_locale"] = dict(per_locale)
     _log(progress_cb, f"\n  ✓ 写入 {out_path}")
     _log(progress_cb, f"    产品={summary['products']}, 语言={summary['locales']}, "
@@ -699,10 +713,17 @@ def build_merged_json(
 
     # opus_id -> {locale: value}
     merged: Dict[str, Dict[str, str]] = {}
+    # Snapshot of en-US source key counts per product, taken under the
+    # same lock so per_product stays consistent with build_ap_zip.
+    src_count_by_product: Dict[str, int] = {}
     with inv._lock:  # noqa: SLF001 — snapshot under lock for consistency
         for product, loc_map in inv.data.items():
             if product_filter is not None and product not in product_filter:
                 continue
+            src_map = loc_map.get(SOURCE_LOCALE) or {}
+            n = sum(1 for v in src_map.values() if v not in (None, ""))
+            if n > 0:
+                src_count_by_product[product] = n
             for locale, kv in loc_map.items():
                 if locale_filter is not None and locale not in locale_filter:
                     continue
@@ -717,32 +738,38 @@ def build_merged_json(
         return ([SOURCE_LOCALE] if SOURCE_LOCALE in locs else []) + rest
 
     records: List[dict] = []
-    per_product: Counter = Counter()
     per_locale: Counter = Counter()
+    exported_products: Set[str] = set()
     for opus_id in sorted(merged.keys()):
         loc_values = merged[opus_id]
         rec: Dict[str, str] = {"key": opus_id}
         for loc in _ordered_locales(loc_values.keys()):
             rec[loc] = loc_values[loc]
         records.append(rec)
-        # Count one record per product, and one per locale present in record.
-        per_product[parse_product(opus_id)] += 1
+        exported_products.add(parse_product(opus_id))
         for loc in loc_values.keys():
             per_locale[loc] += 1
 
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(records, f, ensure_ascii=False, indent=2)
 
+    # per_product = en-US source key count per product, restricted to
+    # products that contributed at least one record to the export. Mirrors
+    # build_ap_zip so all three export actions report the same number.
+    per_product: Dict[str, int] = {
+        p: src_count_by_product.get(p, 0) for p in exported_products
+    }
+
     summary = {
         "out_path": out_path,
         "records": len(records),
         "locales": len(per_locale),
-        "products": len(per_product),
+        "products": len(exported_products),
         # entries == records here so the dialog can show a single number; the
         # per-axis breakdowns mirror build_ap_zip's shape so the dialog can
         # render both modes the same way.
         "entries": len(records),
-        "per_product": dict(per_product),
+        "per_product": per_product,
         "per_locale": dict(per_locale),
     }
     _log(progress_cb, f"\n  ✓ 写入合并 JSON: {out_path}")

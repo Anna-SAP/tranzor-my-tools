@@ -87,7 +87,8 @@ STRINGS = {
         "ft_result_per_locale":   "Keys per language",
         "ft_result_col_product":  "Product",
         "ft_result_col_locale":   "Language",
-        "ft_result_col_count":    "Keys",
+        "ft_result_col_keys_src": "Keys(en-US)",
+        "ft_result_col_keys_loc": "Keys",
         "ft_result_open_folder":  "📂 Reveal in Explorer",
         "ft_result_open_file":    "📄 Open file",
         "ft_result_close":        "Close",
@@ -137,7 +138,8 @@ STRINGS = {
         "ft_result_per_locale":   "每种语言的 Key 数",
         "ft_result_col_product":  "产品",
         "ft_result_col_locale":   "语言",
-        "ft_result_col_count":    "Key 数",
+        "ft_result_col_keys_src": "Keys(en-US)",
+        "ft_result_col_keys_loc": "Keys",
         "ft_result_open_folder":  "📂 在资源管理器中定位",
         "ft_result_open_file":    "📄 打开文件",
         "ft_result_close":        "关闭",
@@ -383,6 +385,7 @@ class _ExportProgressDialog:
             tables,
             title=self._t("ft_result_per_product"),
             label_col=self._t("ft_result_col_product"),
+            count_col=self._t("ft_result_col_keys_src"),
             counts=per_product,
             side="left",
         )
@@ -390,11 +393,12 @@ class _ExportProgressDialog:
             tables,
             title=self._t("ft_result_per_locale"),
             label_col=self._t("ft_result_col_locale"),
+            count_col=self._t("ft_result_col_keys_loc"),
             counts=per_locale,
             side="right",
         )
 
-    def _make_breakdown_table(self, parent, *, title, label_col, counts, side) -> None:
+    def _make_breakdown_table(self, parent, *, title, label_col, count_col, counts, side) -> None:
         col = ttk.Frame(parent, style="App.TFrame")
         col.pack(side=side, fill="both", expand=True,
                  padx=(0, 6) if side == "left" else (6, 0))
@@ -404,7 +408,7 @@ class _ExportProgressDialog:
         tree = ttk.Treeview(
             wrap, columns=("label", "count"), show="headings", height=8)
         tree.heading("label", text=label_col)
-        tree.heading("count", text=self._t("ft_result_col_count"))
+        tree.heading("count", text=count_col)
         tree.column("label", width=180, anchor="w")
         tree.column("count", width=80, anchor="e")
         for label in sorted(counts.keys()):
