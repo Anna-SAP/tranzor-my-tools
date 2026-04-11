@@ -440,9 +440,11 @@ class ExportApp:
         # Auto-load legacy summary data on startup (only this – avoid concurrent API overload)
         self._load_summary_data()
 
-        # Lazy-load MR Pipeline / Quality Overview data when tabs are first selected
+        # Lazy-load MR Pipeline / Quality Overview / Full Translations data
+        # when their tabs are first selected
         self._mr_tab_initialized = False
         self._qa_tab_initialized = False
+        self._ft_tab_initialized = False
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
     def _t(self, key):
@@ -1068,7 +1070,14 @@ class ExportApp:
         self._render_summary_page()
 
     def _on_tab_changed(self, event):
-        """Lazy-load data when MR Pipeline or Quality Overview tab is first selected."""
+        """Lazy-load data when MR Pipeline / Quality Overview / Full Translations
+        tab is first selected.
+
+        For Full Translations: only the **lightweight** product+language
+        inventory is loaded here (no /translations endpoints), so the panel
+        is interactive within ~1–2s. Heavy translation data is fetched only
+        on Export click.
+        """
         tab_idx = self.notebook.index(self.notebook.select())
         if tab_idx == 1 and not self._mr_tab_initialized:
             self._mr_tab_initialized = True
@@ -1078,6 +1087,13 @@ class ExportApp:
         elif tab_idx == 2 and not self._qa_tab_initialized:
             self._qa_tab_initialized = True
             self.qa_tab.load_filters()
+        elif tab_idx == 3 and not self._ft_tab_initialized:
+            self._ft_tab_initialized = True
+            if self.ft_tab is not None:
+                try:
+                    self.ft_tab.on_first_show()
+                except Exception:
+                    pass
 
     # ── Summary panel data loading ──
     def _load_summary_data(self):

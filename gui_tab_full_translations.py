@@ -1,11 +1,16 @@
 """
 Full Translation Export — GUI Tab
 ==================================
-一个独立的 ttk Tab：按产品 × 按语言导出全量翻译（AP.zip 风格）。
+按产品 × 按语言导出全量翻译（AP.zip 风格）。
 
-设计:
-    - 只被 export_gui.py 在第 4 个 Tab 位置懒加载使用；
-    - 不修改任何现有模块；失败时不得阻塞主 GUI 启动。
+加载语义（与用户需求严格对齐）:
+    - **面板只是一个选择媒介**。Tab 第一次被切到时，自动调用
+      :func:`export_full_translations.build_light_inventory`，仅拉取
+      "产品列表 + 语言列表"两个维度（distinct 聚合查询，秒开），
+      完全不触碰任何 /translations 端点。
+    - 全量翻译数据**只在用户点击"Export Selected / Export All"时**才会
+      被拉取，并且按当前选中的产品/语言做服务端预过滤，避免拉到不需要的任务。
+    - 失败时不得阻塞主 GUI 启动。
 
 暴露:
     FullTranslationsTab(parent, app)
@@ -34,52 +39,58 @@ STRINGS = {
     "en": {
         "tab_full_translations":  "🌍 Full Translations",
         "ft_title":               "Full Translation Export (by Product × Language)",
-        "ft_subtitle":            "Aggregate all completed tasks and export an AP.zip-style package.",
+        "ft_subtitle":            "Pick products + languages, then export — heavy data is fetched only on Export.",
         "ft_sources_label":       "Data Sources",
         "ft_src_legacy":          "File Translation (Legacy)",
         "ft_src_mr":              "MR Pipeline",
         "ft_refresh":             "🔄 Refresh Inventory",
         "ft_export_selected":     "📦 Export Selected",
         "ft_export_all":          "📦 Export All",
-        "ft_products":            "Products (by key count)",
+        "ft_products":            "Products",
         "ft_locales":             "Languages",
         "ft_col_product":         "Product",
-        "ft_col_keys":             "Keys",
-        "ft_status_idle":         "Click 'Refresh Inventory' to load data.",
-        "ft_status_loading":      "Aggregating… this may take a while.",
-        "ft_status_loaded":       "Loaded {p} products · {l} languages · {n} entries",
+        "ft_col_keys":            "Keys",
+        "ft_status_idle":         "Loading inventory…",
+        "ft_status_loading":      "Loading product & language inventory…",
+        "ft_status_loaded":       "Inventory ready: {p} products · {l} languages",
+        "ft_status_collecting":   "Fetching translations for selection…",
         "ft_status_exporting":    "Writing zip…",
         "ft_status_exported":     "✓ Exported to {path}",
-        "ft_err_no_inv":          "Inventory not loaded yet. Click 'Refresh Inventory' first.",
+        "ft_err_no_inv":          "Inventory not loaded yet. Click 'Refresh Inventory'.",
         "ft_err_no_selection":    "Please select at least one product and one language.",
+        "ft_err_no_data":         "No translations matched the selection.",
         "ft_err_module":          "export_full_translations module failed to load.",
         "ft_select_all":          "Select All",
         "ft_clear_all":           "Clear",
+        "ft_keys_pending":        "…",
     },
     "zh": {
         "tab_full_translations":  "🌍 全量翻译",
         "ft_title":               "全量翻译导出（按产品 × 按语言）",
-        "ft_subtitle":            "聚合所有 Completed tasks，导出 AP.zip 风格数据包。",
+        "ft_subtitle":            "选择产品 + 语言后再导出 — 真正的翻译数据只在点击导出时才拉取。",
         "ft_sources_label":       "数据源",
         "ft_src_legacy":          "File Translation（Legacy）",
         "ft_src_mr":              "MR Pipeline",
         "ft_refresh":             "🔄 刷新清单",
         "ft_export_selected":     "📦 导出选中",
         "ft_export_all":          "📦 全部导出",
-        "ft_products":            "产品（按 Key 数量降序）",
+        "ft_products":            "产品",
         "ft_locales":             "语言",
         "ft_col_product":         "产品",
-        "ft_col_keys":             "Key 数",
-        "ft_status_idle":         "点击「刷新清单」以加载数据。",
-        "ft_status_loading":      "聚合中…耗时可能较长。",
-        "ft_status_loaded":       "已加载：{p} 个产品 · {l} 种语言 · {n} 条翻译",
+        "ft_col_keys":            "Key 数",
+        "ft_status_idle":         "正在加载清单…",
+        "ft_status_loading":      "正在加载产品 / 语言清单…",
+        "ft_status_loaded":       "清单就绪：{p} 个产品 · {l} 种语言",
+        "ft_status_collecting":   "正在按选择拉取翻译数据…",
         "ft_status_exporting":    "正在写 zip…",
         "ft_status_exported":     "✓ 已导出：{path}",
-        "ft_err_no_inv":          "尚未加载清单，请先点击「刷新清单」。",
+        "ft_err_no_inv":          "尚未加载清单，请点击「刷新清单」。",
         "ft_err_no_selection":    "请至少选择一个产品和一种语言。",
+        "ft_err_no_data":         "选择范围内未聚合到任何翻译。",
         "ft_err_module":          "export_full_translations 模块加载失败。",
         "ft_select_all":          "全选",
         "ft_clear_all":           "清空",
+        "ft_keys_pending":        "…",
     },
 }
 
@@ -89,13 +100,24 @@ STRINGS = {
 # ---------------------------------------------------------------------------
 
 class FullTranslationsTab:
-    """Self-contained Tab widget. parent = ttk.Frame inside notebook."""
+    """Self-contained Tab widget. parent = ttk.Frame inside notebook.
+
+    Lifecycle:
+        __init__         → only build widgets, no network calls
+        on_first_show()  → fired by export_gui when the tab is first selected;
+                           kicks off a single lightweight inventory load.
+        Refresh button   → re-runs the same lightweight inventory load.
+        Export buttons   → trigger the heavy /translations fetch on demand,
+                           pre-filtered by current selection.
+    """
 
     def __init__(self, parent: ttk.Frame, app) -> None:
         self.parent = parent
         self.app = app
-        self._inventory = None
+        self._light_inv = None        # LightInventory or None — only selectors
+        self._inv_loaded = False      # set True after first successful load
         self._busy = False
+        self._first_show_pending = True
 
         self._build_ui()
 
@@ -275,6 +297,18 @@ class FullTranslationsTab:
         except Exception:
             pass
 
+    # ---- public lifecycle hook --------------------------------------
+    def on_first_show(self) -> None:
+        """Called by export_gui the first time this tab is selected.
+
+        Triggers exactly one lightweight inventory load. Subsequent tab
+        switches do nothing — the user can hit "Refresh Inventory" to reload.
+        """
+        if not self._first_show_pending:
+            return
+        self._first_show_pending = False
+        self._on_refresh()
+
     # ---- actions ----------------------------------------------------
     def _select_all(self, tree: ttk.Treeview) -> None:
         items = tree.get_children()
@@ -290,64 +324,82 @@ class FullTranslationsTab:
             except Exception:
                 pass
 
-    def _on_refresh(self) -> None:
-        if _exp is None or self._busy:
-            return
+    def _selected_sources(self):
         sources = []
         if self.var_src_legacy.get():
             sources.append("legacy")
         if self.var_src_mr.get():
             sources.append("mr")
-        if not sources:
-            sources = ["legacy", "mr"]
+        return sources or ["legacy", "mr"]
+
+    # ---- inventory load (LIGHT — selectors only) --------------------
+    def _on_refresh(self) -> None:
+        """(Re)load the lightweight Product × Language inventory.
+
+        Critically: this does NOT touch any /translations endpoint. It only
+        hits cheap distinct/aggregate APIs to fill the selector widgets.
+        """
+        if _exp is None or self._busy:
+            return
+        sources = self._selected_sources()
         self._set_busy(True)
         self.lbl_status.configure(
             text=self._t("ft_status_loading"), foreground="#888")
         t = threading.Thread(
-            target=self._run_refresh, args=(sources,), daemon=True)
+            target=self._run_light_refresh, args=(sources,), daemon=True)
         t.start()
 
-    def _run_refresh(self, sources) -> None:
+    def _run_light_refresh(self, sources) -> None:
         try:
-            inv = _exp.collect_full_translations(
+            inv = _exp.build_light_inventory(
                 sources=sources, progress_cb=self._log)
-            self.parent.after(0, self._on_refresh_done, inv, None)
+            self.parent.after(0, self._on_light_refresh_done, inv, None)
         except Exception as e:
-            self.parent.after(0, self._on_refresh_done, None, str(e))
+            self.parent.after(0, self._on_light_refresh_done, None, str(e))
 
-    def _on_refresh_done(self, inv, err) -> None:
+    def _on_light_refresh_done(self, inv, err) -> None:
         self._set_busy(False)
         if err:
             self.lbl_status.configure(
                 text=f"❌ {err}", foreground="#e94560")
             return
-        self._inventory = inv
-        # Fill product tree
+
+        self._light_inv = inv
+        self._inv_loaded = True
+
+        # Fill product tree — iid = stable encoded product id
         self.prod_tree.delete(*self.prod_tree.get_children())
-        for product, count in inv.products_sorted_by_key_count():
+        pending = self._t("ft_keys_pending")
+        for p in inv.products:
+            count = p.get("entry_count")
+            keys_cell = f"{count:,}" if isinstance(count, int) else pending
             self.prod_tree.insert(
-                "", "end", iid=product, values=(product, f"{count:,}"))
+                "", "end", iid=p["id"], values=(p["label"], keys_cell))
+
         # Fill locale list
         self.loc_list.delete(0, tk.END)
-        for loc in inv.all_locales():
+        for loc in inv.locales:
             self.loc_list.insert(tk.END, loc)
-        # Default: select all
+
+        # Default: select all (consistent with previous UX)
         self._select_all(self.prod_tree)
-        self.loc_list.select_set(0, tk.END)
+        if inv.locales:
+            self.loc_list.select_set(0, tk.END)
 
         self.lbl_status.configure(
             text=self._t("ft_status_loaded").format(
-                p=len(inv.data), l=len(inv.all_locales()),
-                n=inv.total_entries()),
+                p=len(inv.products), l=len(inv.locales)),
             foreground="#2ecc71")
 
-    def _selected_products(self):
+    # ---- selection helpers ------------------------------------------
+    def _selected_product_ids(self):
         return list(self.prod_tree.selection())
 
     def _selected_locales(self):
         idxs = self.loc_list.curselection()
         return [self.loc_list.get(i) for i in idxs]
 
+    # ---- export (HEAVY — only on click) -----------------------------
     def _on_export_all(self) -> None:
         self._do_export(all_selection=True)
 
@@ -357,21 +409,36 @@ class FullTranslationsTab:
     def _do_export(self, *, all_selection: bool) -> None:
         if _exp is None or self._busy:
             return
-        if self._inventory is None:
+        if not self._inv_loaded or self._light_inv is None:
             messagebox.showwarning(
                 "Full Translations", self._t("ft_err_no_inv"))
             return
 
+        sources = self._selected_sources()
+
         if all_selection:
-            products = None
-            locales = None
+            # Use everything currently in the light inventory.
+            selected_ids = self._light_inv.product_ids()
+            locales = list(self._light_inv.locales) or None
         else:
-            products = self._selected_products() or None
+            selected_ids = self._selected_product_ids()
             locales = self._selected_locales() or None
-            if not products or not locales:
+            if not selected_ids or not locales:
                 messagebox.showwarning(
                     "Full Translations", self._t("ft_err_no_selection"))
                 return
+
+        legacy_filter, mr_filter = self._light_inv.split_selection(selected_ids)
+        # Restrict the source list to what the user actually selected.
+        effective_sources = []
+        if "legacy" in sources and legacy_filter:
+            effective_sources.append("legacy")
+        if "mr" in sources and mr_filter:
+            effective_sources.append("mr")
+        if not effective_sources:
+            messagebox.showwarning(
+                "Full Translations", self._t("ft_err_no_selection"))
+            return
 
         default_name = f"FullTranslations_{date.today().strftime('%Y%m%d')}.zip"
         out_path = filedialog.asksaveasfilename(
@@ -385,20 +452,40 @@ class FullTranslationsTab:
 
         self._set_busy(True)
         self.lbl_status.configure(
-            text=self._t("ft_status_exporting"), foreground="#888")
+            text=self._t("ft_status_collecting"), foreground="#888")
         t = threading.Thread(
             target=self._run_export,
-            args=(out_path, products, locales),
+            args=(out_path, effective_sources, legacy_filter, mr_filter, locales),
             daemon=True,
         )
         t.start()
 
-    def _run_export(self, out_path, products, locales) -> None:
+    def _run_export(self, out_path, sources, legacy_filter, mr_filter, locales) -> None:
+        """Background: heavy fetch + zip build, scoped by user selection."""
         try:
+            heavy_inv = _exp.collect_full_translations(
+                sources=sources,
+                progress_cb=self._log,
+                legacy_project_filter=legacy_filter or None,
+                mr_project_filter=mr_filter or None,
+            )
+            if not heavy_inv.data:
+                self.parent.after(
+                    0, self._on_export_done, None, self._t("ft_err_no_data"))
+                return
+
+            self.parent.after(
+                0,
+                lambda: self.lbl_status.configure(
+                    text=self._t("ft_status_exporting"), foreground="#888"),
+            )
             summary = _exp.build_ap_zip(
-                self._inventory,
+                heavy_inv,
                 out_path=out_path,
-                products=products,
+                products=None,        # zip-side product filter no longer needed:
+                                       #   the heavy fetch is already pre-filtered
+                                       #   by project_id, and the zip's "product"
+                                       #   axis is opus-id-derived.
                 locales=locales,
                 progress_cb=self._log,
             )

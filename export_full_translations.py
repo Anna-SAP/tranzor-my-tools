@@ -33,14 +33,20 @@ import os
 import sys
 import threading
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
-from typing import Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 # 将本目录加入 sys.path，确保无论从哪里启动都能 import 同级模块
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import export_translations as _legacy       # noqa: E402  — 只读 import
 import export_mr_pipeline as _mr            # noqa: E402  — 只读 import
+
+
+# Source kind tags used in LightInventory.products[*]["source"]
+SRC_LEGACY = "legacy"
+SRC_MR = "mr"
 
 
 # ---------------------------------------------------------------------------
@@ -162,18 +168,261 @@ class FullTranslationInventory:
         return n
 
 
+# ---------------------------------------------------------------------------
+# 轻量清单（LightInventory）
+# ---------------------------------------------------------------------------
+#
+# 用途:
+#     "Full Translations" 面板初始化时，仅加载"产品 + 语言"两个选择维度，绝不
+#     拉取任何翻译正文。这里聚合的全部数据来自:
+#       - GET /api/v1/dashboard/filters       (单条 distinct SQL — ms 级)
+#       - GET /api/v1/legacy/tasks            (任务列表，自带 target_languages)
+#       - GET /api/v1/dashboard/overview      (按 project_id 的 count 聚合)
+#     这些接口在 backend 都是聚合查询，不会为获取列表而 join translations 全表。
+#
+# 输出结构:
+#     LightInventory.products = [
+#         {
+#             "id": "<source>::<project_id_or_name>",
+#             "label": "[Legacy] CoreLib/mthor",
+#             "source": "legacy" | "mr",
+#             "project_id": "CoreLib/mthor",
+#             "task_count": 12,                 # int 或 None（未填）
+#             "entry_count": 5238,              # int 或 None（未填）
+#             "languages": ["zh-CN", "ja-JP"],  # 仅本产品/项目的语言（hint）
+#         },
+#         ...
+#     ]
+#     LightInventory.locales = ["de-DE", "es-ES", ...]
+#
+
+class LightInventory:
+    """Lightweight Product × Language index used by the Full Translations tab.
+
+    Constructed by :func:`build_light_inventory`. Does **not** contain any
+    translation text. Used purely for populating selectors so the panel can
+    render in <2s on first show.
+    """
+
+    def __init__(self) -> None:
+        self.products: List[dict] = []
+        self.locales: List[str] = []
+        self._lock = threading.Lock()
+
+    # ---- helpers ----------------------------------------------------
+    def product_ids(self) -> List[str]:
+        return [p["id"] for p in self.products]
+
+    def find(self, product_id: str) -> Optional[dict]:
+        for p in self.products:
+            if p["id"] == product_id:
+                return p
+        return None
+
+    def split_selection(
+        self, selected_ids: Iterable[str]
+    ) -> Tuple[Set[str], Set[str]]:
+        """Split a selection of product IDs into (legacy_projects, mr_projects).
+
+        Each item in selected_ids matches LightInventory.products[*]["id"]
+        which is encoded as ``<source>::<project_id>``.
+        """
+        legacy: Set[str] = set()
+        mr: Set[str] = set()
+        for sid in selected_ids:
+            p = self.find(sid)
+            if not p:
+                continue
+            if p["source"] == SRC_LEGACY:
+                legacy.add(p["project_id"])
+            elif p["source"] == SRC_MR:
+                mr.add(p["project_id"])
+        return legacy, mr
+
+
+def _make_product_id(source: str, project_id: str) -> str:
+    return f"{source}::{project_id}"
+
+
+def _build_legacy_light(
+    progress_cb: ProgressCb,
+) -> Tuple[List[dict], Set[str]]:
+    """Discover legacy products+languages without fetching translation text.
+
+    Strategy: enumerate the legacy task list once (paginated). Each task row
+    already carries ``project_name`` and ``target_languages``, so we can
+    aggregate the project → tasks/languages mapping without ever calling the
+    per-task ``/translations`` endpoint.
+    """
+    _log(progress_cb, "  [Legacy] 拉取 Completed task 列表（仅 metadata）...")
+    try:
+        tasks = _legacy.fetch_tasks()
+    except Exception as e:
+        _log(progress_cb, f"  ⚠ [Legacy] 获取 task 列表失败: {e}")
+        return [], set()
+
+    by_project: Dict[str, dict] = {}
+    locales: Set[str] = set()
+
+    for t in tasks:
+        pname = (t.get("project_name") or "").strip() or "(unknown)"
+        langs = [str(x) for x in (t.get("target_languages") or []) if x]
+        for lng in langs:
+            locales.add(lng)
+        bucket = by_project.setdefault(
+            pname,
+            {
+                "id": _make_product_id(SRC_LEGACY, pname),
+                "label": f"[Legacy] {pname}",
+                "source": SRC_LEGACY,
+                "project_id": pname,
+                "task_count": 0,
+                "entry_count": None,  # legacy task list 不携带 source 计数
+                "languages": set(),
+            },
+        )
+        bucket["task_count"] += 1
+        bucket["languages"].update(langs)
+
+    products = []
+    for p in by_project.values():
+        p["languages"] = sorted(p["languages"])
+        products.append(p)
+
+    _log(
+        progress_cb,
+        f"  ✓ [Legacy] {len(products)} 个项目 / {len(locales)} 种语言",
+    )
+    return products, locales
+
+
+def _build_mr_light(
+    progress_cb: ProgressCb,
+) -> Tuple[List[dict], Set[str]]:
+    """Discover MR Pipeline products+languages via cheap dashboard endpoints.
+
+    Two backend calls:
+      1. /dashboard/filters — distinct project_ids + languages, single SQL
+      2. /dashboard/overview?project_id=X — total_cases per project (parallel)
+
+    Neither call ever loads translation text.
+    """
+    _log(progress_cb, "  [MR] 拉取 dashboard filters（distinct projects+languages）...")
+    try:
+        filters = _mr.fetch_mr_filters_full()
+    except Exception as e:
+        _log(progress_cb, f"  ⚠ [MR] 获取 filters 失败: {e}")
+        return [], set()
+
+    project_ids = [str(x) for x in filters.get("project_ids", []) if x]
+    locales = set(str(x) for x in filters.get("languages", []) if x)
+
+    products: List[dict] = []
+    for pid in project_ids:
+        products.append(
+            {
+                "id": _make_product_id(SRC_MR, pid),
+                "label": f"[MR] {pid}",
+                "source": SRC_MR,
+                "project_id": pid,
+                "task_count": None,
+                "entry_count": None,
+                "languages": [],
+            }
+        )
+
+    if not products:
+        return products, locales
+
+    # Parallel hydrate of per-project entry_count via /dashboard/overview.
+    # Each call is a single SQL aggregate (count Translation rows for tasks
+    # under that project_id) — typically tens of milliseconds.
+    def _fetch_one(pid: str) -> Tuple[str, Optional[int]]:
+        try:
+            data = _mr.fetch_dashboard_overview(project_id=pid)
+            return pid, int(data.get("total_cases") or 0)
+        except Exception as e:
+            _log(progress_cb, f"  ⚠ [MR] overview {pid} 失败: {e}")
+            return pid, None
+
+    workers = min(8, len(products))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(_fetch_one, p["project_id"]): p for p in products}
+        for f in as_completed(futures):
+            pid, count = f.result()
+            for p in products:
+                if p["project_id"] == pid:
+                    p["entry_count"] = count
+                    break
+
+    _log(
+        progress_cb,
+        f"  ✓ [MR] {len(products)} 个项目 / {len(locales)} 种语言",
+    )
+    return products, locales
+
+
+def build_light_inventory(
+    sources: Iterable[str] = (SRC_LEGACY, SRC_MR),
+    progress_cb: ProgressCb = None,
+) -> LightInventory:
+    """Build the lightweight Product × Language index for the GUI selector.
+
+    This is the **only** function the Full Translations panel calls on init.
+    It must NOT touch any /translations endpoint.
+    """
+    inv = LightInventory()
+    sources = {str(s).lower() for s in sources}
+
+    legacy_products: List[dict] = []
+    mr_products: List[dict] = []
+    legacy_locales: Set[str] = set()
+    mr_locales: Set[str] = set()
+
+    if SRC_LEGACY in sources:
+        legacy_products, legacy_locales = _build_legacy_light(progress_cb)
+    if SRC_MR in sources:
+        mr_products, mr_locales = _build_mr_light(progress_cb)
+
+    # Sort: legacy block first (alphabetically), then MR block
+    legacy_products.sort(key=lambda p: p["project_id"].lower())
+    mr_products.sort(key=lambda p: p["project_id"].lower())
+
+    inv.products = legacy_products + mr_products
+    inv.locales = sorted(legacy_locales | mr_locales)
+
+    _log(
+        progress_cb,
+        f"\n  ✓ 轻量清单完成：{len(inv.products)} 个产品 · {len(inv.locales)} 种语言",
+    )
+    return inv
+
+
 # ---- 数据源适配 ----------------------------------------------------------
 
-def _collect_from_legacy(inv: FullTranslationInventory, progress_cb: ProgressCb) -> int:
-    """从 Legacy File Translation API 聚合。"""
+def _collect_from_legacy(
+    inv: FullTranslationInventory,
+    progress_cb: ProgressCb,
+    project_filter: Optional[Set[str]] = None,
+) -> int:
+    """从 Legacy File Translation API 聚合。
+
+    project_filter: 若非 None/空，则只抓取 project_name ∈ project_filter 的任务。
+    """
     _log(progress_cb, "  [Legacy] 获取 File Translation task 列表...")
     try:
         tasks = _legacy.fetch_tasks()
     except Exception as e:
         _log(progress_cb, f"  ⚠ [Legacy] 获取 task 列表失败: {e}")
         return 0
+
+    if project_filter:
+        tasks = [
+            t for t in tasks
+            if (t.get("project_name") or "(unknown)") in project_filter
+        ]
     total = len(tasks)
-    _log(progress_cb, f"  [Legacy] 共 {total} 个 Completed task")
+    _log(progress_cb, f"  [Legacy] 命中 {total} 个 Completed task")
 
     added = 0
     for idx, task in enumerate(tasks, 1):
@@ -199,24 +448,46 @@ def _collect_from_legacy(inv: FullTranslationInventory, progress_cb: ProgressCb)
     return added
 
 
-def _collect_from_mr(inv: FullTranslationInventory, progress_cb: ProgressCb) -> int:
-    """从 MR Pipeline API 聚合。"""
+def _collect_from_mr(
+    inv: FullTranslationInventory,
+    progress_cb: ProgressCb,
+    project_filter: Optional[Set[str]] = None,
+) -> int:
+    """从 MR Pipeline API 聚合。
+
+    project_filter: 若非 None/空，则按 project_id 一次只取该项目下的 completed
+    任务，避免拉取整张 completed 任务列表后再做客户端过滤。
+    """
     _log(progress_cb, "  [MR] 获取 MR Pipeline task 列表...")
     all_tasks: List[dict] = []
-    try:
-        offset = 0
-        batch_size = 100
-        while True:
-            total, batch = _mr.fetch_mr_tasks(
-                status="completed", limit=batch_size, offset=offset)
-            all_tasks.extend(batch)
-            if not batch or offset + batch_size >= total:
-                break
-            offset += batch_size
-    except Exception as e:
-        _log(progress_cb, f"  ⚠ [MR] 获取 task 列表失败: {e}")
-        return 0
-    _log(progress_cb, f"  [MR] 共 {len(all_tasks)} 个 Completed task")
+
+    def _paginate(project_id: Optional[str]) -> List[dict]:
+        out: List[dict] = []
+        try:
+            offset = 0
+            batch_size = 100
+            while True:
+                total, batch = _mr.fetch_mr_tasks(
+                    project_id=project_id,
+                    status="completed",
+                    limit=batch_size,
+                    offset=offset,
+                )
+                out.extend(batch)
+                if not batch or offset + batch_size >= total:
+                    break
+                offset += batch_size
+        except Exception as e:
+            _log(progress_cb, f"  ⚠ [MR] 获取 task 列表失败 ({project_id}): {e}")
+        return out
+
+    if project_filter:
+        for pid in sorted(project_filter):
+            all_tasks.extend(_paginate(pid))
+    else:
+        all_tasks.extend(_paginate(None))
+
+    _log(progress_cb, f"  [MR] 命中 {len(all_tasks)} 个 Completed task")
 
     added = 0
     for idx, task in enumerate(all_tasks, 1):
@@ -246,21 +517,30 @@ def _collect_from_mr(inv: FullTranslationInventory, progress_cb: ProgressCb) -> 
 def collect_full_translations(
     sources: Iterable[str] = ("legacy", "mr"),
     progress_cb: ProgressCb = None,
+    legacy_project_filter: Optional[Iterable[str]] = None,
+    mr_project_filter: Optional[Iterable[str]] = None,
 ) -> FullTranslationInventory:
     """从指定数据源聚合全量翻译。
 
     sources: {"legacy", "mr"} 的子集。默认两者都聚合。
+
+    legacy_project_filter / mr_project_filter:
+        若非 None/空，则在抓取阶段就只命中这些项目下的任务，避免在面板里
+        只点了 1 个产品却把整个 completed 任务列表都拉一遍。
+
     返回 FullTranslationInventory。
     """
     inv = FullTranslationInventory()
     sources = [s.lower() for s in sources]
+    legacy_set = set(legacy_project_filter) if legacy_project_filter else None
+    mr_set = set(mr_project_filter) if mr_project_filter else None
 
     if "legacy" in sources:
-        added = _collect_from_legacy(inv, progress_cb)
+        added = _collect_from_legacy(inv, progress_cb, legacy_set)
         _log(progress_cb, f"  ✓ [Legacy] 写入 {added} 条")
 
     if "mr" in sources:
-        added = _collect_from_mr(inv, progress_cb)
+        added = _collect_from_mr(inv, progress_cb, mr_set)
         _log(progress_cb, f"  ✓ [MR] 写入 {added} 条")
 
     _log(progress_cb, f"\n  ✓ 聚合完成：{len(inv.data)} 个产品 / "

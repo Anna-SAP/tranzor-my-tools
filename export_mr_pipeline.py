@@ -86,6 +86,24 @@ def fetch_mr_filters():
     }
 
 
+def fetch_mr_filters_full():
+    """GET /dashboard/filters — full payload incl. languages.
+
+    The backend already returns ``languages`` as a distinct-SQL aggregate over
+    Translation.target_language, so this is a single cheap query. Full
+    Translations inventory uses this as the fast path for the Languages panel
+    (no per-task result fetching required).
+    """
+    resp = _api_get(f"{MR_API}/dashboard/filters")
+    resp.raise_for_status()
+    data = resp.json()
+    return {
+        "project_ids": data.get("project_ids", []) or [],
+        "releases": data.get("releases", []) or [],
+        "languages": data.get("languages", []) or [],
+    }
+
+
 def fetch_languages():
     """从最近 completed task 的翻译结果中提取所有可用的 target language 列表"""
     try:
