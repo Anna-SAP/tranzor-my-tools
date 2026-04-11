@@ -20,6 +20,8 @@ Full Translation Export — GUI Tab
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -73,6 +75,23 @@ STRINGS = {
         "ft_keys_pending":        "…",
         "ft_filter_label":        "Filter:",
         "ft_filter_hint":         "Type to filter products",
+        "ft_selected_only":       "Selected only",
+        "ft_progress_title":      "Export in progress",
+        "ft_progress_phase_collect": "Fetching translations from Tranzor…",
+        "ft_progress_phase_write":   "Writing output file…",
+        "ft_progress_log_label":  "Activity log",
+        "ft_result_title_ok":     "Export complete",
+        "ft_result_title_err":    "Export failed",
+        "ft_result_summary":      "Summary",
+        "ft_result_per_product":  "Keys per product",
+        "ft_result_per_locale":   "Keys per language",
+        "ft_result_col_product":  "Product",
+        "ft_result_col_locale":   "Language",
+        "ft_result_col_count":    "Keys",
+        "ft_result_open_folder":  "📂 Reveal in Explorer",
+        "ft_result_open_file":    "📄 Open file",
+        "ft_result_close":        "Close",
+        "ft_result_lbl_path":     "Output:",
     },
     "zh": {
         "tab_full_translations":  "🌍 全量翻译",
@@ -106,8 +125,346 @@ STRINGS = {
         "ft_keys_pending":        "…",
         "ft_filter_label":        "过滤：",
         "ft_filter_hint":         "输入关键字过滤产品",
+        "ft_selected_only":       "仅显示已选",
+        "ft_progress_title":      "正在导出",
+        "ft_progress_phase_collect": "正在从 Tranzor 拉取翻译数据…",
+        "ft_progress_phase_write":   "正在写出文件…",
+        "ft_progress_log_label":  "执行日志",
+        "ft_result_title_ok":     "导出完成",
+        "ft_result_title_err":    "导出失败",
+        "ft_result_summary":      "汇总",
+        "ft_result_per_product":  "每个产品的 Key 数",
+        "ft_result_per_locale":   "每种语言的 Key 数",
+        "ft_result_col_product":  "产品",
+        "ft_result_col_locale":   "语言",
+        "ft_result_col_count":    "Key 数",
+        "ft_result_open_folder":  "📂 在资源管理器中定位",
+        "ft_result_open_file":    "📄 打开文件",
+        "ft_result_close":        "关闭",
+        "ft_result_lbl_path":     "输出文件：",
     },
 }
+
+
+# ---------------------------------------------------------------------------
+# Helpers — reveal output file in the host OS file manager
+# ---------------------------------------------------------------------------
+
+def _reveal_in_file_manager(path: str) -> None:
+    """Open the OS file manager with ``path`` selected if possible."""
+    abs_path = os.path.abspath(path)
+    try:
+        if sys.platform == "win32":
+            # explorer.exe /select,<path>  — keep "/select,<path>" as one
+            # argv item so paths with spaces stay intact.
+            subprocess.Popen(["explorer", f"/select,{abs_path}"])
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", "-R", abs_path])
+        else:
+            # Linux / other: best-effort, open the parent directory.
+            subprocess.Popen(["xdg-open", os.path.dirname(abs_path) or "."])
+    except Exception:
+        pass
+
+
+def _open_file_with_default_app(path: str) -> None:
+    abs_path = os.path.abspath(path)
+    try:
+        if sys.platform == "win32":
+            os.startfile(abs_path)  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", abs_path])
+        else:
+            subprocess.Popen(["xdg-open", abs_path])
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Export progress / result dialog
+# ---------------------------------------------------------------------------
+
+class _ExportProgressDialog:
+    """Modal Toplevel that morphs from progress phase → result phase.
+
+    Lifecycle:
+        __init__       → progress phase: header, status, indeterminate
+                         progressbar, scrollable log textbox.
+        append_log()   → adds a line to the log (Tk-thread safe via after()).
+        set_phase()    → changes the header status text.
+        show_success() → swaps in the summary view (per-product / per-locale
+                         breakdowns) plus Reveal / Open / Close buttons.
+        show_error()   → red header + error message + Close button.
+
+    Why one dialog instead of two: short exports flash the progress phase
+    briefly and then jump to the result, while long exports keep the user
+    informed; either way the user sees a single modal flow without losing
+    the activity log.
+    """
+
+    def __init__(self, master, t_func, title: str) -> None:
+        self.master = master
+        self._t = t_func
+        self._closed = False
+
+        top = tk.Toplevel(master)
+        self.top = top
+        top.title(title)
+        top.transient(master.winfo_toplevel())
+        top.protocol("WM_DELETE_WINDOW", self._on_close_attempt)
+        top.minsize(560, 380)
+        try:
+            top.configure(bg="#1f1f2e")
+        except Exception:
+            pass
+        # Block parent interaction while exporting.
+        try:
+            top.grab_set()
+        except Exception:
+            pass
+
+        # Header
+        self.lbl_header = ttk.Label(
+            top, text=title, style="Title.TLabel")
+        self.lbl_header.pack(anchor="w", padx=14, pady=(12, 4))
+
+        self.lbl_phase = ttk.Label(
+            top, text=self._t("ft_progress_phase_collect"),
+            style="Status.TLabel")
+        self.lbl_phase.pack(anchor="w", padx=14, pady=(0, 8))
+
+        # Progress phase frame -------------------------------------------
+        self.frame_progress = ttk.Frame(top, style="App.TFrame")
+        self.frame_progress.pack(fill="both", expand=True, padx=14)
+
+        self.progressbar = ttk.Progressbar(
+            self.frame_progress, mode="indeterminate", length=520)
+        self.progressbar.pack(fill="x", pady=(0, 10))
+        try:
+            self.progressbar.start(80)
+        except Exception:
+            pass
+
+        ttk.Label(
+            self.frame_progress, text=self._t("ft_progress_log_label"),
+            style="CardBold.TLabel").pack(anchor="w")
+        log_box = ttk.Frame(self.frame_progress, style="App.TFrame")
+        log_box.pack(fill="both", expand=True, pady=(2, 0))
+        self.txt_log = tk.Text(
+            log_box, height=12, wrap="none",
+            bg="#11111a", fg="#cdd6f4", insertbackground="#cdd6f4",
+            relief="flat", borderwidth=0)
+        log_scroll = ttk.Scrollbar(log_box, orient="vertical",
+                                    command=self.txt_log.yview)
+        self.txt_log.configure(yscrollcommand=log_scroll.set, state="disabled")
+        self.txt_log.pack(side="left", fill="both", expand=True)
+        log_scroll.pack(side="right", fill="y")
+
+        # Result phase frame (hidden until completion) -------------------
+        self.frame_result = ttk.Frame(top, style="App.TFrame")
+
+        # Bottom button bar (replaced when transitioning phases) ---------
+        self.frame_buttons = ttk.Frame(top, style="App.TFrame")
+        self.frame_buttons.pack(fill="x", padx=14, pady=10)
+        # No close button during the progress phase by design — completion
+        # event installs Reveal / Open / Close buttons.
+
+        self._center_on_master()
+
+    # ---- placement -------------------------------------------------
+    def _center_on_master(self) -> None:
+        try:
+            self.top.update_idletasks()
+            mw = self.master.winfo_toplevel()
+            x = mw.winfo_rootx() + (mw.winfo_width() - self.top.winfo_width()) // 2
+            y = mw.winfo_rooty() + (mw.winfo_height() - self.top.winfo_height()) // 2
+            self.top.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+        except Exception:
+            pass
+
+    # ---- progress -------------------------------------------------
+    def append_log(self, line: str) -> None:
+        if self._closed:
+            return
+        try:
+            self.txt_log.configure(state="normal")
+            self.txt_log.insert("end", (line or "") + "\n")
+            self.txt_log.see("end")
+            self.txt_log.configure(state="disabled")
+        except Exception:
+            pass
+
+    def set_phase(self, text: str) -> None:
+        if self._closed:
+            return
+        try:
+            self.lbl_phase.configure(text=text)
+        except Exception:
+            pass
+
+    # ---- transitions ----------------------------------------------
+    def _stop_progressbar(self) -> None:
+        try:
+            self.progressbar.stop()
+        except Exception:
+            pass
+
+    def show_success(self, summary: dict, mode: str) -> None:
+        if self._closed:
+            return
+        self._stop_progressbar()
+        try:
+            self.lbl_header.configure(text=self._t("ft_result_title_ok"))
+            self.lbl_phase.configure(text=self._t("ft_result_summary"))
+        except Exception:
+            pass
+
+        # Tear down progress widgets and rebuild as the result view.
+        try:
+            self.frame_progress.pack_forget()
+        except Exception:
+            pass
+
+        self._build_result_view(summary, mode, error=None)
+        self._build_result_buttons(summary["out_path"])
+
+    def show_error(self, err: str) -> None:
+        if self._closed:
+            return
+        self._stop_progressbar()
+        try:
+            self.lbl_header.configure(text=self._t("ft_result_title_err"))
+            self.lbl_phase.configure(
+                text=str(err) or "Unknown error", foreground="#e94560")
+        except Exception:
+            pass
+        # Keep the log visible (it usually has the traceback context),
+        # just install a Close button.
+        self._build_result_buttons(out_path=None)
+
+    # ---- result view -----------------------------------------------
+    def _build_result_view(self, summary: dict, mode: str, error) -> None:
+        out_path = summary.get("out_path") or ""
+        per_product = summary.get("per_product") or {}
+        per_locale = summary.get("per_locale") or {}
+
+        self.frame_result.pack(fill="both", expand=True, padx=14)
+
+        # Path row
+        path_row = ttk.Frame(self.frame_result, style="App.TFrame")
+        path_row.pack(fill="x", pady=(0, 8))
+        ttk.Label(path_row, text=self._t("ft_result_lbl_path"),
+                  style="CardBold.TLabel").pack(side="left")
+        ttk.Label(path_row, text=out_path,
+                  style="Status.TLabel").pack(side="left", padx=(6, 0))
+
+        # Summary line
+        if mode == "json":
+            line = (
+                f"{self._t('ft_result_col_product')}: {len(per_product)}   "
+                f"·   {self._t('ft_result_col_locale')}: {len(per_locale)}   "
+                f"·   Records: {summary.get('records', 0):,}"
+            )
+        else:
+            line = (
+                f"{self._t('ft_result_col_product')}: {len(per_product)}   "
+                f"·   {self._t('ft_result_col_locale')}: {len(per_locale)}   "
+                f"·   Files: {summary.get('files', 0):,}   "
+                f"·   Entries: {summary.get('entries', 0):,}"
+            )
+        ttk.Label(self.frame_result, text=line,
+                  style="Status.TLabel").pack(anchor="w", pady=(0, 8))
+
+        # Two side-by-side breakdown tables
+        tables = ttk.Frame(self.frame_result, style="App.TFrame")
+        tables.pack(fill="both", expand=True)
+
+        self._make_breakdown_table(
+            tables,
+            title=self._t("ft_result_per_product"),
+            label_col=self._t("ft_result_col_product"),
+            counts=per_product,
+            side="left",
+        )
+        self._make_breakdown_table(
+            tables,
+            title=self._t("ft_result_per_locale"),
+            label_col=self._t("ft_result_col_locale"),
+            counts=per_locale,
+            side="right",
+        )
+
+    def _make_breakdown_table(self, parent, *, title, label_col, counts, side) -> None:
+        col = ttk.Frame(parent, style="App.TFrame")
+        col.pack(side=side, fill="both", expand=True,
+                 padx=(0, 6) if side == "left" else (6, 0))
+        ttk.Label(col, text=title, style="CardBold.TLabel").pack(anchor="w")
+        wrap = ttk.Frame(col, style="App.TFrame")
+        wrap.pack(fill="both", expand=True, pady=(2, 0))
+        tree = ttk.Treeview(
+            wrap, columns=("label", "count"), show="headings", height=8)
+        tree.heading("label", text=label_col)
+        tree.heading("count", text=self._t("ft_result_col_count"))
+        tree.column("label", width=180, anchor="w")
+        tree.column("count", width=80, anchor="e")
+        for label in sorted(counts.keys()):
+            tree.insert("", "end", values=(label, f"{counts[label]:,}"))
+        sb = ttk.Scrollbar(wrap, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=sb.set)
+        tree.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+
+    def _build_result_buttons(self, out_path) -> None:
+        # Replace the existing button frame contents.
+        for w in self.frame_buttons.winfo_children():
+            try:
+                w.destroy()
+            except Exception:
+                pass
+
+        if out_path:
+            btn_reveal = ttk.Button(
+                self.frame_buttons, text=self._t("ft_result_open_folder"),
+                command=lambda p=out_path: _reveal_in_file_manager(p))
+            btn_reveal.pack(side="left")
+            btn_open = ttk.Button(
+                self.frame_buttons, text=self._t("ft_result_open_file"),
+                command=lambda p=out_path: _open_file_with_default_app(p))
+            btn_open.pack(side="left", padx=(8, 0))
+
+        btn_close = ttk.Button(
+            self.frame_buttons, text=self._t("ft_result_close"),
+            command=self.close)
+        btn_close.pack(side="right")
+
+    # ---- close -----------------------------------------------------
+    def _on_close_attempt(self) -> None:
+        # During the progress phase, ignore close to avoid orphaning the
+        # background worker. After completion, _build_result_buttons gives
+        # the user a real Close action.
+        try:
+            running = bool(self.progressbar.cget("mode") == "indeterminate"
+                           and self.progressbar["value"] == 0
+                           and self._closed is False)
+        except Exception:
+            running = not self._closed
+        if running and self.frame_result.winfo_ismapped() is False:
+            return
+        self.close()
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._stop_progressbar()
+        try:
+            self.top.grab_release()
+        except Exception:
+            pass
+        try:
+            self.top.destroy()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +495,8 @@ class FullTranslationsTab:
         # so _selected_product_ids() can read check state of items hidden
         # by the current filter.
         self._all_prod_iids: list = []
+        # Active export progress dialog (None when no export is running).
+        self._progress_dlg: _ExportProgressDialog | None = None
 
         self._build_ui()
 
@@ -232,6 +591,17 @@ class FullTranslationsTab:
             prod_header, textvariable=self.var_prod_filter)
         self.ent_prod_filter.pack(side="left", fill="x", expand=True)
         self.var_prod_filter.trace_add("write", self._on_filter_changed)
+        # "Selected only" toggle: doubles as a quick way to verify what
+        # the user has actually checked across a long product list.
+        self.var_prod_selected_only = tk.BooleanVar(value=False)
+        self.chk_prod_selected_only = ttk.Checkbutton(
+            prod_header,
+            text=self._t("ft_selected_only"),
+            variable=self.var_prod_selected_only,
+            style="Card.TCheckbutton",
+            command=self._on_filter_changed,
+        )
+        self.chk_prod_selected_only.pack(side="left", padx=(8, 0))
 
         prod_frame = ttk.Frame(left, style="App.TFrame")
         prod_frame.pack(fill="both", expand=True)
@@ -331,6 +701,8 @@ class FullTranslationsTab:
             self.chk_mr.configure(text=self._t("ft_src_mr"))
             self.lbl_prod.configure(text=self._t("ft_products"))
             self.lbl_prod_filter.configure(text=self._t("ft_filter_label"))
+            self.chk_prod_selected_only.configure(
+                text=self._t("ft_selected_only"))
             self.lbl_loc.configure(text=self._t("ft_locales"))
             self.prod_tree.heading("product", text=self._t("ft_col_product"))
             self.prod_tree.heading("keys", text=self._t("ft_col_keys"))
@@ -408,7 +780,11 @@ class FullTranslationsTab:
         self._render_products_filter()
 
     def _render_products_filter(self) -> None:
-        """Apply the keyword filter to prod_tree without losing check state.
+        """Apply the active filters to prod_tree without losing check state.
+
+        Two filters compose:
+            - keyword (substring match against product label)
+            - "selected only" toggle (only rows currently checked)
 
         Items are detached (not deleted), so their values — including the
         check glyph — survive across filter changes. ``_all_prod_iids``
@@ -416,6 +792,7 @@ class FullTranslationsTab:
         a stable sequence.
         """
         keyword = (self.var_prod_filter.get() or "").strip().lower()
+        selected_only = bool(self.var_prod_selected_only.get())
         visible_idx = 0
         for iid in self._all_prod_iids:
             try:
@@ -425,9 +802,11 @@ class FullTranslationsTab:
             if not vals:
                 continue
             label = str(vals[1]) if len(vals) >= 2 else ""
-            match = (not keyword) or (keyword in label.lower())
+            checked = vals[0] == CHECK_ON
+            keyword_ok = (not keyword) or (keyword in label.lower())
+            selected_ok = (not selected_only) or checked
             try:
-                if match:
+                if keyword_ok and selected_ok:
                     self.prod_tree.move(iid, "", visible_idx)
                     visible_idx += 1
                 else:
@@ -604,6 +983,13 @@ class FullTranslationsTab:
         self._set_busy(True)
         self.lbl_status.configure(
             text=self._t("ft_status_collecting"), foreground="#888")
+
+        # Open the modal progress dialog. The background worker pipes
+        # progress callbacks here via _dialog_log so the user can follow
+        # exactly what is happening.
+        self._progress_dlg = _ExportProgressDialog(
+            self.parent, self._t, title=self._t("ft_progress_title"))
+
         t = threading.Thread(
             target=self._run_export,
             args=(out_path, mode, effective_sources, legacy_filter, mr_filter, locales),
@@ -611,12 +997,31 @@ class FullTranslationsTab:
         )
         t.start()
 
+    def _dialog_log(self, line: str) -> None:
+        """Thread-safe progress callback that fans out to dialog + console."""
+        try:
+            print(line)
+        except Exception:
+            pass
+        dlg = self._progress_dlg
+        if dlg is None:
+            return
+        try:
+            self.parent.after(0, dlg.append_log, line)
+        except Exception:
+            pass
+
     def _run_export(self, out_path, mode, sources, legacy_filter, mr_filter, locales) -> None:
         """Background: heavy fetch + (zip | merged-json) build, scoped by selection."""
+        dlg = self._progress_dlg
         try:
+            if dlg is not None:
+                self.parent.after(
+                    0, dlg.set_phase, self._t("ft_progress_phase_collect"))
+
             heavy_inv = _exp.collect_full_translations(
                 sources=sources,
-                progress_cb=self._log,
+                progress_cb=self._dialog_log,
                 legacy_project_filter=legacy_filter or None,
                 mr_project_filter=mr_filter or None,
             )
@@ -634,6 +1039,9 @@ class FullTranslationsTab:
                 lambda: self.lbl_status.configure(
                     text=self._t(writing_key), foreground="#888"),
             )
+            if dlg is not None:
+                self.parent.after(
+                    0, dlg.set_phase, self._t("ft_progress_phase_write"))
 
             # The heavy fetch is already pre-filtered by project_id; the
             # AP-style "product" axis is opus-id-derived, and the merged
@@ -645,7 +1053,7 @@ class FullTranslationsTab:
                     out_path=out_path,
                     products=None,
                     locales=locales,
-                    progress_cb=self._log,
+                    progress_cb=self._dialog_log,
                 )
             else:
                 summary = _exp.build_ap_zip(
@@ -653,18 +1061,26 @@ class FullTranslationsTab:
                     out_path=out_path,
                     products=None,
                     locales=locales,
-                    progress_cb=self._log,
+                    progress_cb=self._dialog_log,
                 )
+            # Stash mode so _on_export_done can render the right summary view.
+            summary["_mode"] = mode
             self.parent.after(0, self._on_export_done, summary, None)
         except Exception as e:
             self.parent.after(0, self._on_export_done, None, str(e))
 
     def _on_export_done(self, summary, err) -> None:
         self._set_busy(False)
+        dlg = self._progress_dlg
         if err:
             self.lbl_status.configure(
                 text=f"❌ {err}", foreground="#e94560")
+            if dlg is not None:
+                dlg.show_error(err)
             return
         self.lbl_status.configure(
             text=self._t("ft_status_exported").format(path=summary["out_path"]),
             foreground="#2ecc71")
+        if dlg is not None:
+            mode = summary.get("_mode", "zip")
+            dlg.show_success(summary, mode=mode)

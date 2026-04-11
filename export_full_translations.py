@@ -33,6 +33,7 @@ import os
 import sys
 import threading
 import zipfile
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
@@ -606,9 +607,12 @@ def build_ap_zip(
         "locales": 0,
         "files": 0,
         "entries": 0,
+        # Stats for the GUI result dialog: total entries grouped by axis.
+        "per_product": {},   # product -> total entries (sum across selected locales)
+        "per_locale": {},    # locale -> total entries (sum across selected products)
     }
-    touched_products: set = set()
-    touched_locales: set = set()
+    per_product: Counter = Counter()
+    per_locale: Counter = Counter()
 
     with zipfile.ZipFile(out_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         with inv._lock:  # noqa: SLF001  — 内部快照，避免写 zip 期间数据变动
@@ -640,12 +644,14 @@ def build_ap_zip(
 
                 summary["files"] += 1
                 summary["entries"] += len(entries)
-                touched_products.add(product)
-                touched_locales.add(locale)
+                per_product[product] += len(entries)
+                per_locale[locale] += len(entries)
                 _log(progress_cb, f"  + {product}/{locale}: {len(entries)}")
 
-    summary["products"] = len(touched_products)
-    summary["locales"] = len(touched_locales)
+    summary["products"] = len(per_product)
+    summary["locales"] = len(per_locale)
+    summary["per_product"] = dict(per_product)
+    summary["per_locale"] = dict(per_locale)
     _log(progress_cb, f"\n  ✓ 写入 {out_path}")
     _log(progress_cb, f"    产品={summary['products']}, 语言={summary['locales']}, "
                       f"文件={summary['files']}, 条目={summary['entries']}")
@@ -711,29 +717,39 @@ def build_merged_json(
         return ([SOURCE_LOCALE] if SOURCE_LOCALE in locs else []) + rest
 
     records: List[dict] = []
+    per_product: Counter = Counter()
+    per_locale: Counter = Counter()
     for opus_id in sorted(merged.keys()):
         loc_values = merged[opus_id]
         rec: Dict[str, str] = {"key": opus_id}
         for loc in _ordered_locales(loc_values.keys()):
             rec[loc] = loc_values[loc]
         records.append(rec)
+        # Count one record per product, and one per locale present in record.
+        per_product[parse_product(opus_id)] += 1
+        for loc in loc_values.keys():
+            per_locale[loc] += 1
 
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(records, f, ensure_ascii=False, indent=2)
 
-    all_locales_used: Set[str] = set()
-    for m in merged.values():
-        all_locales_used.update(m.keys())
-
     summary = {
         "out_path": out_path,
         "records": len(records),
-        "locales": len(all_locales_used),
+        "locales": len(per_locale),
+        "products": len(per_product),
+        # entries == records here so the dialog can show a single number; the
+        # per-axis breakdowns mirror build_ap_zip's shape so the dialog can
+        # render both modes the same way.
+        "entries": len(records),
+        "per_product": dict(per_product),
+        "per_locale": dict(per_locale),
     }
     _log(progress_cb, f"\n  ✓ 写入合并 JSON: {out_path}")
     _log(
         progress_cb,
-        f"    records={summary['records']}, locales={summary['locales']}",
+        f"    records={summary['records']}, locales={summary['locales']}, "
+        f"products={summary['products']}",
     )
     return summary
 
