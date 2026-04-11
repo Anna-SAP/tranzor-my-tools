@@ -653,6 +653,92 @@ def build_ap_zip(
 
 
 # ---------------------------------------------------------------------------
+# 输出 merged JSON（按 opus_id 对齐多语言列）
+# ---------------------------------------------------------------------------
+
+def build_merged_json(
+    inv: FullTranslationInventory,
+    out_path: str,
+    products: Optional[Iterable[str]] = None,
+    locales: Optional[Iterable[str]] = None,
+    progress_cb: ProgressCb = None,
+) -> dict:
+    """把聚合结果写成单个扁平 JSON 文件，供后续质量检查 / 全局搜索使用。
+
+    输出结构对齐 ``merged_translations_example.json``：
+
+        [
+            {
+                "key": "<opus_id>",
+                "en-US": "<source text>",
+                "de-DE": "<translation>",
+                ...
+            },
+            ...
+        ]
+
+    每条 record 的 ``key`` 后是该 opus_id 在每个被选中的语言下的字符串。
+    en-US（源语言）若存在固定排在最前，其余语言按字母序排列。某条记录
+    在某语言下没有翻译时，对应字段会被省略而不是写入空字符串。
+
+    products / locales 传 None 或空表示不再做客户端过滤（建议在 fetch
+    阶段就按 project_id 预过滤好；这里的 locales 主要用来裁剪用户当前
+    勾选的目标语言）。
+    """
+    product_filter = set(products) if products else None
+    locale_filter = set(locales) if locales else None
+
+    out_path = os.path.abspath(out_path)
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+
+    # opus_id -> {locale: value}
+    merged: Dict[str, Dict[str, str]] = {}
+    with inv._lock:  # noqa: SLF001 — snapshot under lock for consistency
+        for product, loc_map in inv.data.items():
+            if product_filter is not None and product not in product_filter:
+                continue
+            for locale, kv in loc_map.items():
+                if locale_filter is not None and locale not in locale_filter:
+                    continue
+                for opus_id, value in kv.items():
+                    if value in (None, ""):
+                        continue
+                    merged.setdefault(opus_id, {})[locale] = value
+
+    def _ordered_locales(locs: Iterable[str]) -> List[str]:
+        # Source language first, then alphabetic — matches the example file.
+        rest = sorted(loc for loc in locs if loc != SOURCE_LOCALE)
+        return ([SOURCE_LOCALE] if SOURCE_LOCALE in locs else []) + rest
+
+    records: List[dict] = []
+    for opus_id in sorted(merged.keys()):
+        loc_values = merged[opus_id]
+        rec: Dict[str, str] = {"key": opus_id}
+        for loc in _ordered_locales(loc_values.keys()):
+            rec[loc] = loc_values[loc]
+        records.append(rec)
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(records, f, ensure_ascii=False, indent=2)
+
+    all_locales_used: Set[str] = set()
+    for m in merged.values():
+        all_locales_used.update(m.keys())
+
+    summary = {
+        "out_path": out_path,
+        "records": len(records),
+        "locales": len(all_locales_used),
+    }
+    _log(progress_cb, f"\n  ✓ 写入合并 JSON: {out_path}")
+    _log(
+        progress_cb,
+        f"    records={summary['records']}, locales={summary['locales']}",
+    )
+    return summary
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 

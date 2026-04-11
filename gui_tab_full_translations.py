@@ -51,6 +51,7 @@ STRINGS = {
         "ft_refresh":             "🔄 Refresh Inventory",
         "ft_export_selected":     "📦 Export Selected",
         "ft_export_all":          "📦 Export All",
+        "ft_merge_json":          "🧩 Merge to JSON",
         "ft_products":            "Products",
         "ft_locales":             "Languages",
         "ft_col_product":         "Product",
@@ -61,6 +62,7 @@ STRINGS = {
         "ft_status_loaded":       "Inventory ready: {p} products · {l} languages",
         "ft_status_collecting":   "Fetching translations for selection…",
         "ft_status_exporting":    "Writing zip…",
+        "ft_status_writing_json": "Writing merged JSON…",
         "ft_status_exported":     "✓ Exported to {path}",
         "ft_err_no_inv":          "Inventory not loaded yet. Click 'Refresh Inventory'.",
         "ft_err_no_selection":    "Please select at least one product and one language.",
@@ -82,6 +84,7 @@ STRINGS = {
         "ft_refresh":             "🔄 刷新清单",
         "ft_export_selected":     "📦 导出选中",
         "ft_export_all":          "📦 全部导出",
+        "ft_merge_json":          "🧩 合并为 JSON",
         "ft_products":            "产品",
         "ft_locales":             "语言",
         "ft_col_product":         "产品",
@@ -92,6 +95,7 @@ STRINGS = {
         "ft_status_loaded":       "清单就绪：{p} 个产品 · {l} 种语言",
         "ft_status_collecting":   "正在按选择拉取翻译数据…",
         "ft_status_exporting":    "正在写 zip…",
+        "ft_status_writing_json": "正在写合并 JSON…",
         "ft_status_exported":     "✓ 已导出：{path}",
         "ft_err_no_inv":          "尚未加载清单，请点击「刷新清单」。",
         "ft_err_no_selection":    "请至少选择一个产品和一种语言。",
@@ -196,6 +200,12 @@ class FullTranslationsTab:
             command=self._on_export_all,
             style_name="Success", padx=14, pady=4)
         self.btn_export_all.pack(side="left")
+
+        self.btn_merge_json = self.app._create_button(
+            top, text=self._t("ft_merge_json"),
+            command=self._on_merge_json,
+            style_name="Accent", padx=14, pady=4)
+        self.btn_merge_json.pack(side="left", padx=(8, 0))
 
         # Body: two columns (products | languages)
         body = ttk.Frame(outer, style="App.TFrame")
@@ -304,7 +314,8 @@ class FullTranslationsTab:
         if _exp is None:
             self.lbl_status.configure(
                 text=self._t("ft_err_module"), foreground="#e94560")
-            for w in (self.btn_refresh, self.btn_export_sel, self.btn_export_all):
+            for w in (self.btn_refresh, self.btn_export_sel, self.btn_export_all,
+                      self.btn_merge_json):
                 try:
                     w.configure(state="disabled")
                 except Exception:
@@ -330,6 +341,7 @@ class FullTranslationsTab:
                 self.btn_refresh.configure(text=self._t("ft_refresh"))
                 self.btn_export_sel.configure(text=self._t("ft_export_selected"))
                 self.btn_export_all.configure(text=self._t("ft_export_all"))
+                self.btn_merge_json.configure(text=self._t("ft_merge_json"))
                 self.btn_prod_all.configure(text=self._t("ft_select_all"))
                 self.btn_prod_clear.configure(text=self._t("ft_clear_all"))
                 self.btn_loc_all.configure(text=self._t("ft_select_all"))
@@ -427,7 +439,8 @@ class FullTranslationsTab:
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
         state = "disabled" if busy else "normal"
-        for w in (self.btn_refresh, self.btn_export_sel, self.btn_export_all):
+        for w in (self.btn_refresh, self.btn_export_sel, self.btn_export_all,
+                  self.btn_merge_json):
             try:
                 w.configure(state=state)
             except Exception:
@@ -523,12 +536,19 @@ class FullTranslationsTab:
 
     # ---- export (HEAVY — only on click) -----------------------------
     def _on_export_all(self) -> None:
-        self._do_export(all_selection=True)
+        self._do_export(all_selection=True, mode="zip")
 
     def _on_export_selected(self) -> None:
-        self._do_export(all_selection=False)
+        self._do_export(all_selection=False, mode="zip")
 
-    def _do_export(self, *, all_selection: bool) -> None:
+    def _on_merge_json(self) -> None:
+        # The merged JSON is meant for downstream QA / global search; the
+        # natural scope is "whatever the user has currently checked", so we
+        # always go through the selection path. To merge everything they
+        # can hit Select All on both panels first.
+        self._do_export(all_selection=False, mode="json")
+
+    def _do_export(self, *, all_selection: bool, mode: str = "zip") -> None:
         if _exp is None or self._busy:
             return
         if not self._inv_loaded or self._light_inv is None:
@@ -562,13 +582,22 @@ class FullTranslationsTab:
                 "Full Translations", self._t("ft_err_no_selection"))
             return
 
-        default_name = f"FullTranslations_{date.today().strftime('%Y%m%d')}.zip"
-        out_path = filedialog.asksaveasfilename(
-            title="Save Full Translations ZIP",
-            defaultextension=".zip",
-            filetypes=[("Zip archives", "*.zip")],
-            initialfile=default_name,
-        )
+        if mode == "json":
+            default_name = f"MergedTranslations_{date.today().strftime('%Y%m%d')}.json"
+            out_path = filedialog.asksaveasfilename(
+                title="Save Merged Translations JSON",
+                defaultextension=".json",
+                filetypes=[("JSON files", "*.json")],
+                initialfile=default_name,
+            )
+        else:
+            default_name = f"FullTranslations_{date.today().strftime('%Y%m%d')}.zip"
+            out_path = filedialog.asksaveasfilename(
+                title="Save Full Translations ZIP",
+                defaultextension=".zip",
+                filetypes=[("Zip archives", "*.zip")],
+                initialfile=default_name,
+            )
         if not out_path:
             return
 
@@ -577,13 +606,13 @@ class FullTranslationsTab:
             text=self._t("ft_status_collecting"), foreground="#888")
         t = threading.Thread(
             target=self._run_export,
-            args=(out_path, effective_sources, legacy_filter, mr_filter, locales),
+            args=(out_path, mode, effective_sources, legacy_filter, mr_filter, locales),
             daemon=True,
         )
         t.start()
 
-    def _run_export(self, out_path, sources, legacy_filter, mr_filter, locales) -> None:
-        """Background: heavy fetch + zip build, scoped by user selection."""
+    def _run_export(self, out_path, mode, sources, legacy_filter, mr_filter, locales) -> None:
+        """Background: heavy fetch + (zip | merged-json) build, scoped by selection."""
         try:
             heavy_inv = _exp.collect_full_translations(
                 sources=sources,
@@ -596,21 +625,36 @@ class FullTranslationsTab:
                     0, self._on_export_done, None, self._t("ft_err_no_data"))
                 return
 
+            writing_key = (
+                "ft_status_writing_json" if mode == "json"
+                else "ft_status_exporting"
+            )
             self.parent.after(
                 0,
                 lambda: self.lbl_status.configure(
-                    text=self._t("ft_status_exporting"), foreground="#888"),
+                    text=self._t(writing_key), foreground="#888"),
             )
-            summary = _exp.build_ap_zip(
-                heavy_inv,
-                out_path=out_path,
-                products=None,        # zip-side product filter no longer needed:
-                                       #   the heavy fetch is already pre-filtered
-                                       #   by project_id, and the zip's "product"
-                                       #   axis is opus-id-derived.
-                locales=locales,
-                progress_cb=self._log,
-            )
+
+            # The heavy fetch is already pre-filtered by project_id; the
+            # AP-style "product" axis is opus-id-derived, and the merged
+            # JSON ignores product boundaries entirely. Either way pass
+            # products=None and let locales drive the slicing.
+            if mode == "json":
+                summary = _exp.build_merged_json(
+                    heavy_inv,
+                    out_path=out_path,
+                    products=None,
+                    locales=locales,
+                    progress_cb=self._log,
+                )
+            else:
+                summary = _exp.build_ap_zip(
+                    heavy_inv,
+                    out_path=out_path,
+                    products=None,
+                    locales=locales,
+                    progress_cb=self._log,
+                )
             self.parent.after(0, self._on_export_done, summary, None)
         except Exception as e:
             self.parent.after(0, self._on_export_done, None, str(e))
