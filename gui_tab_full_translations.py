@@ -31,6 +31,11 @@ except Exception:  # pragma: no cover — defensive
     _exp = None
 
 
+# Unicode check glyphs used by the products / languages multi-select trees.
+CHECK_OFF = "\u2610"  # ☐
+CHECK_ON = "\u2611"   # ☑
+
+
 # ---------------------------------------------------------------------------
 # i18n
 # ---------------------------------------------------------------------------
@@ -50,6 +55,7 @@ STRINGS = {
         "ft_locales":             "Languages",
         "ft_col_product":         "Product",
         "ft_col_keys":            "Keys",
+        "ft_col_locale":          "Locale",
         "ft_status_idle":         "Loading inventory…",
         "ft_status_loading":      "Loading product & language inventory…",
         "ft_status_loaded":       "Inventory ready: {p} products · {l} languages",
@@ -78,6 +84,7 @@ STRINGS = {
         "ft_locales":             "语言",
         "ft_col_product":         "产品",
         "ft_col_keys":            "Key 数",
+        "ft_col_locale":          "语言代码",
         "ft_status_idle":         "正在加载清单…",
         "ft_status_loading":      "正在加载产品 / 语言清单…",
         "ft_status_loaded":       "清单就绪：{p} 个产品 · {l} 种语言",
@@ -201,14 +208,17 @@ class FullTranslationsTab:
 
         self.prod_tree = ttk.Treeview(
             prod_frame,
-            columns=("product", "keys"),
+            columns=("check", "product", "keys"),
             show="headings",
-            selectmode="extended",
+            selectmode="browse",
         )
+        self.prod_tree.heading("check", text="")
         self.prod_tree.heading("product", text=self._t("ft_col_product"))
         self.prod_tree.heading("keys", text=self._t("ft_col_keys"))
+        self.prod_tree.column("check", width=32, anchor="center", stretch=False)
         self.prod_tree.column("product", width=220, anchor="w")
         self.prod_tree.column("keys", width=80, anchor="e")
+        self.prod_tree.bind("<ButtonRelease-1>", self._on_prod_click)
         prod_scroll = ttk.Scrollbar(prod_frame, orient="vertical",
                                      command=self.prod_tree.yview)
         self.prod_tree.configure(yscrollcommand=prod_scroll.set)
@@ -219,40 +229,50 @@ class FullTranslationsTab:
         prod_btns.pack(fill="x", pady=(4, 0))
         self.btn_prod_all = self.app._create_button(
             prod_btns, text=self._t("ft_select_all"),
-            command=lambda: self._select_all(self.prod_tree),
+            command=lambda: self._check_all(self.prod_tree, True),
             style_name="SecondaryTiny", padx=10, pady=2)
         self.btn_prod_all.pack(side="left")
         self.btn_prod_clear = self.app._create_button(
             prod_btns, text=self._t("ft_clear_all"),
-            command=lambda: self.prod_tree.selection_remove(
-                *self.prod_tree.get_children()),
+            command=lambda: self._check_all(self.prod_tree, False),
             style_name="SecondaryTiny", padx=10, pady=2)
         self.btn_prod_clear.pack(side="left", padx=(6, 0))
 
-        # Locales (Listbox)
+        # Locales (Treeview with checkbox column)
         self.lbl_loc = ttk.Label(right, text=self._t("ft_locales"),
                                   style="CardBold.TLabel")
         self.lbl_loc.pack(anchor="w", pady=(0, 4))
 
-        self.loc_list = tk.Listbox(
-            right, selectmode="extended",
-            exportselection=False,
-            bg="#0a0a1a", fg="#e0e0e0",
-            selectbackground="#e94560", selectforeground="#ffffff",
-            highlightthickness=1, highlightbackground="#2a2a4a",
-            relief="flat", bd=0)
-        self.loc_list.pack(fill="both", expand=True)
+        loc_frame = ttk.Frame(right, style="App.TFrame")
+        loc_frame.pack(fill="both", expand=True)
+
+        self.loc_tree = ttk.Treeview(
+            loc_frame,
+            columns=("check", "locale"),
+            show="headings",
+            selectmode="browse",
+        )
+        self.loc_tree.heading("check", text="")
+        self.loc_tree.heading("locale", text=self._t("ft_col_locale"))
+        self.loc_tree.column("check", width=32, anchor="center", stretch=False)
+        self.loc_tree.column("locale", width=240, anchor="w")
+        self.loc_tree.bind("<ButtonRelease-1>", self._on_loc_click)
+        loc_scroll = ttk.Scrollbar(loc_frame, orient="vertical",
+                                    command=self.loc_tree.yview)
+        self.loc_tree.configure(yscrollcommand=loc_scroll.set)
+        self.loc_tree.pack(side="left", fill="both", expand=True)
+        loc_scroll.pack(side="right", fill="y")
 
         loc_btns = ttk.Frame(right, style="App.TFrame")
         loc_btns.pack(fill="x", pady=(4, 0))
         self.btn_loc_all = self.app._create_button(
             loc_btns, text=self._t("ft_select_all"),
-            command=lambda: self.loc_list.select_set(0, tk.END),
+            command=lambda: self._check_all(self.loc_tree, True),
             style_name="SecondaryTiny", padx=10, pady=2)
         self.btn_loc_all.pack(side="left")
         self.btn_loc_clear = self.app._create_button(
             loc_btns, text=self._t("ft_clear_all"),
-            command=lambda: self.loc_list.select_clear(0, tk.END),
+            command=lambda: self._check_all(self.loc_tree, False),
             style_name="SecondaryTiny", padx=10, pady=2)
         self.btn_loc_clear.pack(side="left", padx=(6, 0))
 
@@ -282,7 +302,8 @@ class FullTranslationsTab:
             self.lbl_loc.configure(text=self._t("ft_locales"))
             self.prod_tree.heading("product", text=self._t("ft_col_product"))
             self.prod_tree.heading("keys", text=self._t("ft_col_keys"))
-            if self._inventory is None:
+            self.loc_tree.heading("locale", text=self._t("ft_col_locale"))
+            if self._light_inv is None:
                 self.lbl_status.configure(text=self._t("ft_status_idle"))
             try:
                 self.btn_refresh.configure(text=self._t("ft_refresh"))
@@ -309,12 +330,47 @@ class FullTranslationsTab:
         self._first_show_pending = False
         self._on_refresh()
 
-    # ---- actions ----------------------------------------------------
-    def _select_all(self, tree: ttk.Treeview) -> None:
-        items = tree.get_children()
-        if items:
-            tree.selection_set(items)
+    # ---- check helpers (multi-select via checkboxes) ----------------
+    def _set_check(self, tree: ttk.Treeview, iid: str, on: bool) -> None:
+        vals = list(tree.item(iid, "values"))
+        if not vals:
+            return
+        vals[0] = CHECK_ON if on else CHECK_OFF
+        tree.item(iid, values=vals)
 
+    def _toggle_check(self, tree: ttk.Treeview, iid: str) -> None:
+        vals = list(tree.item(iid, "values"))
+        if not vals:
+            return
+        vals[0] = CHECK_OFF if vals[0] == CHECK_ON else CHECK_ON
+        tree.item(iid, values=vals)
+
+    def _check_all(self, tree: ttk.Treeview, on: bool = True) -> None:
+        for iid in tree.get_children():
+            self._set_check(tree, iid, on)
+
+    def _checked_iids(self, tree: ttk.Treeview) -> list:
+        out = []
+        for iid in tree.get_children():
+            vals = tree.item(iid, "values")
+            if vals and vals[0] == CHECK_ON:
+                out.append(iid)
+        return out
+
+    def _on_prod_click(self, event) -> None:
+        # Header click → identify_row returns "" → no-op.
+        iid = self.prod_tree.identify_row(event.y)
+        if not iid:
+            return
+        self._toggle_check(self.prod_tree, iid)
+
+    def _on_loc_click(self, event) -> None:
+        iid = self.loc_tree.identify_row(event.y)
+        if not iid:
+            return
+        self._toggle_check(self.loc_tree, iid)
+
+    # ---- actions ----------------------------------------------------
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
         state = "disabled" if busy else "normal"
@@ -367,24 +423,21 @@ class FullTranslationsTab:
         self._light_inv = inv
         self._inv_loaded = True
 
-        # Fill product tree — iid = stable encoded product id
+        # Fill product tree — iid = stable encoded product id, all checked.
         self.prod_tree.delete(*self.prod_tree.get_children())
         pending = self._t("ft_keys_pending")
         for p in inv.products:
             count = p.get("entry_count")
             keys_cell = f"{count:,}" if isinstance(count, int) else pending
             self.prod_tree.insert(
-                "", "end", iid=p["id"], values=(p["label"], keys_cell))
+                "", "end", iid=p["id"],
+                values=(CHECK_ON, p["label"], keys_cell))
 
-        # Fill locale list
-        self.loc_list.delete(0, tk.END)
+        # Fill locale tree — iid = locale code, all checked.
+        self.loc_tree.delete(*self.loc_tree.get_children())
         for loc in inv.locales:
-            self.loc_list.insert(tk.END, loc)
-
-        # Default: select all (consistent with previous UX)
-        self._select_all(self.prod_tree)
-        if inv.locales:
-            self.loc_list.select_set(0, tk.END)
+            self.loc_tree.insert(
+                "", "end", iid=loc, values=(CHECK_ON, loc))
 
         self.lbl_status.configure(
             text=self._t("ft_status_loaded").format(
@@ -393,11 +446,10 @@ class FullTranslationsTab:
 
     # ---- selection helpers ------------------------------------------
     def _selected_product_ids(self):
-        return list(self.prod_tree.selection())
+        return self._checked_iids(self.prod_tree)
 
     def _selected_locales(self):
-        idxs = self.loc_list.curselection()
-        return [self.loc_list.get(i) for i in idxs]
+        return self._checked_iids(self.loc_tree)
 
     # ---- export (HEAVY — only on click) -----------------------------
     def _on_export_all(self) -> None:
