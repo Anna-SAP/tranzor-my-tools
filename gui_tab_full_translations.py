@@ -69,6 +69,8 @@ STRINGS = {
         "ft_select_all":          "Select All",
         "ft_clear_all":           "Clear",
         "ft_keys_pending":        "…",
+        "ft_filter_label":        "Filter:",
+        "ft_filter_hint":         "Type to filter products",
     },
     "zh": {
         "tab_full_translations":  "🌍 全量翻译",
@@ -98,6 +100,8 @@ STRINGS = {
         "ft_select_all":          "全选",
         "ft_clear_all":           "清空",
         "ft_keys_pending":        "…",
+        "ft_filter_label":        "过滤：",
+        "ft_filter_hint":         "输入关键字过滤产品",
     },
 }
 
@@ -125,6 +129,11 @@ class FullTranslationsTab:
         self._inv_loaded = False      # set True after first successful load
         self._busy = False
         self._first_show_pending = True
+        # Full ordered list of product iids ever inserted into prod_tree.
+        # Survives detach() so the filter can re-attach matching items, and
+        # so _selected_product_ids() can read check state of items hidden
+        # by the current filter.
+        self._all_prod_iids: list = []
 
         self._build_ui()
 
@@ -198,10 +207,21 @@ class FullTranslationsTab:
         right.pack(side="right", fill="y")
         right.pack_propagate(False)
 
-        # Products (Treeview)
-        self.lbl_prod = ttk.Label(left, text=self._t("ft_products"),
+        # Products (Treeview) — header row carries the section label and the
+        # keyword filter input.
+        prod_header = ttk.Frame(left, style="App.TFrame")
+        prod_header.pack(fill="x", pady=(0, 4))
+        self.lbl_prod = ttk.Label(prod_header, text=self._t("ft_products"),
                                    style="CardBold.TLabel")
-        self.lbl_prod.pack(anchor="w", pady=(0, 4))
+        self.lbl_prod.pack(side="left")
+        self.lbl_prod_filter = ttk.Label(
+            prod_header, text=self._t("ft_filter_label"))
+        self.lbl_prod_filter.pack(side="left", padx=(16, 6))
+        self.var_prod_filter = tk.StringVar()
+        self.ent_prod_filter = ttk.Entry(
+            prod_header, textvariable=self.var_prod_filter)
+        self.ent_prod_filter.pack(side="left", fill="x", expand=True)
+        self.var_prod_filter.trace_add("write", self._on_filter_changed)
 
         prod_frame = ttk.Frame(left, style="App.TFrame")
         prod_frame.pack(fill="both", expand=True)
@@ -299,6 +319,7 @@ class FullTranslationsTab:
             self.chk_legacy.configure(text=self._t("ft_src_legacy"))
             self.chk_mr.configure(text=self._t("ft_src_mr"))
             self.lbl_prod.configure(text=self._t("ft_products"))
+            self.lbl_prod_filter.configure(text=self._t("ft_filter_label"))
             self.lbl_loc.configure(text=self._t("ft_locales"))
             self.prod_tree.heading("product", text=self._t("ft_col_product"))
             self.prod_tree.heading("keys", text=self._t("ft_col_keys"))
@@ -370,6 +391,38 @@ class FullTranslationsTab:
             return
         self._toggle_check(self.loc_tree, iid)
 
+    # ---- product filter ---------------------------------------------
+    def _on_filter_changed(self, *_args) -> None:
+        self._render_products_filter()
+
+    def _render_products_filter(self) -> None:
+        """Apply the keyword filter to prod_tree without losing check state.
+
+        Items are detached (not deleted), so their values — including the
+        check glyph — survive across filter changes. ``_all_prod_iids``
+        keeps the canonical insertion order so re-attached rows render in
+        a stable sequence.
+        """
+        keyword = (self.var_prod_filter.get() or "").strip().lower()
+        visible_idx = 0
+        for iid in self._all_prod_iids:
+            try:
+                vals = self.prod_tree.item(iid, "values")
+            except Exception:
+                continue
+            if not vals:
+                continue
+            label = str(vals[1]) if len(vals) >= 2 else ""
+            match = (not keyword) or (keyword in label.lower())
+            try:
+                if match:
+                    self.prod_tree.move(iid, "", visible_idx)
+                    visible_idx += 1
+                else:
+                    self.prod_tree.detach(iid)
+            except Exception:
+                pass
+
     # ---- actions ----------------------------------------------------
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
@@ -425,6 +478,7 @@ class FullTranslationsTab:
 
         # Fill product tree — iid = stable encoded product id, all checked.
         self.prod_tree.delete(*self.prod_tree.get_children())
+        self._all_prod_iids = []
         pending = self._t("ft_keys_pending")
         for p in inv.products:
             count = p.get("entry_count")
@@ -432,6 +486,11 @@ class FullTranslationsTab:
             self.prod_tree.insert(
                 "", "end", iid=p["id"],
                 values=(CHECK_ON, p["label"], keys_cell))
+            self._all_prod_iids.append(p["id"])
+
+        # Honour any keyword the user typed before the inventory finished
+        # loading (the entry stays editable while the background load runs).
+        self._render_products_filter()
 
         # Fill locale tree — iid = locale code, all checked.
         self.loc_tree.delete(*self.loc_tree.get_children())
@@ -446,7 +505,18 @@ class FullTranslationsTab:
 
     # ---- selection helpers ------------------------------------------
     def _selected_product_ids(self):
-        return self._checked_iids(self.prod_tree)
+        # Iterate the canonical iid list (not get_children, which only
+        # returns visible rows) so a product hidden by the active filter
+        # but already checked still counts.
+        out = []
+        for iid in self._all_prod_iids:
+            try:
+                vals = self.prod_tree.item(iid, "values")
+            except Exception:
+                continue
+            if vals and vals[0] == CHECK_ON:
+                out.append(iid)
+        return out
 
     def _selected_locales(self):
         return self._checked_iids(self.loc_tree)

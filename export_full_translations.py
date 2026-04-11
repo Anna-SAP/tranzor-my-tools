@@ -48,6 +48,11 @@ import export_mr_pipeline as _mr            # noqa: E402  — 只读 import
 SRC_LEGACY = "legacy"
 SRC_MR = "mr"
 
+# Source language for the entire Tranzor pipeline. Translation rows store
+# their original en-US copy in the ``source_text`` field; the AP.zip
+# convention requires that text to live under <product>/en-US/.
+SOURCE_LOCALE = "en-US"
+
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -124,17 +129,27 @@ class FullTranslationInventory:
         opus_key: str = "opus_id",
         locale_key: str = "target_language",
         value_key: str = "translated_text",
+        source_locale: Optional[str] = None,
+        source_value_key: str = "source_text",
     ) -> int:
-        """批量写入。返回实际写入的条目数（未计入空值）。"""
+        """批量写入。返回实际写入的目标语条目数（未计入空值或源语言副本）。
+
+        当 source_locale 非空时，每条 entry 还会把 ``source_text`` 写一份到
+        ``data[product][source_locale]``，让 AP.zip 输出可以包含 en-US 源语
+        言目录（target_language 维度天然不包含 en-US）。
+        """
         n = 0
         for entry in entries:
             oid = entry.get(opus_key) or ""
             loc = entry.get(locale_key) or ""
             val = entry.get(value_key)
-            if not oid or not loc or val in (None, ""):
-                continue
-            self.ingest(oid, loc, val)
-            n += 1
+            if oid and loc and val not in (None, ""):
+                self.ingest(oid, loc, val)
+                n += 1
+            if source_locale and oid:
+                src = entry.get(source_value_key)
+                if src not in (None, ""):
+                    self.ingest(oid, source_locale, src)
         return n
 
     # ---- 查询 --------------------------------------------------------
@@ -389,7 +404,11 @@ def build_light_inventory(
     mr_products.sort(key=lambda p: p["project_id"].lower())
 
     inv.products = legacy_products + mr_products
-    inv.locales = sorted(legacy_locales | mr_locales)
+    # Always offer en-US in the selector. Translation rows are stored by
+    # target_language, so en-US is rarely returned by /dashboard/filters,
+    # but the AP.zip output should still include the source-language copy
+    # whenever the user picks it.
+    inv.locales = sorted(legacy_locales | mr_locales | {SOURCE_LOCALE})
 
     _log(
         progress_cb,
@@ -442,6 +461,7 @@ def _collect_from_legacy(
             opus_key="opus_id",
             locale_key="target_language",
             value_key="translated_text",
+            source_locale=SOURCE_LOCALE,
         )
         added += n
         _log(progress_cb, f"  [Legacy {idx}/{total}] '{tname}' +{n}")
@@ -507,6 +527,7 @@ def _collect_from_mr(
             opus_key="opus_id",
             locale_key="target_language",
             value_key="translated_text",
+            source_locale=SOURCE_LOCALE,
         )
         added += n
         if idx % 10 == 0 or n > 0:
