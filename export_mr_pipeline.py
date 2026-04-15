@@ -424,6 +424,7 @@ def fetch_dashboard_overview(project_id=None, release=None,
 # ---------------------------------------------------------------------------
 def fetch_dashboard_cases(project_id=None, release=None, language=None,
                           min_score=None, max_score=None,
+                          start_time=None, end_time=None,
                           mr_limit=100, mr_offset=0):
     """GET /dashboard/cases"""
     params = {"mr_limit": mr_limit, "mr_offset": mr_offset}
@@ -437,6 +438,10 @@ def fetch_dashboard_cases(project_id=None, release=None, language=None,
         params["min_score"] = min_score
     if max_score is not None:
         params["max_score"] = max_score
+    if start_time:
+        params["start_time"] = start_time
+    if end_time:
+        params["end_time"] = end_time
 
     resp = _api_get(f"{MR_API}/dashboard/cases", params=params)
     resp.raise_for_status()
@@ -448,6 +453,7 @@ def fetch_dashboard_cases(project_id=None, release=None, language=None,
 # ---------------------------------------------------------------------------
 def fetch_all_dashboard_cases(project_id=None, release=None, language=None,
                               min_score=None, max_score=None,
+                              start_time=None, end_time=None,
                               page_size=100):
     """Fetch the complete MR-grouped cases dataset for Quality Overview."""
     all_mrs = []
@@ -461,6 +467,8 @@ def fetch_all_dashboard_cases(project_id=None, release=None, language=None,
             language=language,
             min_score=min_score,
             max_score=max_score,
+            start_time=start_time,
+            end_time=end_time,
             mr_limit=page_size,
             mr_offset=offset,
         )
@@ -542,7 +550,7 @@ def fetch_all_legacy_tasks_for_quality(project_name=None, status="Completed",
     return all_tasks
 
 
-def fetch_legacy_translations_quality(task_id, limit=500, offset=0,
+def fetch_legacy_translations_quality(task_id, limit=200, offset=0,
                                       target_language=None):
     """GET /legacy/tasks/{task_id}/translations — 翻译结果含质量评分"""
     params = {"limit": limit, "offset": offset}
@@ -573,7 +581,7 @@ def fetch_legacy_translation_edit_logs(task_id, translation_id):
     return resp.json()
 
 
-def fetch_all_legacy_translations_quality(task_id, page_size=500,
+def fetch_all_legacy_translations_quality(task_id, page_size=200,
                                           target_language=None):
     """分页获取某个 legacy task 的全部翻译（含质量数据）"""
     all_items = []
@@ -1425,6 +1433,248 @@ def write_mr_excel(results_data, filename):
 # ---------------------------------------------------------------------------
 # 9) 统一保存入口
 # ---------------------------------------------------------------------------
+def _api_post(url, **kwargs):
+    """带重试的 POST 请求"""
+    if _session is None:
+        raise RuntimeError("requests package not available")
+    kwargs.setdefault("timeout", 60)
+    for attempt in range(MAX_RETRIES):
+        try:
+            return _session.post(url, **kwargs)
+        except (requests.exceptions.Timeout,
+                requests.exceptions.ConnectionError) as e:
+            if attempt < MAX_RETRIES - 1:
+                wait = 2 ** attempt
+                print(f"    ⚠ 请求超时，{wait}s 后重试 ({attempt+1}/{MAX_RETRIES})...")
+                time.sleep(wait)
+            else:
+                raise
+
+
+# ---------------------------------------------------------------------------
+# Human Revisions — client-side aggregation using existing deployed APIs
+# ---------------------------------------------------------------------------
+# MR Pipeline changes:
+#   1. Language Lead fixes:  fixed_by_lead on dashboard/cases
+#   2. Auto-refinement:  iteration > 1 with different text from iteration_1
+#   Both are surfaced as "translation changes" in the MR Pipeline channel.
+#
+# File Translation changes:
+#   translation_type="Manual Edit"|"LLM Retranslate" on translations API
+#   then fetch per-translation edit-logs for before/after text
+#   (same approach as export_changes.py)
+# ---------------------------------------------------------------------------
+
+
+def _collect_mr_revisions(start_time=None, end_time=None,
+                           progress_callback=None):
+    """Collect translation changes from MR Pipeline via /dashboard/cases.
+
+    Two change sources:
+    1. Language Lead fixes (``fixed_by_lead`` set):
+       ``translated_text`` → ``fixed_text``
+    2. Auto-refinement (``iteration > 1``):
+       ``iteration_history.iteration_1.translation`` → ``translated_text``
+    """
+    if progress_callback:
+        progress_callback("Loading MR Pipeline cases...")
+
+    data = fetch_all_dashboard_cases(
+        start_time=start_time,
+        end_time=end_time,
+    )
+    revisions = []
+    for mr in data.get("mrs", []):
+        mr_project = mr.get("project_id", "")
+        mr_iid = mr.get("mr_iid")
+        for case in mr.get("cases", []):
+            fixer = case.get("fixed_by_lead")
+
+            # Source 1: Language Lead manual fix
+            if fixer:
+                revisions.append({
+                    "channel": "MR Pipeline",
+                    "project_id": mr_project,
+                    "opus_id": case.get("opus_id", ""),
+                    "target_language": case.get("target_language", ""),
+                    "source_text": case.get("source_text", ""),
+                    "machine_translation": case.get("translated_text", ""),
+                    "human_revision": case.get("fixed_text") or case.get("translated_text", ""),
+                    "machine_score": case.get("final_score"),
+                    "error_category": case.get("error_category"),
+                    "editor": fixer,
+                    "revised_at": case.get("fixed_at") or case.get("created_at", ""),
+                    "mr_iid": mr_iid,
+                })
+                continue
+
+            # Source 2: Auto-refinement (iteration > 1 with text change)
+            iteration = case.get("iteration") or 1
+            if iteration <= 1:
+                continue
+            hist = case.get("iteration_history") or {}
+            iter1 = hist.get("iteration_1", {})
+            iter1_text = iter1.get("translation", "")
+            final_text = case.get("translated_text", "")
+            if not iter1_text or iter1_text == final_text:
+                continue
+
+            revisions.append({
+                "channel": "MR Pipeline",
+                "project_id": mr_project,
+                "opus_id": case.get("opus_id", ""),
+                "target_language": case.get("target_language", ""),
+                "source_text": case.get("source_text", ""),
+                "machine_translation": iter1_text,
+                "human_revision": final_text,
+                "machine_score": case.get("final_score"),
+                "error_category": case.get("error_category"),
+                "editor": "Auto-Refine",
+                "revised_at": case.get("created_at", ""),
+                "mr_iid": mr_iid,
+            })
+    return revisions
+
+
+def _collect_legacy_revisions(start_time=None, end_time=None,
+                               progress_callback=None):
+    """Collect human edits from File Translation (legacy) channel.
+
+    Reuses the same detection logic as ``export_changes.py``:
+      1. Fetch all completed legacy tasks (optionally filtered by date).
+      2. For each task, fetch translations with
+         ``translation_type in ('Manual Edit', 'LLM Retranslate')``.
+      3. For every such translation, fetch its **edit-logs** to obtain the
+         concrete before/after text and the editor name.
+    """
+    if progress_callback:
+        progress_callback("Loading File Translation tasks...")
+
+    tasks = fetch_all_legacy_tasks_for_quality(status="Completed")
+
+    # Filter tasks by date
+    if start_time or end_time:
+        filtered = []
+        for t in tasks:
+            created = t.get("created_at", "")
+            if start_time and created < start_time:
+                continue
+            if end_time and created > end_time:
+                continue
+            filtered.append(t)
+        tasks = filtered
+
+    revisions = []
+    total_tasks = len(tasks)
+
+    for idx, task in enumerate(tasks):
+        task_id = str(task.get("task_id") or task.get("id", ""))
+        task_name = task.get("task_name") or task.get("name", "")
+        project_name = task.get("project_name", "")
+        if not task_id:
+            continue
+
+        if progress_callback:
+            progress_callback(
+                f"Scanning File Translation {idx + 1}/{total_tasks}: "
+                f"{task_name[:30]}"
+            )
+
+        # Step A: fetch translations, keep only human-edited ones
+        try:
+            translations = fetch_all_legacy_translations_quality(task_id)
+        except Exception:
+            continue
+
+        manual_entries = [
+            tr for tr in translations
+            if tr.get("translation_type", "") in ("Manual Edit", "LLM Retranslate")
+        ]
+        if not manual_entries:
+            continue
+
+        # Step B: for each manual entry, fetch edit-logs to get before/after
+        for tr in manual_entries:
+            tr_id = tr.get("translation_id")
+            if not tr_id:
+                continue
+
+            try:
+                logs = fetch_legacy_translation_edit_logs(task_id, tr_id)
+            except Exception:
+                logs = []
+
+            if logs:
+                # Each edit-log entry is one human revision
+                for log in logs:
+                    revisions.append({
+                        "channel": "File Translation",
+                        "project_id": project_name or task_name,
+                        "opus_id": tr.get("opus_id") or tr.get("source_id", ""),
+                        "target_language": tr.get("target_language", ""),
+                        "source_text": tr.get("source_text", ""),
+                        "machine_translation": log.get("original_text", ""),
+                        "human_revision": log.get("edited_text", ""),
+                        "machine_score": tr.get("final_score"),
+                        "error_category": tr.get("error_category"),
+                        "editor": log.get("user_name") or tr.get("translation_type", ""),
+                        "revised_at": log.get("created_at", ""),
+                        "task_name": task_name,
+                        "notes": log.get("notes", ""),
+                    })
+            else:
+                # translation_type says edited but no log detail — still
+                # include it so the count is accurate
+                revisions.append({
+                    "channel": "File Translation",
+                    "project_id": project_name or task_name,
+                    "opus_id": tr.get("opus_id") or tr.get("source_id", ""),
+                    "target_language": tr.get("target_language", ""),
+                    "source_text": tr.get("source_text", ""),
+                    "machine_translation": "",
+                    "human_revision": tr.get("translated_text", ""),
+                    "machine_score": tr.get("final_score"),
+                    "error_category": tr.get("error_category"),
+                    "editor": tr.get("translation_type", ""),
+                    "revised_at": tr.get("created_at", ""),
+                    "task_name": task_name,
+                    "notes": "",
+                })
+
+    return revisions
+
+
+def collect_human_revisions(start_time=None, end_time=None,
+                             progress_callback=None):
+    """
+    Collect all human revisions from both MR Pipeline and File Translation
+    channels.  Returns data grouped by channel for the GUI.
+    """
+    mr_revs = _collect_mr_revisions(
+        start_time=start_time, end_time=end_time,
+        progress_callback=progress_callback,
+    )
+    legacy_revs = _collect_legacy_revisions(
+        start_time=start_time, end_time=end_time,
+        progress_callback=progress_callback,
+    )
+
+    mr_revs.sort(key=lambda r: r.get("revised_at") or "", reverse=True)
+    legacy_revs.sort(key=lambda r: r.get("revised_at") or "", reverse=True)
+
+    return {
+        "mr_pipeline": {
+            "count": len(mr_revs),
+            "items": mr_revs,
+        },
+        "file_translation": {
+            "count": len(legacy_revs),
+            "items": legacy_revs,
+        },
+        "total": len(mr_revs) + len(legacy_revs),
+    }
+
+
 def save_mr_file(results_data, filename, label, fmt):
     """保存 MR 翻译结果，文件被占用时自动加序号"""
     base, ext = os.path.splitext(filename)

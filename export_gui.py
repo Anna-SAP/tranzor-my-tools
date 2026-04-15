@@ -61,6 +61,15 @@ except Exception as _ft_e:  # pragma: no cover
 else:
     _ft_import_error = None
 
+# Optional: Human Revisions tab
+try:
+    import gui_tab_human_revisions as _hr_tab_mod
+except Exception as _hr_e:  # pragma: no cover
+    _hr_tab_mod = None
+    _hr_import_error = _hr_e
+else:
+    _hr_import_error = None
+
 # ---------------------------------------------------------------------------
 # Tranzor API config (reuse from export_changes)
 # ---------------------------------------------------------------------------
@@ -298,6 +307,14 @@ STRINGS = {
 if _ft_tab_mod is not None:
     try:
         for _lang_code, _extra in _ft_tab_mod.STRINGS.items():
+            STRINGS.setdefault(_lang_code, {}).update(_extra)
+    except Exception:
+        pass
+
+# Merge in strings from the optional Human Revisions tab (non-destructive).
+if _hr_tab_mod is not None:
+    try:
+        for _lang_code, _extra in _hr_tab_mod.STRINGS.items():
             STRINGS.setdefault(_lang_code, {}).update(_extra)
     except Exception:
         pass
@@ -652,6 +669,18 @@ class ExportApp:
                 print(f"[Full Translations tab] init failed: {_e}")
                 self.ft_tab = None
 
+        # --- Tab 5: Human Revisions (optional, pure additive) ---
+        self.hr_tab = None
+        self._hr_tab_initialized = False
+        if _hr_tab_mod is not None:
+            try:
+                tab_hr = ttk.Frame(self.notebook, style="App.TFrame")
+                self.notebook.add(tab_hr, text="")
+                self.hr_tab = _hr_tab_mod.HumanRevisionsTab(tab_hr, self)
+            except Exception as _e:
+                print(f"[Human Revisions tab] init failed: {_e}")
+                self.hr_tab = None
+
         # ═══════════════════════════════════════════
         # TAB 1 CONTENTS (File Translation — preserved)
         # ═══════════════════════════════════════════
@@ -921,6 +950,14 @@ class ExportApp:
                 self.ft_tab.refresh_text()
             except Exception:
                 pass
+        if self.hr_tab is not None:
+            try:
+                # HR tab index depends on whether Full Translations tab exists
+                hr_idx = 4 if self.ft_tab is not None else 3
+                self.notebook.tab(hr_idx, text=self._t("tab_human_revisions"))
+                self.hr_tab.refresh_text()
+            except Exception:
+                pass
 
         # Summary panel texts
         self.lbl_summary_title.configure(text=self._t("summary_title"))
@@ -1094,6 +1131,16 @@ class ExportApp:
                     self.ft_tab.on_first_show()
                 except Exception:
                     pass
+        else:
+            # Human Revisions tab — dynamic index (4 if ft_tab exists, else 3)
+            hr_idx = 4 if self.ft_tab is not None else 3
+            if tab_idx == hr_idx and not self._hr_tab_initialized:
+                self._hr_tab_initialized = True
+                if self.hr_tab is not None:
+                    try:
+                        self.hr_tab.on_first_show()
+                    except Exception:
+                        pass
 
     # ── Summary panel data loading ──
     def _load_summary_data(self):

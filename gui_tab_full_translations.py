@@ -19,12 +19,14 @@ Full Translation Export — GUI Tab
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
 import threading
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from pathlib import Path
+from tkinter import ttk, filedialog, messagebox, simpledialog
 from datetime import date
 
 try:
@@ -75,7 +77,23 @@ STRINGS = {
         "ft_keys_pending":        "…",
         "ft_filter_label":        "Filter:",
         "ft_filter_hint":         "Type to filter products",
+        "ft_clear_filter":        "✖ Clear",
         "ft_selected_only":       "Selected only",
+        "ft_preset_label":        "Preset:",
+        "ft_preset_none":         "(none)",
+        "ft_preset_save_entry":   "＋ Save current as preset…",
+        "ft_preset_delete_entry": "🗑 Delete preset…",
+        "ft_preset_save_title":   "Save preset",
+        "ft_preset_save_prompt":  "Preset name:",
+        "ft_preset_save_empty":   "Select at least one product before saving a preset.",
+        "ft_preset_overwrite_title": "Overwrite preset",
+        "ft_preset_overwrite_msg": "A preset named \"{name}\" already exists. Overwrite?",
+        "ft_preset_delete_title": "Delete preset",
+        "ft_preset_delete_prompt": "Preset name to delete:",
+        "ft_preset_delete_confirm": "Delete preset \"{name}\"?",
+        "ft_preset_not_found":    "Preset \"{name}\" not found.",
+        "ft_preset_skipped":      "Preset applied. {skipped} product(s) not in current inventory were skipped.",
+        "ft_preset_save_failed":  "Failed to save presets: {err}",
         "ft_progress_title":      "Export in progress",
         "ft_progress_phase_collect": "Fetching translations from Tranzor…",
         "ft_progress_phase_write":   "Writing output file…",
@@ -126,7 +144,23 @@ STRINGS = {
         "ft_keys_pending":        "…",
         "ft_filter_label":        "过滤：",
         "ft_filter_hint":         "输入关键字过滤产品",
+        "ft_clear_filter":        "✖ 清空",
         "ft_selected_only":       "仅显示已选",
+        "ft_preset_label":        "预设：",
+        "ft_preset_none":         "（无）",
+        "ft_preset_save_entry":   "＋ 保存当前选择为预设…",
+        "ft_preset_delete_entry": "🗑 删除预设…",
+        "ft_preset_save_title":   "保存预设",
+        "ft_preset_save_prompt":  "预设名：",
+        "ft_preset_save_empty":   "保存预设前请至少勾选一个产品。",
+        "ft_preset_overwrite_title": "覆盖预设",
+        "ft_preset_overwrite_msg": "已存在名为\"{name}\"的预设，覆盖吗？",
+        "ft_preset_delete_title": "删除预设",
+        "ft_preset_delete_prompt": "要删除的预设名：",
+        "ft_preset_delete_confirm": "删除预设\"{name}\"吗？",
+        "ft_preset_not_found":    "未找到预设\"{name}\"。",
+        "ft_preset_skipped":      "已应用预设。{skipped} 个不在当前清单中的产品已跳过。",
+        "ft_preset_save_failed":  "保存预设失败：{err}",
         "ft_progress_title":      "正在导出",
         "ft_progress_phase_collect": "正在从 Tranzor 拉取翻译数据…",
         "ft_progress_phase_write":   "正在写出文件…",
@@ -502,7 +536,17 @@ class FullTranslationsTab:
         # Active export progress dialog (None when no export is running).
         self._progress_dlg: _ExportProgressDialog | None = None
 
+        # Product-group presets: persisted list of
+        # {"name": str, "product_ids": [iid, ...]} dicts, loaded eagerly so
+        # the preset combobox can render at build time.
+        self._presets_path: Path = Path.home() / ".tranzor_exporter" / "presets.json"
+        self._presets: list = self._load_presets()
+        # Guard against <<ComboboxSelected>> firing while we rebuild values.
+        self._presets_suppress_combo: bool = False
+
         self._build_ui()
+        # Populate preset combobox now that widgets exist.
+        self._refresh_preset_combo()
 
     # ---- helpers ----------------------------------------------------
     def _t(self, key: str) -> str:
@@ -595,6 +639,23 @@ class FullTranslationsTab:
             prod_header, textvariable=self.var_prod_filter)
         self.ent_prod_filter.pack(side="left", fill="x", expand=True)
         self.var_prod_filter.trace_add("write", self._on_filter_changed)
+        # One-click reset for the keyword filter.
+        self.btn_prod_clear_filter = self.app._create_button(
+            prod_header, text=self._t("ft_clear_filter"),
+            command=self._clear_filter_input,
+            style_name="SecondaryTiny", padx=10, pady=2)
+        self.btn_prod_clear_filter.pack(side="left", padx=(6, 0))
+        # Preset picker: saved product groups for one-click selection.
+        self.lbl_prod_preset = ttk.Label(
+            prod_header, text=self._t("ft_preset_label"))
+        self.lbl_prod_preset.pack(side="left", padx=(12, 4))
+        self.var_prod_preset = tk.StringVar(value=self._t("ft_preset_none"))
+        self.cmb_prod_preset = ttk.Combobox(
+            prod_header, state="readonly", width=24,
+            textvariable=self.var_prod_preset)
+        self.cmb_prod_preset.pack(side="left")
+        self.cmb_prod_preset.bind(
+            "<<ComboboxSelected>>", self._on_preset_selected)
         # "Selected only" toggle: doubles as a quick way to verify what
         # the user has actually checked across a long product list.
         self.var_prod_selected_only = tk.BooleanVar(value=False)
@@ -705,6 +766,10 @@ class FullTranslationsTab:
             self.chk_mr.configure(text=self._t("ft_src_mr"))
             self.lbl_prod.configure(text=self._t("ft_products"))
             self.lbl_prod_filter.configure(text=self._t("ft_filter_label"))
+            self.btn_prod_clear_filter.configure(
+                text=self._t("ft_clear_filter"))
+            self.lbl_prod_preset.configure(text=self._t("ft_preset_label"))
+            self._refresh_preset_combo()
             self.chk_prod_selected_only.configure(
                 text=self._t("ft_selected_only"))
             self.lbl_loc.configure(text=self._t("ft_locales"))
@@ -817,6 +882,220 @@ class FullTranslationsTab:
                     self.prod_tree.detach(iid)
             except Exception:
                 pass
+
+    def _clear_filter_input(self) -> None:
+        """Reset the keyword filter; trace_add re-renders automatically."""
+        self.var_prod_filter.set("")
+
+    # ---- product-group presets --------------------------------------
+    def _load_presets(self) -> list:
+        """Load presets from disk, tolerating missing or malformed files.
+
+        Returns a list of dicts with keys ``name`` (str) and ``product_ids``
+        (list of str). Any malformed entries are silently dropped so one
+        bad edit can't block the rest.
+        """
+        try:
+            raw = self._presets_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return []
+        except Exception:
+            return []
+        try:
+            data = json.loads(raw)
+        except Exception:
+            return []
+        if not isinstance(data, list):
+            return []
+        out = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name")
+            pids = item.get("product_ids")
+            if not isinstance(name, str) or not name.strip():
+                continue
+            if not isinstance(pids, list):
+                continue
+            clean_pids = [str(p) for p in pids if isinstance(p, (str, int))]
+            out.append({"name": name.strip(), "product_ids": clean_pids})
+        return out
+
+    def _save_presets(self) -> bool:
+        """Atomically persist ``self._presets`` to disk. Returns True on
+        success; on failure shows an error dialog and returns False."""
+        try:
+            self._presets_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._presets_path.with_suffix(
+                self._presets_path.suffix + ".tmp")
+            tmp.write_text(
+                json.dumps(self._presets, ensure_ascii=False, indent=2),
+                encoding="utf-8")
+            os.replace(tmp, self._presets_path)
+            return True
+        except Exception as err:
+            try:
+                messagebox.showerror(
+                    self._t("ft_preset_save_title"),
+                    self._t("ft_preset_save_failed").format(err=err))
+            except Exception:
+                pass
+            return False
+
+    def _refresh_preset_combo(self) -> None:
+        """Rebuild the combobox values from ``self._presets``.
+
+        The dropdown always ends with the two action-entries (save / delete)
+        so the user can manage presets without leaving this row.
+        """
+        none_label = self._t("ft_preset_none")
+        save_entry = self._t("ft_preset_save_entry")
+        delete_entry = self._t("ft_preset_delete_entry")
+        names = [p["name"] for p in self._presets]
+        values = [none_label] + names + [save_entry, delete_entry]
+        self._presets_suppress_combo = True
+        try:
+            self.cmb_prod_preset.configure(values=values)
+            # Current selection may have been renamed to a localized form;
+            # snap back to "(none)" to keep the label consistent.
+            self.var_prod_preset.set(none_label)
+        finally:
+            self._presets_suppress_combo = False
+
+    def _on_preset_selected(self, _event=None) -> None:
+        if self._presets_suppress_combo:
+            return
+        choice = self.var_prod_preset.get()
+        save_entry = self._t("ft_preset_save_entry")
+        delete_entry = self._t("ft_preset_delete_entry")
+        none_label = self._t("ft_preset_none")
+        try:
+            if choice == save_entry:
+                self._prompt_save_preset()
+            elif choice == delete_entry:
+                self._prompt_delete_preset()
+            elif choice == none_label or not choice:
+                return
+            else:
+                self._apply_preset(choice)
+        finally:
+            # Reset so re-selecting the same entry still fires.
+            self._presets_suppress_combo = True
+            try:
+                self.var_prod_preset.set(none_label)
+            finally:
+                self._presets_suppress_combo = False
+
+    def _apply_preset(self, name: str) -> None:
+        preset = next((p for p in self._presets if p["name"] == name), None)
+        if preset is None:
+            try:
+                messagebox.showwarning(
+                    self._t("ft_preset_delete_title"),
+                    self._t("ft_preset_not_found").format(name=name))
+            except Exception:
+                pass
+            return
+        existing = set(self._all_prod_iids)
+        target_ids = [pid for pid in preset["product_ids"] if pid in existing]
+        skipped = len(preset["product_ids"]) - len(target_ids)
+        # Clear every row, then tick only the preset members.
+        self._check_all(self.prod_tree, False)
+        for pid in target_ids:
+            self._set_check(self.prod_tree, pid, True)
+        self.var_prod_selected_only.set(True)
+        self._render_products_filter()
+        if skipped > 0:
+            try:
+                self.lbl_status.configure(
+                    text=self._t("ft_preset_skipped").format(skipped=skipped),
+                    foreground="#f1c40f")
+            except Exception:
+                pass
+
+    def _prompt_save_preset(self) -> None:
+        selected_ids = [
+            iid for iid in self._all_prod_iids
+            if self._is_checked(self.prod_tree, iid)
+        ]
+        if not selected_ids:
+            try:
+                messagebox.showwarning(
+                    self._t("ft_preset_save_title"),
+                    self._t("ft_preset_save_empty"))
+            except Exception:
+                pass
+            return
+        name = simpledialog.askstring(
+            self._t("ft_preset_save_title"),
+            self._t("ft_preset_save_prompt"),
+            parent=self.parent)
+        if name is None:
+            return
+        name = name.strip()
+        if not name:
+            return
+        existing_idx = next(
+            (i for i, p in enumerate(self._presets) if p["name"] == name),
+            None)
+        if existing_idx is not None:
+            if not messagebox.askyesno(
+                    self._t("ft_preset_overwrite_title"),
+                    self._t("ft_preset_overwrite_msg").format(name=name)):
+                return
+            self._presets[existing_idx] = {
+                "name": name, "product_ids": selected_ids}
+        else:
+            self._presets.append(
+                {"name": name, "product_ids": selected_ids})
+        if self._save_presets():
+            self._refresh_preset_combo()
+
+    def _prompt_delete_preset(self) -> None:
+        if not self._presets:
+            try:
+                messagebox.showwarning(
+                    self._t("ft_preset_delete_title"),
+                    self._t("ft_preset_not_found").format(name=""))
+            except Exception:
+                pass
+            return
+        name = simpledialog.askstring(
+            self._t("ft_preset_delete_title"),
+            self._t("ft_preset_delete_prompt")
+            + "\n\n"
+            + ", ".join(p["name"] for p in self._presets),
+            parent=self.parent)
+        if name is None:
+            return
+        name = name.strip()
+        if not name:
+            return
+        idx = next(
+            (i for i, p in enumerate(self._presets) if p["name"] == name),
+            None)
+        if idx is None:
+            try:
+                messagebox.showwarning(
+                    self._t("ft_preset_delete_title"),
+                    self._t("ft_preset_not_found").format(name=name))
+            except Exception:
+                pass
+            return
+        if not messagebox.askyesno(
+                self._t("ft_preset_delete_title"),
+                self._t("ft_preset_delete_confirm").format(name=name)):
+            return
+        del self._presets[idx]
+        if self._save_presets():
+            self._refresh_preset_combo()
+
+    def _is_checked(self, tree: ttk.Treeview, iid: str) -> bool:
+        try:
+            vals = tree.item(iid, "values")
+        except Exception:
+            return False
+        return bool(vals) and vals[0] == CHECK_ON
 
     # ---- actions ----------------------------------------------------
     def _set_busy(self, busy: bool) -> None:

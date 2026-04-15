@@ -14,10 +14,12 @@ a = Analysis(
         ('gui_tabs.py', '.'),
         ('export_full_translations.py', '.'),
         ('gui_tab_full_translations.py', '.'),
+        ('gui_tab_human_revisions.py', '.'),
     ],
     hiddenimports=[
         'export_full_translations',
         'gui_tab_full_translations',
+        'gui_tab_human_revisions',
     ],
     hookspath=[],
     hooksconfig={},
