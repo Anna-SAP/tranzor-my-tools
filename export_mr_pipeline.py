@@ -177,6 +177,20 @@ def fetch_mr_results(task_id, target_language=None,
     return resp.json()
 
 
+def fetch_mr_translation_edit_logs(translation_id):
+    """GET /dashboard/translations/{translation_id}/edit-logs
+
+    Returns a list of edit log entries (newest first) with
+    ``original_text`` / ``edited_text`` / ``user_name``. Used to
+    reconstruct word-level before/after for MR Pipeline Changes export —
+    same mechanism File Translation uses via its legacy edit-logs endpoint.
+    """
+    resp = _api_get(
+        f"{MR_API}/dashboard/translations/{translation_id}/edit-logs")
+    resp.raise_for_status()
+    return resp.json() or []
+
+
 # ---------------------------------------------------------------------------
 # 4b) 聚合所有 completed 任务的翻译结果
 # ---------------------------------------------------------------------------
@@ -326,6 +340,112 @@ def detect_mr_changes(task_id, progress_callback=None):
     except Exception as e:
         log(f"  ⚠ 获取 Dashboard Cases 失败: {e}")
 
+    # Step 3b: 批量并发拉取 MR edit-logs — 仅针对有变更痕迹的翻译：
+    #   - fixed_by_lead 非空（语言负责人改过）
+    #   - iteration > 1（refinement 发生过）
+    # 其它未变动翻译不拉，避免浪费 API 调用。
+    # edit_logs_by_key: (opus_id, target_language) -> list[{original_text, edited_text, user_name, created_at}]
+    edit_logs_by_key = {}
+    candidates = [
+        (k, case) for k, case in cases_by_key.items()
+        if case.get("fixed_by_lead")
+        or (case.get("iteration") or 1) > 1
+    ]
+    if candidates:
+        log(f"  正在拉取 {len(candidates)} 条翻译的 edit-logs（word-level diff 数据源）...")
+
+        def _fetch_logs(item):
+            k, case = item
+            tr_id = case.get("translation_id")
+            if not tr_id:
+                return k, []
+            try:
+                return k, fetch_mr_translation_edit_logs(tr_id)
+            except Exception as e:
+                log(f"  ⚠ edit-logs 拉取失败 (tr={tr_id}): {e}")
+                return k, []
+
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+            futures = {pool.submit(_fetch_logs, item): item for item in candidates}
+            for f in as_completed(futures):
+                k, logs = f.result()
+                if logs:
+                    edit_logs_by_key[k] = logs
+
+    # Step 3c: 对 fixed_by_lead 但无 edit-logs 的翻译，从 GitLab
+    # tranzor-fix commit diff 中恢复 pre-fix 原译文。
+    # Tranzor 后端 fix endpoints 不写 MrTranslationEditLog 且 fixed_text 覆写
+    # translated_text，数据库内原译文永久丢失；GitLab commit 的 `-` 行
+    # 是唯一真值来源。
+    gitlab_recovery = {}  # (opus_id, target_language) -> (pre_text, post_text)
+    try:
+        import gitlab_client
+        gl = gitlab_client.GitLabClient()
+    except Exception as e:
+        log(f"  ⚠ GitLab 客户端不可用: {e}")
+        gl = None
+
+    if gl and not gl.has_token():
+        log("  ⚠ 未配置 GitLab token —— 跳过 pre-fix 文本恢复")
+        log(f"     （在 {gitlab_client.CONFIG_PATH} 中设置 gitlab_token 以启用）")
+        gl = None
+
+    if gl:
+        lead_fix_cases = [
+            (k, case) for k, case in cases_by_key.items()
+            if case.get("fixed_by_lead") and k not in edit_logs_by_key
+        ]
+        if lead_fix_cases:
+            log(f"  正在从 GitLab 恢复 {len(lead_fix_cases)} 条 lead-fix 的原译文...")
+
+            # 按 fixed_at 分组：同一次 BATCH_FIX 只需查一次 commit
+            sha_cache = {}  # fixed_at -> commit_sha
+            access_denied = False
+
+            def _resolve_sha(fixed_at):
+                nonlocal access_denied
+                if fixed_at in sha_cache:
+                    return sha_cache[fixed_at]
+                try:
+                    sha = gitlab_client.find_fix_commit_sha(
+                        gl, project_id, fixed_at)
+                except gitlab_client.GitLabAccessError as ex:
+                    # 权限缺失 —— 整个项目都无法恢复，不要继续刷屏
+                    access_denied = True
+                    log(f"  ⛔ GitLab 拒绝访问项目 '{project_id}' "
+                        f"(HTTP {ex.status_code}) —— PAT 账号可能未加入该项目。")
+                    log(f"     解决：申请 Reporter 权限 "
+                        f"{gl.base_url}/{project_id}/-/project_members")
+                    log(f"     此 MR 的 pre-fix 原译文将无法恢复。")
+                    sha = None
+                except Exception as ex:
+                    log(f"  ⚠ 查询 tranzor-fix 分支失败: {ex}")
+                    sha = None
+                sha_cache[fixed_at] = sha
+                return sha
+
+            recovered = 0
+            for key, case in lead_fix_cases:
+                if access_denied:
+                    break
+                fixed_at = case.get("fixed_at")
+                sha = _resolve_sha(fixed_at)
+                if not sha:
+                    continue
+                try:
+                    diff = gl.get_commit_diff(project_id, sha)
+                except Exception as ex:
+                    log(f"  ⚠ 拉取 commit {sha[:8]} diff 失败: {ex}")
+                    continue
+                pre, post = gitlab_client.extract_diff_values(
+                    diff, case.get("opus_id", ""),
+                    case.get("target_language", ""))
+                if pre is not None:
+                    gitlab_recovery[key] = (pre, post or "")
+                    recovered += 1
+            if not access_denied:
+                log(f"  ✓ GitLab 恢复 {recovered} / {len(lead_fix_cases)} 条 pre-fix 原译文")
+
     changes = []
     seen_keys = set()  # (opus_id, target_language) — 避免两路检测重复
 
@@ -401,30 +521,68 @@ def detect_mr_changes(task_id, progress_callback=None):
     else:
         log("  仅 1 个任务，跳过任务级 diff（仍将检测 Language Lead 修改）")
 
-    # Step 5: Language Lead 修改补充检测
-    # 原地 fix 不会产生新 task；必须通过 fixed_by_lead 字段识别。
+    # Step 5: Language Lead / refinement 修改补充检测
+    # 原地 fix 不会产生新 task；必须通过 fixed_by_lead + edit-logs + GitLab 识别。
+    # prev_text 取值优先级（越往前越可信）：
+    #   1) GitLab commit diff 的 `-` 行（BATCH_FIX 真值来源）
+    #   2) edit-logs 最早一条的 original_text（LLM retranslate 场景）
+    #   3) iteration_history.iteration_1.translation（refinement 之前）
+    #   4) 空串（罕见：commit 不在白名单，无任何真值来源）
     lead_fix_count = 0
+    refine_only_count = 0
     for key, case in cases_by_key.items():
         if key in seen_keys:
             continue
         fixer = case.get("fixed_by_lead")
-        if not fixer:
+        logs = edit_logs_by_key.get(key) or []
+        recovered = gitlab_recovery.get(key)
+
+        if not fixer and not logs and not recovered:
+            # 既无 lead fix 也无 edit log → 不是变更
             continue
 
-        # pre-fix 候选：iteration_1 的翻译（refinement 之前）。
-        # 若任务未经过 refinement，iteration_history 为空 — 此时 prev 只能留空。
-        hist = case.get("iteration_history") or {}
-        iter1 = hist.get("iteration_1") if isinstance(hist, dict) else None
+        # 计算 prev_text / curr_text
         prev_text = ""
-        if isinstance(iter1, dict):
-            prev_text = (iter1.get("translation")
-                         or iter1.get("translated_text")
+        curr_text = ""
+        editor_from_logs = ""
+
+        if recovered:
+            prev_text, recovered_post = recovered
+            # GitLab 的 `+` 行就是 post-fix；如空再退化到 DB fields
+            curr_text = recovered_post or ""
+        if logs:
+            logs_sorted = sorted(logs, key=lambda l: l.get("created_at") or "")
+            if not prev_text:
+                prev_text = logs_sorted[0].get("original_text") or ""
+            if not curr_text:
+                curr_text = logs_sorted[-1].get("edited_text") or ""
+            editor_from_logs = logs_sorted[-1].get("user_name") or ""
+        if not prev_text:
+            hist = case.get("iteration_history") or {}
+            iter1 = hist.get("iteration_1") if isinstance(hist, dict) else None
+            if isinstance(iter1, dict):
+                prev_text = (iter1.get("translation")
+                             or iter1.get("translated_text")
+                             or "")
+        if not curr_text:
+            curr_text = (case.get("fixed_text")
+                         or case.get("translated_text")
                          or "")
 
-        # 当前（post-fix）文本：fixed_text 为首选，fallback 到 translated_text
-        curr_text = (case.get("fixed_text")
-                     or case.get("translated_text")
-                     or "")
+        if prev_text == curr_text:
+            # 无实质变化（可能 edit log 记了 no-op），跳过
+            continue
+
+        if recovered:
+            change_source = "language-lead-fix (gitlab)"
+        elif fixer:
+            change_source = "language-lead-fix"
+        else:
+            change_source = "edit-log"
+        if fixer:
+            lead_fix_count += 1
+        else:
+            refine_only_count += 1
 
         changes.append({
             **mr_meta,
@@ -437,20 +595,20 @@ def detect_mr_changes(task_id, progress_callback=None):
             "task_id": task_id,
             "prev_task_created": "",
             "task_created": case.get("fixed_at") or "",
-            "fixed_by": fixer,
+            "fixed_by": fixer or editor_from_logs or "",
             "fixed_at": case.get("fixed_at") or "",
-            "change_source": "language-lead-fix",
+            "change_source": change_source,
             "final_score": case.get("final_score"),
             "error_category": case.get("error_category"),
             "reason": case.get("reason"),
             "iteration": case.get("iteration"),
         })
         seen_keys.add(key)
-        lead_fix_count += 1
 
     log(f"\n  ✓ 检测到 {len(changes)} 条翻译变更 "
-        f"(任务级 diff: {len(changes) - lead_fix_count}，"
-        f"Language Lead 修改: {lead_fix_count}；跨 {len(all_tasks)} 个任务)")
+        f"(任务级 diff: {len(changes) - lead_fix_count - refine_only_count}，"
+        f"Language Lead 修改: {lead_fix_count}，"
+        f"edit-log 修改: {refine_only_count}；跨 {len(all_tasks)} 个任务)")
     return changes
 
 
@@ -778,7 +936,6 @@ def write_mr_html(results_data, filename, label):
             if is_changes:
                 prev_text = r.get("prev_translated_text", "")
                 curr_text = r.get("translated_text", "")
-                diff_html = _word_diff_html(prev_text, curr_text)
                 task_time = r.get("task_created", "")[:16].replace("T", " ")
                 fixed_by = r.get("fixed_by", "")
                 mr_link = r.get("mr_link", "")
@@ -788,9 +945,13 @@ def write_mr_html(results_data, filename, label):
                 jira_id = r.get("jira_ticket_id", "")
                 jira_html = (f'<a href="https://jira.ringcentral.com/browse/{html_mod.escape(jira_id)}"'
                              f' target="_blank">{html_mod.escape(jira_id)}</a>') if jira_id else "—"
+
+                prev_cell = html_mod.escape(prev_text)
+                diff_cell = _word_diff_html(prev_text, curr_text)
+
                 diff_cols = (
-                    f'<td class="prev-translated">{html_mod.escape(prev_text)}</td>'
-                    f'<td class="diff">{diff_html}</td>'
+                    f'<td class="prev-translated">{prev_cell}</td>'
+                    f'<td class="diff">{diff_cell}</td>'
                     f'<td class="task-time">{html_mod.escape(task_time)}</td>'
                     f'<td class="fixed-by">{html_mod.escape(fixed_by) if fixed_by else "—"}</td>'
                     f'<td class="mr-link">{mr_link_html}</td>'
@@ -1430,11 +1591,11 @@ def write_mr_excel(results_data, filename):
         ws.cell(row=row_i, column=4, value=t.get("source_text", ""))
 
         if is_changes:
-            ws.cell(row=row_i, column=5, value=t.get("prev_translated_text", ""))
-            ws.cell(row=row_i, column=6, value=t.get("translated_text", ""))
-            diff_text = _word_diff_text(
-                t.get("prev_translated_text", ""),
-                t.get("translated_text", ""))
+            prev_text = t.get("prev_translated_text", "")
+            curr_text = t.get("translated_text", "")
+            ws.cell(row=row_i, column=5, value=prev_text)
+            ws.cell(row=row_i, column=6, value=curr_text)
+            diff_text = _word_diff_text(prev_text, curr_text)
             ws.cell(row=row_i, column=7, value=diff_text)
             task_time = t.get("task_created", "")[:16].replace("T", " ")
             ws.cell(row=row_i, column=8, value=task_time)

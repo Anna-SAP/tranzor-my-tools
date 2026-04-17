@@ -15,11 +15,13 @@ a = Analysis(
         ('export_full_translations.py', '.'),
         ('gui_tab_full_translations.py', '.'),
         ('gui_tab_human_revisions.py', '.'),
+        ('gitlab_client.py', '.'),
     ],
     hiddenimports=[
         'export_full_translations',
         'gui_tab_full_translations',
         'gui_tab_human_revisions',
+        'gitlab_client',
     ],
     hookspath=[],
     hooksconfig={},
