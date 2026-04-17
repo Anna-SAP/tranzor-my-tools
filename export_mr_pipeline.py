@@ -253,11 +253,18 @@ def collect_all_mr_results(progress_callback=None):
 def detect_mr_changes(task_id, progress_callback=None):
     """检测给定 task 所属 MR 的全生命周期翻译变更。
 
-    算法：找到同一 MR 的全部 completed task，按时间排序，
-    逐对相邻 task 比较 (opus_id, target_language) 的 translated_text。
+    两路检测：
+    1. 任务级 diff：同一 MR 的相邻 completed task 两两对比 translated_text。
+    2. Language Lead 修改：通过 /dashboard/cases?mr_id=... 读取 fixed_by_lead
+       非空的翻译（BATCH_FIX / 单条 fix-translation 只原地更新，不会产生新 task，
+       因此单 task MR 仅靠路径 1 永远检测不到变更）。
+       pre-fix 文本优先取 iteration_history.iteration_1（若存在），
+       否则留空 — Tranzor 数据层在 fix 时会用 fixed_text 覆写 translated_text，
+       原译文无法复原（详见 TRAN-bug-fix-translation-audit-trail.md）。
 
     Returns:
-        list[dict]: 每条记录代表一次翻译文本变更，包含 prev_translated_text 等字段
+        list[dict]: 每条记录代表一次翻译文本变更，含 prev_translated_text、
+        translated_text、fixed_by、change_source 等字段。
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -272,6 +279,15 @@ def detect_mr_changes(task_id, progress_callback=None):
         log("  ⚠ 无法获取 project_id 或 merge_request_iid")
         return []
 
+    # MR-level metadata from task detail
+    mr_meta = {
+        "mr_link": detail.get("mr_link", ""),
+        "project_id": project_id,
+        "mr_iid": mr_iid,
+        "release": detail.get("release", ""),
+        "jira_ticket_id": detail.get("jira_ticket_id", ""),
+    }
+
     # Step 2: 获取同一 MR 的全部 completed task
     log(f"  正在获取 {project_id} MR#{mr_iid} 的所有任务...")
     all_tasks = []
@@ -281,7 +297,7 @@ def detect_mr_changes(task_id, progress_callback=None):
         total, batch = fetch_mr_tasks(project_id=project_id,
                                       status="completed",
                                       limit=batch_size, offset=offset)
-        # 客户端按 mr_iid 过滤（API 不支持 mr_id 参数）
+        # 客户端按 mr_iid 过滤（tasks API 不支持 mr_id 参数）
         for t in batch:
             if t.get("merge_request_iid") == mr_iid:
                 all_tasks.append(t)
@@ -293,108 +309,148 @@ def detect_mr_changes(task_id, progress_callback=None):
     all_tasks.sort(key=lambda t: t.get("created_at", ""))
     log(f"  找到 {len(all_tasks)} 个同 MR 的已完成任务")
 
-    if len(all_tasks) < 2:
-        log("  仅有 1 个任务，无法检测变更")
-        return []
-
-    # Step 3: 并发获取每个 task 的翻译结果
-    log("  正在获取各任务的翻译结果...")
-    task_results = {}  # task_id -> translations list
-    total_count = len(all_tasks)
-
-    def _fetch_one(task_info):
-        idx, task = task_info
-        tid = task.get("task_id")
-        if not tid:
-            return tid, []
-        try:
-            results = fetch_mr_results(tid)
-            trs = results.get("translations", [])
-            log(f"  [{idx}/{total_count}] Task {tid[:8]}… — {len(trs)} 条翻译")
-            return tid, trs
-        except Exception as e:
-            log(f"  ⚠ [{idx}/{total_count}] Task {tid[:8]}… 获取失败: {e}")
-            return tid, []
-
-    task_infos = [(i + 1, t) for i, t in enumerate(all_tasks)]
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-        futures = {pool.submit(_fetch_one, info): info for info in task_infos}
-        for f in as_completed(futures):
-            tid, trs = f.result()
-            if tid:
-                task_results[tid] = trs
-
-    # Step 4: 尝试从 Dashboard Cases API 获取 fixed_by_lead 信息
-    log("  正在获取 Language Lead 修改记录...")
-    fixed_by_map = {}  # (opus_id, target_language) -> fixed_by_lead
+    # Step 3: 获取 Dashboard Cases（精确到本 MR），
+    # 用于语言负责人修改检测 + 丰富字段（iteration_history / fixed_text / fixed_at）
+    log("  正在获取 Dashboard Cases（MR 精确查询）...")
+    cases_by_key = {}  # (opus_id, target_language) -> case dict
     try:
         cases_data = fetch_dashboard_cases(
-            project_id=project_id, mr_limit=50)
+            project_id=project_id, mr_id=mr_iid, mr_limit=5)
         for mr_item in cases_data.get("mrs", []):
             if mr_item.get("mr_iid") != mr_iid:
                 continue
             for case in mr_item.get("cases", []):
-                fixer = case.get("fixed_by_lead")
-                if fixer:
-                    key = (case.get("opus_id", ""),
-                           case.get("target_language", ""))
-                    fixed_by_map[key] = fixer
+                key = (case.get("opus_id", ""),
+                       case.get("target_language", ""))
+                cases_by_key[key] = case
     except Exception as e:
-        log(f"  ⚠ 获取 Language Lead 信息失败: {e}")
+        log(f"  ⚠ 获取 Dashboard Cases 失败: {e}")
 
-    # MR-level metadata from task detail
-    mr_meta = {
-        "mr_link": detail.get("mr_link", ""),
-        "project_id": project_id,
-        "mr_iid": mr_iid,
-        "release": detail.get("release", ""),
-        "jira_ticket_id": detail.get("jira_ticket_id", ""),
-    }
-
-    # Step 5: 逐对相邻 task 做 diff
     changes = []
-    for i in range(len(all_tasks) - 1):
-        prev_task = all_tasks[i]
-        curr_task = all_tasks[i + 1]
-        prev_tid = prev_task.get("task_id")
-        curr_tid = curr_task.get("task_id")
+    seen_keys = set()  # (opus_id, target_language) — 避免两路检测重复
 
-        prev_trs = task_results.get(prev_tid, [])
-        curr_trs = task_results.get(curr_tid, [])
+    # Step 4: 任务级 diff（多 task 时才执行）
+    if len(all_tasks) >= 2:
+        log("  正在获取各任务的翻译结果...")
+        task_results = {}  # task_id -> translations list
+        total_count = len(all_tasks)
 
-        # Build prev text map: (opus_id, target_language) -> translated_text
-        prev_map = {}
-        for t in prev_trs:
-            key = (t.get("opus_id", ""), t.get("target_language", ""))
-            prev_map[key] = t.get("translated_text", "")
+        def _fetch_one(task_info):
+            idx, task = task_info
+            tid = task.get("task_id")
+            if not tid:
+                return tid, []
+            try:
+                results = fetch_mr_results(tid)
+                trs = results.get("translations", [])
+                log(f"  [{idx}/{total_count}] Task {tid[:8]}… — {len(trs)} 条翻译")
+                return tid, trs
+            except Exception as e:
+                log(f"  ⚠ [{idx}/{total_count}] Task {tid[:8]}… 获取失败: {e}")
+                return tid, []
 
-        # Compare current with previous
-        for t in curr_trs:
-            key = (t.get("opus_id", ""), t.get("target_language", ""))
-            curr_text = t.get("translated_text", "")
-            prev_text = prev_map.get(key)
+        task_infos = [(i + 1, t) for i, t in enumerate(all_tasks)]
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+            futures = {pool.submit(_fetch_one, info): info for info in task_infos}
+            for f in as_completed(futures):
+                tid, trs = f.result()
+                if tid:
+                    task_results[tid] = trs
 
-            if prev_text is not None and prev_text != curr_text:
-                changes.append({
-                    **mr_meta,
-                    "opus_id": t.get("opus_id", ""),
-                    "source_text": t.get("source_text", ""),
-                    "target_language": t.get("target_language", ""),
-                    "prev_translated_text": prev_text,
-                    "translated_text": curr_text,
-                    "prev_task_id": prev_tid,
-                    "task_id": curr_tid,
-                    "prev_task_created": prev_task.get("created_at", ""),
-                    "task_created": curr_task.get("created_at", ""),
-                    "fixed_by": fixed_by_map.get(key, ""),
-                    "final_score": t.get("final_score"),
-                    "error_category": t.get("error_category"),
-                    "reason": t.get("reason"),
-                    "iteration": t.get("iteration"),
-                })
+        for i in range(len(all_tasks) - 1):
+            prev_task = all_tasks[i]
+            curr_task = all_tasks[i + 1]
+            prev_tid = prev_task.get("task_id")
+            curr_tid = curr_task.get("task_id")
+
+            prev_trs = task_results.get(prev_tid, [])
+            curr_trs = task_results.get(curr_tid, [])
+
+            prev_map = {}
+            for t in prev_trs:
+                k = (t.get("opus_id", ""), t.get("target_language", ""))
+                prev_map[k] = t.get("translated_text", "")
+
+            for t in curr_trs:
+                k = (t.get("opus_id", ""), t.get("target_language", ""))
+                curr_text = t.get("translated_text", "")
+                prev_text = prev_map.get(k)
+
+                if prev_text is not None and prev_text != curr_text:
+                    case = cases_by_key.get(k, {})
+                    changes.append({
+                        **mr_meta,
+                        "opus_id": t.get("opus_id", ""),
+                        "source_text": t.get("source_text", ""),
+                        "target_language": t.get("target_language", ""),
+                        "prev_translated_text": prev_text,
+                        "translated_text": curr_text,
+                        "prev_task_id": prev_tid,
+                        "task_id": curr_tid,
+                        "prev_task_created": prev_task.get("created_at", ""),
+                        "task_created": curr_task.get("created_at", ""),
+                        "fixed_by": case.get("fixed_by_lead") or "",
+                        "fixed_at": case.get("fixed_at") or "",
+                        "change_source": "task-diff",
+                        "final_score": t.get("final_score"),
+                        "error_category": t.get("error_category"),
+                        "reason": t.get("reason"),
+                        "iteration": t.get("iteration"),
+                    })
+                    seen_keys.add(k)
+    else:
+        log("  仅 1 个任务，跳过任务级 diff（仍将检测 Language Lead 修改）")
+
+    # Step 5: Language Lead 修改补充检测
+    # 原地 fix 不会产生新 task；必须通过 fixed_by_lead 字段识别。
+    lead_fix_count = 0
+    for key, case in cases_by_key.items():
+        if key in seen_keys:
+            continue
+        fixer = case.get("fixed_by_lead")
+        if not fixer:
+            continue
+
+        # pre-fix 候选：iteration_1 的翻译（refinement 之前）。
+        # 若任务未经过 refinement，iteration_history 为空 — 此时 prev 只能留空。
+        hist = case.get("iteration_history") or {}
+        iter1 = hist.get("iteration_1") if isinstance(hist, dict) else None
+        prev_text = ""
+        if isinstance(iter1, dict):
+            prev_text = (iter1.get("translation")
+                         or iter1.get("translated_text")
+                         or "")
+
+        # 当前（post-fix）文本：fixed_text 为首选，fallback 到 translated_text
+        curr_text = (case.get("fixed_text")
+                     or case.get("translated_text")
+                     or "")
+
+        changes.append({
+            **mr_meta,
+            "opus_id": case.get("opus_id", ""),
+            "source_text": case.get("source_text", ""),
+            "target_language": case.get("target_language", ""),
+            "prev_translated_text": prev_text,
+            "translated_text": curr_text,
+            "prev_task_id": "",
+            "task_id": task_id,
+            "prev_task_created": "",
+            "task_created": case.get("fixed_at") or "",
+            "fixed_by": fixer,
+            "fixed_at": case.get("fixed_at") or "",
+            "change_source": "language-lead-fix",
+            "final_score": case.get("final_score"),
+            "error_category": case.get("error_category"),
+            "reason": case.get("reason"),
+            "iteration": case.get("iteration"),
+        })
+        seen_keys.add(key)
+        lead_fix_count += 1
 
     log(f"\n  ✓ 检测到 {len(changes)} 条翻译变更 "
-        f"(跨 {len(all_tasks)} 个任务)")
+        f"(任务级 diff: {len(changes) - lead_fix_count}，"
+        f"Language Lead 修改: {lead_fix_count}；跨 {len(all_tasks)} 个任务)")
     return changes
 
 
@@ -425,7 +481,7 @@ def fetch_dashboard_overview(project_id=None, release=None,
 def fetch_dashboard_cases(project_id=None, release=None, language=None,
                           min_score=None, max_score=None,
                           start_time=None, end_time=None,
-                          mr_limit=100, mr_offset=0):
+                          mr_limit=100, mr_offset=0, mr_id=None):
     """GET /dashboard/cases"""
     params = {"mr_limit": mr_limit, "mr_offset": mr_offset}
     if project_id:
@@ -442,6 +498,8 @@ def fetch_dashboard_cases(project_id=None, release=None, language=None,
         params["start_time"] = start_time
     if end_time:
         params["end_time"] = end_time
+    if mr_id is not None:
+        params["mr_id"] = mr_id
 
     resp = _api_get(f"{MR_API}/dashboard/cases", params=params)
     resp.raise_for_status()
