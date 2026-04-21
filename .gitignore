@@ -9,3 +9,6 @@ dist/
 !TranzorExporter_mac.spec
 *.pdf
 CHC_XTM_Transit_Package_Reference.md
+
+# Claude Code local session / settings
+.claude/

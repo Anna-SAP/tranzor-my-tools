@@ -39,11 +39,13 @@ STRINGS = {
         "hr_reset":             "Reset",
         "hr_mr_title":          "MR Pipeline Human Edits",
         "hr_file_title":        "File Translation Human Edits",
+        "hr_col_project":       "Project",
         "hr_col_language":      "Language",
         "hr_col_key":           "String Key",
         "hr_col_score":         "Score",
         "hr_col_editor":        "Editor",
         "hr_col_date":          "Revised At",
+        "hr_detail_project":    "Project:",
         "hr_export":            "Export Human Revisions",
         "hr_fmt_html":          "HTML",
         "hr_fmt_md":            "Markdown",
@@ -64,11 +66,13 @@ STRINGS = {
         "hr_reset":             "\u91cd\u7f6e",
         "hr_mr_title":          "MR Pipeline \u4eba\u5de5\u4fee\u8ba2",
         "hr_file_title":        "\u6587\u4ef6\u7ffb\u8bd1 \u4eba\u5de5\u4fee\u8ba2",
+        "hr_col_project":       "\u9879\u76ee",
         "hr_col_language":      "\u8bed\u8a00",
         "hr_col_key":           "\u5b57\u7b26\u4e32\u952e",
         "hr_col_score":         "\u5206\u6570",
         "hr_col_editor":        "\u7f16\u8f91\u8005",
         "hr_col_date":          "\u4fee\u8ba2\u65f6\u95f4",
+        "hr_detail_project":    "\u9879\u76ee:",
         "hr_export":            "\u5bfc\u51fa\u4eba\u5de5\u4fee\u8ba2",
         "hr_fmt_html":          "HTML",
         "hr_fmt_md":            "Markdown",
@@ -197,7 +201,7 @@ class HumanRevisionsTab:
         mr_frame.pack(fill="both", padx=16, pady=(0, 8))
         mr_frame.configure(borderwidth=1, relief="solid")
 
-        tree_cols = ("language", "key", "score", "editor", "date")
+        tree_cols = ("project", "language", "key", "score", "editor", "date")
         self.mr_tree = ttk.Treeview(
             mr_frame, columns=tree_cols, show="headings",
             style="Summary.Treeview", height=10)
@@ -232,7 +236,7 @@ class HumanRevisionsTab:
 
         # Configure column widths for both trees
         col_widths = {
-            "language": 100, "key": 220, "score": 60,
+            "project": 170, "language": 80, "key": 200, "score": 60,
             "editor": 130, "date": 140,
         }
         for tree in (self.mr_tree, self.file_tree):
@@ -293,6 +297,7 @@ class HumanRevisionsTab:
             text=f'{self._t("hr_file_title")} ({file_count})')
 
         for tree in (self.mr_tree, self.file_tree):
+            tree.heading("project", text=self._t("hr_col_project"))
             tree.heading("language", text=self._t("hr_col_language"))
             tree.heading("key", text=self._t("hr_col_key"))
             tree.heading("score", text=self._t("hr_col_score"))
@@ -401,7 +406,9 @@ class HumanRevisionsTab:
             ts = str(it.get("revised_at") or "")[:16].replace("T", " ")
             score = it.get("machine_score")
             score_str = str(score) if score is not None else "-"
+            project = it.get("project_id", "") or it.get("task_name", "")
             tree.insert("", "end", values=(
+                project,
                 it.get("target_language", ""),
                 key,
                 score_str,
@@ -448,6 +455,8 @@ class HumanRevisionsTab:
             widget.pack(side="left", padx=(8, 0), fill="x", expand=True)
 
         _add_row(win, "Channel:", item.get("channel", ""))
+        _add_row(win, self._t("hr_detail_project"),
+                 item.get("project_id") or item.get("task_name", ""))
         _add_row(win, "String Key:", item.get("opus_id", ""))
         _add_row(win, "Language:", item.get("target_language", ""))
         _add_row(win, self._t("hr_detail_source"),
@@ -596,6 +605,7 @@ def _render_html_report(items, params):
       </tr></tbody></table>
       <footer class="card-meta">
         {badge}
+        Project: <code>{_esc(it.get('project_id') or it.get('task_name',''))}</code> |
         Opus ID: <code>{_esc(it.get('opus_id',''))}</code> |
         Score: <strong>{it.get('machine_score','-')}</strong> |
         Error: <em>{_esc(it.get('error_category','-'))}</em> |
@@ -683,6 +693,9 @@ def _render_md_report(items, params):
         lines.append("")
         for idx, it in enumerate(ch_items, 1):
             lines.append(f"### [{idx}] {it.get('opus_id','')}")
+            lines.append(
+                f"- **Project:** "
+                f"{it.get('project_id') or it.get('task_name','')}")
             lines.append(
                 f"- **Language:** {it.get('target_language','')}")
             lines.append(

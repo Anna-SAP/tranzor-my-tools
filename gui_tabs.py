@@ -30,6 +30,7 @@ class MRPipelineTab:
         self.mr_filtered_total = 0
         self.mr_loading = False
         self.mr_overview_loading = False
+        self._recent_projects_loading = False
         self._loading_anim_id = None
         self._loading_dot_count = 0
         self._build(parent)
@@ -229,15 +230,52 @@ class MRPipelineTab:
             val.pack(side="right")
             self.mr_stat_labels[key] = (lbl, val)
 
-        self.lbl_mr_sidebar_status = ttk.Label(inner, text="", style="SummaryStatus.TLabel")
-        self.lbl_mr_sidebar_status.pack(anchor="w", pady=(8, 0))
+        # ── Recently Added Projects section ──
+        # Separator + section title live near the top of the remaining area.
+        tk.Frame(inner, bg="#2a2a4a", height=1).pack(fill="x", pady=(14, 10))
+        self.lbl_mr_recent_projects_title = ttk.Label(
+            inner, text="", style="SummarySection.TLabel")
+        self.lbl_mr_recent_projects_title.pack(anchor="w", pady=(0, 6))
 
+        # Pack status + refresh button at the BOTTOM first so the recent
+        # projects frame can take every pixel between section title and
+        # these anchors via fill="both", expand=True.
         self.btn_mr_sidebar_refresh = self.app._create_button(
             inner, text="", command=self._load_overview,
             style_name="SecondaryTiny",
             font=(FONT_FAMILY, 9), bg="#0f3460", fg="#ccc",
             padx=10, pady=3)
-        self.btn_mr_sidebar_refresh.pack(anchor="e", pady=(8, 0))
+        self.btn_mr_sidebar_refresh.pack(side="bottom", anchor="e", pady=(8, 0))
+
+        self.lbl_mr_sidebar_status = ttk.Label(
+            inner, text="", style="SummaryStatus.TLabel")
+        self.lbl_mr_sidebar_status.pack(side="bottom", anchor="w", pady=(8, 0))
+
+        # Recent projects Treeview — expands to fill all remaining sidebar
+        # height so as many rows as possible are visible without scrolling.
+        recent_frame = ttk.Frame(inner, style="Summary.TFrame")
+        recent_frame.pack(fill="both", expand=True)
+        self.mr_recent_tree = ttk.Treeview(
+            recent_frame,
+            columns=("project", "added"),
+            show="headings",
+            style="Summary.Treeview",
+            height=3,  # initial request only — fill/expand will override
+            selectmode="browse",
+        )
+        self.mr_recent_tree.heading("project", text="")
+        self.mr_recent_tree.heading("added", text="")
+        self.mr_recent_tree.column(
+            "project", width=160, minwidth=90, stretch=True)
+        self.mr_recent_tree.column(
+            "added", width=78, minwidth=60, stretch=False, anchor="e")
+        recent_scroll = ttk.Scrollbar(
+            recent_frame, orient="vertical",
+            command=self.mr_recent_tree.yview)
+        self.mr_recent_tree.configure(yscrollcommand=recent_scroll.set)
+        self.mr_recent_tree.pack(side="left", fill="both", expand=True)
+        recent_scroll.pack(side="right", fill="y")
+        self._last_recent_projects = []
 
     def refresh_text(self):
         """Update all text for current language."""
@@ -262,6 +300,15 @@ class MRPipelineTab:
         for key in ("total", "completed", "failed", "avg_score"):
             self.mr_stat_labels[key][0].configure(text=t(f"mr_stat_{key}"))
         self.btn_mr_sidebar_refresh.configure(text=t("summary_refresh"))
+        self.lbl_mr_recent_projects_title.configure(
+            text=t("mr_recent_projects_title"))
+        self.mr_recent_tree.heading("project", text=t("mr_recent_col_project"))
+        self.mr_recent_tree.heading("added", text=t("mr_recent_col_added"))
+        # Re-render relative timestamps / placeholders in the new language
+        if self._recent_projects_loading:
+            self._show_recent_projects_loading()
+        else:
+            self._render_recent_projects(self._last_recent_projects)
 
     def load_initial_tasks(self):
         """Load the latest 20 tasks (no filters) on first tab selection."""
@@ -561,11 +608,12 @@ class MRPipelineTab:
             self.parent.after(0, _restore)
 
     def _load_overview(self):
-        if self.mr_overview_loading:
-            return
-        self.mr_overview_loading = True
-        self.lbl_mr_sidebar_status.configure(text=self._t("summary_loading"))
-        threading.Thread(target=self._fetch_overview, daemon=True).start()
+        if not self.mr_overview_loading:
+            self.mr_overview_loading = True
+            self.lbl_mr_sidebar_status.configure(text=self._t("summary_loading"))
+            threading.Thread(target=self._fetch_overview, daemon=True).start()
+        # Recent projects loads independently so stats surface instantly.
+        self._load_recent_projects()
 
     def _fetch_overview(self):
         try:
@@ -588,6 +636,67 @@ class MRPipelineTab:
     def _on_overview_error(self, err):
         self.mr_overview_loading = False
         self.lbl_mr_sidebar_status.configure(text=self._t("summary_error"))
+
+    def _load_recent_projects(self):
+        """Background fetch of the full project → first-seen map.
+        Independent from the overview stats call so UI is not blocked."""
+        if self._recent_projects_loading:
+            return
+        self._recent_projects_loading = True
+        self._show_recent_projects_loading()
+        threading.Thread(target=self._fetch_recent_projects, daemon=True).start()
+
+    def _fetch_recent_projects(self):
+        try:
+            recent = mr_api.fetch_recently_added_projects()
+        except Exception:
+            recent = []
+        self.parent.after(0, self._on_recent_projects_loaded, recent)
+
+    def _on_recent_projects_loaded(self, recent):
+        self._recent_projects_loading = False
+        self._render_recent_projects(recent)
+
+    def _show_recent_projects_loading(self):
+        tree = self.mr_recent_tree
+        for item in tree.get_children():
+            tree.delete(item)
+        tree.insert("", "end", values=(self._t("summary_loading"), ""))
+
+    def _render_recent_projects(self, recent):
+        """Repaint the Recently Added Projects treeview. Caches data for
+        language re-render."""
+        self._last_recent_projects = list(recent or [])
+        tree = self.mr_recent_tree
+        for item in tree.get_children():
+            tree.delete(item)
+        if not self._last_recent_projects:
+            tree.insert("", "end",
+                        values=(self._t("mr_recent_empty"), ""))
+            return
+        for r in self._last_recent_projects:
+            pid = r.get("project_id", "") or ""
+            ts = r.get("first_seen", "") or ""
+            tree.insert("", "end", values=(pid, self._relative_time(ts)))
+
+    def _relative_time(self, iso_ts):
+        """Format an ISO-ish timestamp as i18n-aware relative time."""
+        if not iso_ts:
+            return ""
+        try:
+            dt = datetime.fromisoformat(iso_ts[:19])
+        except Exception:
+            return ""
+        delta_s = max(0, int((datetime.now() - dt).total_seconds()))
+        if delta_s < 60:
+            return self._t("time_ago_now")
+        if delta_s < 3600:
+            return self._t("time_ago_minutes").format(n=delta_s // 60)
+        if delta_s < 86400:
+            return self._t("time_ago_hours").format(n=delta_s // 3600)
+        if delta_s < 86400 * 60:
+            return self._t("time_ago_days").format(n=delta_s // 86400)
+        return self._t("time_ago_months").format(n=delta_s // (86400 * 30))
 
 
 # ============================================================

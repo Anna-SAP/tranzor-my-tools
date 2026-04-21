@@ -109,11 +109,14 @@ STRINGS = {
         "summary_recent":     "Tasks",
         "summary_loading":    "Loading…",
         "summary_error":      "⚠ Failed to load task data",
-        "summary_refresh":    "🔄 Refresh",
+        "summary_refresh":    "🔄",
+        "summary_refresh_tip":"Refresh task list",
         "summary_prev":       "Previous",
+        "summary_prev_tip":   "Previous page",
         "summary_next":       "Next",
-        "summary_page_info":  "Page {page} / {total_pages}  Showing {start}-{end} of {total}",
-        "summary_page_empty": "Page 0 / 0  No tasks",
+        "summary_next_tip":   "Next page",
+        "summary_page_info":  "Page {page} / {total_pages}  ·  {start}-{end} of {total}",
+        "summary_page_empty": "Page 0 / 0  ·  No tasks",
         "summary_col_id":     "ID",
         "summary_col_name":   "Task Name",
         "summary_col_creator":"Creator",
@@ -142,6 +145,15 @@ STRINGS = {
         "mr_stat_completed":"Completed",
         "mr_stat_failed":   "Failed",
         "mr_stat_avg_score":"Avg Score",
+        "mr_recent_projects_title":"📦 Recently Added Projects",
+        "mr_recent_col_project":   "Project",
+        "mr_recent_col_added":     "Added",
+        "mr_recent_empty":         "No data yet",
+        "time_ago_now":            "just now",
+        "time_ago_minutes":        "{n}m ago",
+        "time_ago_hours":          "{n}h ago",
+        "time_ago_days":           "{n}d ago",
+        "time_ago_months":         "{n}mo ago",
         "mr_col_idx":       "#",
         "mr_col_project":   "Project",
         "mr_col_mr":        "MR#",
@@ -219,11 +231,14 @@ STRINGS = {
         "summary_recent":     "任务列表",
         "summary_loading":    "加载中…",
         "summary_error":      "⚠ 加载任务数据失败",
-        "summary_refresh":    "🔄 刷新",
+        "summary_refresh":    "🔄",
+        "summary_refresh_tip":"刷新任务列表",
         "summary_prev":       "上一页",
+        "summary_prev_tip":   "上一页",
         "summary_next":       "下一页",
-        "summary_page_info":  "第 {page} / {total_pages} 页  显示 {start}-{end} / {total}",
-        "summary_page_empty": "第 0 / 0 页  暂无任务",
+        "summary_next_tip":   "下一页",
+        "summary_page_info":  "第 {page}/{total_pages} 页  ·  {start}-{end} / {total}",
+        "summary_page_empty": "第 0/0 页  ·  暂无任务",
         "summary_col_id":     "ID",
         "summary_col_name":   "任务名称",
         "summary_col_creator":"创建者",
@@ -252,6 +267,15 @@ STRINGS = {
         "mr_stat_completed":"已完成",
         "mr_stat_failed":   "失败",
         "mr_stat_avg_score":"平均分",
+        "mr_recent_projects_title":"📦 最新支持的项目",
+        "mr_recent_col_project":   "项目",
+        "mr_recent_col_added":     "接入时间",
+        "mr_recent_empty":         "暂无数据",
+        "time_ago_now":            "刚刚",
+        "time_ago_minutes":        "{n} 分钟前",
+        "time_ago_hours":          "{n} 小时前",
+        "time_ago_days":           "{n} 天前",
+        "time_ago_months":         "{n} 个月前",
         "mr_col_idx":       "#",
         "mr_col_project":   "项目",
         "mr_col_mr":        "MR#",
@@ -323,6 +347,70 @@ if _hr_tab_mod is not None:
 # ============================================================
 # TextRedirector — forward print() to tkinter Text widget
 # ============================================================
+class Tooltip:
+    """Lightweight hover tooltip for tk / ttk widgets. Zero-dependency."""
+
+    def __init__(self, widget, text="", delay=450):
+        self.widget = widget
+        self._text = text
+        self.delay = delay
+        self._tip = None
+        self._after_id = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def set_text(self, text):
+        self._text = text or ""
+        if self._tip is not None:
+            for child in self._tip.winfo_children():
+                if isinstance(child, tk.Label):
+                    child.configure(text=self._text)
+
+    def _schedule(self, _event=None):
+        self._cancel()
+        if self._text:
+            self._after_id = self.widget.after(self.delay, self._show)
+
+    def _cancel(self):
+        if self._after_id is not None:
+            try:
+                self.widget.after_cancel(self._after_id)
+            except Exception:
+                pass
+            self._after_id = None
+
+    def _show(self):
+        if self._tip is not None or not self._text:
+            return
+        x = self.widget.winfo_rootx() + 12
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+        tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{x}+{y}")
+        try:
+            tw.wm_attributes("-topmost", True)
+        except Exception:
+            pass
+        tk.Label(
+            tw, text=self._text,
+            background="#1e2a44", foreground="#e4e7ef",
+            relief="solid", borderwidth=1,
+            font=(FONT_FAMILY, 9),
+            padx=8, pady=4,
+        ).pack()
+        self._tip = tw
+
+    def _hide(self, _event=None):
+        self._cancel()
+        if self._tip is not None:
+            try:
+                self._tip.destroy()
+            except Exception:
+                pass
+            self._tip = None
+
+
 class TextRedirector(io.TextIOBase):
     """Thread-safe stdout → Text widget redirector."""
 
@@ -883,40 +971,56 @@ class ExportApp:
         # Bind row click to fill Task ID
         self.task_tree.bind("<<TreeviewSelect>>", self._on_task_select)
 
-        # ── Pagination + refresh controls ──
+        # ── Pagination + refresh controls (two-row: info on top, actions below) ──
         btn_bar = ttk.Frame(inner, style="Summary.TFrame")
         btn_bar.pack(fill="x", pady=(10, 0))
 
+        # Row 1 — page info; wraps on narrow widths so it never squeezes buttons.
         self.lbl_summary_page = ttk.Label(
-            btn_bar, text="", style="SummaryStatus.TLabel")
-        self.lbl_summary_page.pack(side="left")
+            btn_bar, text="", style="SummaryStatus.TLabel",
+            wraplength=280, justify="left")
+        self.lbl_summary_page.pack(side="top", fill="x", anchor="w", pady=(0, 6))
+        # Keep wraplength in sync with actual available width on resize.
+        btn_bar.bind(
+            "<Configure>",
+            lambda e: self.lbl_summary_page.configure(
+                wraplength=max(120, e.width - 8)))
 
+        # Row 2 — action buttons, right-aligned via an expanding spacer.
         actions_bar = ttk.Frame(btn_bar, style="Summary.TFrame")
-        actions_bar.pack(side="right")
+        actions_bar.pack(side="top", fill="x")
+        ttk.Frame(actions_bar, style="Summary.TFrame").pack(
+            side="left", fill="x", expand=True)
 
         self.btn_summary_prev = self._create_button(
             actions_bar, text="", command=self._prev_summary_page,
             style_name="SecondaryTiny",
             font=(FONT_FAMILY, 9),
             bg=self.ACCENT, fg="#ccc", activebackground="#1a3a6a",
-            activeforeground="#fff", padx=12, pady=4, state="disabled")
-        self.btn_summary_prev.pack(side="left", padx=(0, 8))
+            activeforeground="#fff", padx=10, pady=3, state="disabled")
+        self.btn_summary_prev.pack(side="left", padx=(0, 6))
 
         self.btn_summary_next = self._create_button(
             actions_bar, text="", command=self._next_summary_page,
             style_name="SecondaryTiny",
             font=(FONT_FAMILY, 9),
             bg=self.ACCENT, fg="#ccc", activebackground="#1a3a6a",
-            activeforeground="#fff", padx=12, pady=4, state="disabled")
-        self.btn_summary_next.pack(side="left", padx=(0, 8))
+            activeforeground="#fff", padx=10, pady=3, state="disabled")
+        self.btn_summary_next.pack(side="left", padx=(0, 6))
 
+        # Refresh is an icon-only button — text saved for tooltip / a11y.
         self.btn_refresh = self._create_button(
             actions_bar, text="", command=self._load_summary_data,
             style_name="SecondaryTiny",
-            font=(FONT_FAMILY, 9),
+            font=(FONT_FAMILY, 11),
             bg=self.ACCENT, fg="#ccc", activebackground="#1a3a6a",
-            activeforeground="#fff", padx=12, pady=4)
+            activeforeground="#fff", padx=10, pady=3)
         self.btn_refresh.pack(side="left")
+
+        # Hover tooltips (text assigned via _refresh_ui_text for i18n).
+        self._tip_summary_prev = Tooltip(self.btn_summary_prev)
+        self._tip_summary_next = Tooltip(self.btn_summary_next)
+        self._tip_summary_refresh = Tooltip(self.btn_refresh)
 
         self._update_summary_pager()
 
@@ -966,6 +1070,9 @@ class ExportApp:
         self.btn_summary_prev.configure(text=self._t("summary_prev"))
         self.btn_summary_next.configure(text=self._t("summary_next"))
         self.btn_refresh.configure(text=self._t("summary_refresh"))
+        self._tip_summary_prev.set_text(self._t("summary_prev_tip"))
+        self._tip_summary_next.set_text(self._t("summary_next_tip"))
+        self._tip_summary_refresh.set_text(self._t("summary_refresh_tip"))
         self.task_tree.heading("id", text=self._t("summary_col_id"))
         self.task_tree.heading("name", text=self._t("summary_col_name"))
         self.task_tree.heading("creator", text=self._t("summary_col_creator"))

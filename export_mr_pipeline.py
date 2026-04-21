@@ -128,6 +128,60 @@ def fetch_languages():
         return []
 
 
+def fetch_recently_added_projects(max_workers=6):
+    """List every known MR Pipeline project, sorted DESC by the timestamp
+    of its earliest task (proxy for when the project was first supported).
+
+    The backend has no ``project.first_seen_at`` column, so we derive it:
+      1. ``/dashboard/filters`` gives the complete distinct project list.
+      2. For each project, the oldest task is the last row in its
+         descending-by-created_at listing: ``limit=1, offset=total-1``.
+         Two cheap point-queries per project, parallelised in a thread
+         pool — far cheaper than scanning the entire tasks table.
+
+    Returns (newest first):
+        [{"project_id": "...", "first_seen": "2026-04-21T00:54:46"}, ...]
+    """
+    try:
+        filters = fetch_mr_filters()
+    except Exception:
+        return []
+    project_ids = filters.get("project_ids") or []
+    if not project_ids:
+        return []
+
+    def _oldest_created_at(pid):
+        try:
+            total, first_page = fetch_mr_tasks(
+                project_id=pid, limit=1, offset=0)
+            if not total or not first_page:
+                return pid, None
+            if total == 1:
+                return pid, first_page[0].get("created_at")
+            _, last_page = fetch_mr_tasks(
+                project_id=pid, limit=1, offset=total - 1)
+            if last_page:
+                return pid, last_page[0].get("created_at")
+        except Exception:
+            pass
+        return pid, None
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    results = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = [ex.submit(_oldest_created_at, pid) for pid in project_ids]
+        for f in as_completed(futures):
+            try:
+                pid, ts = f.result()
+            except Exception:
+                continue
+            if ts:
+                results[pid] = ts
+
+    ordered = sorted(results.items(), key=lambda kv: kv[1], reverse=True)
+    return [{"project_id": p, "first_seen": ts} for p, ts in ordered]
+
+
 # ---------------------------------------------------------------------------
 # 2) 任务列表
 # ---------------------------------------------------------------------------
