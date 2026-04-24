@@ -110,10 +110,22 @@ class FullTranslationInventory:
 
     def __init__(self) -> None:
         self.data: Dict[str, Dict[str, Dict[str, str]]] = {}
+        # Parallel structure tracking where each (product, locale, opus_id)
+        # value came from. Follows the same "last write wins" semantics as
+        # ``data`` so the metadata always points at the task that produced
+        # the currently exported translation.
+        #   sources[product][locale][opus_id] = {"source": "MR"|"Legacy",
+        #                                        "task_id": "...",
+        #                                        "task_name": "..."}
+        # This is intentionally a sibling of ``data`` (not embedded in it)
+        # so AP.zip / any existing consumer that iterates ``data`` stays
+        # byte-identical.
+        self.sources: Dict[str, Dict[str, Dict[str, dict]]] = {}
         self._lock = threading.Lock()
 
     # ---- 写入 --------------------------------------------------------
-    def ingest(self, opus_id: str, locale: str, value: str) -> None:
+    def ingest(self, opus_id: str, locale: str, value: str,
+               source_meta: Optional[dict] = None) -> None:
         if not opus_id or not locale or value is None:
             return
         product = parse_product(opus_id)
@@ -122,6 +134,10 @@ class FullTranslationInventory:
             loc_map = prod_map.setdefault(locale, {})
             # 后写覆盖前写，用于"取最新一条"去重策略
             loc_map[opus_id] = value
+            if source_meta:
+                src_prod = self.sources.setdefault(product, {})
+                src_loc = src_prod.setdefault(locale, {})
+                src_loc[opus_id] = source_meta
 
     def ingest_entries(
         self,
@@ -132,12 +148,17 @@ class FullTranslationInventory:
         value_key: str = "translated_text",
         source_locale: Optional[str] = None,
         source_value_key: str = "source_text",
+        source_meta: Optional[dict] = None,
     ) -> int:
         """批量写入。返回实际写入的目标语条目数（未计入空值或源语言副本）。
 
         当 source_locale 非空时，每条 entry 还会把 ``source_text`` 写一份到
         ``data[product][source_locale]``，让 AP.zip 输出可以包含 en-US 源语
         言目录（target_language 维度天然不包含 en-US）。
+
+        source_meta: 可选的 provenance 字典（如 {"source": "MR",
+        "task_id": "...", "task_name": "..."}）。会跟随每条写入的译文记录，
+        用于合并 JSON 导出时标注每条翻译的源头任务。
         """
         n = 0
         for entry in entries:
@@ -145,12 +166,12 @@ class FullTranslationInventory:
             loc = entry.get(locale_key) or ""
             val = entry.get(value_key)
             if oid and loc and val not in (None, ""):
-                self.ingest(oid, loc, val)
+                self.ingest(oid, loc, val, source_meta=source_meta)
                 n += 1
             if source_locale and oid:
                 src = entry.get(source_value_key)
                 if src not in (None, ""):
-                    self.ingest(oid, source_locale, src)
+                    self.ingest(oid, source_locale, src, source_meta=source_meta)
         return n
 
     # ---- 查询 --------------------------------------------------------
@@ -463,6 +484,11 @@ def _collect_from_legacy(
             locale_key="target_language",
             value_key="translated_text",
             source_locale=SOURCE_LOCALE,
+            source_meta={
+                "source": "Legacy",
+                "task_id": str(tid),
+                "task_name": tname or f"Legacy Task {tid}",
+            },
         )
         added += n
         _log(progress_cb, f"  [Legacy {idx}/{total}] '{tname}' +{n}")
@@ -523,12 +549,31 @@ def _collect_from_mr(
         trs = (results or {}).get("translations", [])
         if not trs:
             continue
+        pid = task.get("project_id", "")
+        iid = task.get("merge_request_iid", "")
+        rel = task.get("release") or ""
+        # MR tasks have no task_name; synthesise something humans can grep:
+        #   "MR#42848 Fiji/Fiji" — paste-friendly and points to the GitLab MR.
+        mr_label_parts = []
+        if iid:
+            mr_label_parts.append(f"MR#{iid}")
+        if pid:
+            mr_label_parts.append(pid)
+        mr_label = " ".join(mr_label_parts) or f"MR Task {tid[:8]}"
         n = inv.ingest_entries(
             trs,
             opus_key="opus_id",
             locale_key="target_language",
             value_key="translated_text",
             source_locale=SOURCE_LOCALE,
+            source_meta={
+                "source": "MR",
+                "task_id": str(tid),
+                "task_name": mr_label,
+                "project_id": pid,
+                "merge_request_iid": iid,
+                "release": rel,
+            },
         )
         added += n
         if idx % 10 == 0 or n > 0:
@@ -713,6 +758,8 @@ def build_merged_json(
 
     # opus_id -> {locale: value}
     merged: Dict[str, Dict[str, str]] = {}
+    # opus_id -> {locale: source_meta}
+    merged_sources: Dict[str, Dict[str, dict]] = {}
     # Snapshot of en-US source key counts per product, taken under the
     # same lock so per_product stays consistent with build_ap_zip.
     src_count_by_product: Dict[str, int] = {}
@@ -724,27 +771,54 @@ def build_merged_json(
             n = sum(1 for v in src_map.values() if v not in (None, ""))
             if n > 0:
                 src_count_by_product[product] = n
+            prov_prod = inv.sources.get(product, {})
             for locale, kv in loc_map.items():
                 if locale_filter is not None and locale not in locale_filter:
                     continue
+                prov_loc = prov_prod.get(locale, {})
                 for opus_id, value in kv.items():
                     if value in (None, ""):
                         continue
                     merged.setdefault(opus_id, {})[locale] = value
+                    meta = prov_loc.get(opus_id)
+                    if meta:
+                        merged_sources.setdefault(opus_id, {})[locale] = meta
 
     def _ordered_locales(locs: Iterable[str]) -> List[str]:
         # Source language first, then alphabetic — matches the example file.
         rest = sorted(loc for loc in locs if loc != SOURCE_LOCALE)
         return ([SOURCE_LOCALE] if SOURCE_LOCALE in locs else []) + rest
 
+    def _collapse_sources(src_by_loc: Dict[str, dict]) -> dict:
+        """Collapse per-locale source metadata into a compact section.
+
+        When every locale for a key was produced by the same task we emit a
+        single ``_source`` object — the common case, and keeps the JSON
+        slim. Otherwise we fall back to ``_sources`` keyed by locale so
+        nothing is lost for bug fixing.
+        """
+        if not src_by_loc:
+            return {}
+        unique = {}
+        for meta in src_by_loc.values():
+            key = (meta.get("source"), meta.get("task_id"))
+            unique[key] = meta
+        if len(unique) == 1:
+            return {"_source": next(iter(unique.values()))}
+        return {"_sources": dict(src_by_loc)}
+
     records: List[dict] = []
     per_locale: Counter = Counter()
     exported_products: Set[str] = set()
     for opus_id in sorted(merged.keys()):
         loc_values = merged[opus_id]
-        rec: Dict[str, str] = {"key": opus_id}
+        rec: Dict[str, object] = {"key": opus_id}
         for loc in _ordered_locales(loc_values.keys()):
             rec[loc] = loc_values[loc]
+        # Append provenance section at the END of each record so the
+        # existing human-readable layout (key + en-US + de-DE + ...) is
+        # preserved verbatim.
+        rec.update(_collapse_sources(merged_sources.get(opus_id, {})))
         records.append(rec)
         exported_products.add(parse_product(opus_id))
         for loc in loc_values.keys():
