@@ -1968,3 +1968,106 @@ def save_mr_file(results_data, filename, label, fmt):
             save_path = f"{base}_{attempt_num}{ext}"
             print(f"  文件被占用，尝试保存为: {save_path}")
     return None
+
+
+# ---------------------------------------------------------------------------
+# Missing Translation Scan API (手动触发的扫描任务)
+# ---------------------------------------------------------------------------
+SCAN_API = f"{TRANZOR_URL}/api/v1/missing_translation_scan"
+
+
+def fetch_scan_tasks(project_id=None, status=None, limit=50, offset=0):
+    """GET /missing_translation_scan/tasks?... → { total, tasks: [...] }"""
+    params = {"limit": limit, "offset": offset}
+    if project_id:
+        params["project_id"] = project_id
+    if status:
+        params["status"] = status
+    resp = _api_get(f"{SCAN_API}/tasks", params=params)
+    resp.raise_for_status()
+    data = resp.json()
+    return data.get("total", 0), data.get("tasks", [])
+
+
+def fetch_scan_task_detail(task_id):
+    """GET /missing_translation_scan/tasks/{task_id}"""
+    resp = _api_get(f"{SCAN_API}/tasks/{task_id}")
+    resp.raise_for_status()
+    return resp.json()
+
+
+def fetch_scan_results(task_id):
+    """GET /missing_translation_scan/tasks/{task_id}/results
+
+    Response shape mirrors MR task /results: { task_id, translations: [...], ... }
+    so the existing save_mr_file / html / xlsx writers can render it unchanged.
+    """
+    resp = _api_get(f"{SCAN_API}/tasks/{task_id}/results")
+    resp.raise_for_status()
+    return resp.json()
+
+
+def detect_scan_changes(task_id, progress_callback=None):
+    """收集某个 Scan 任务的翻译变更记录。
+
+    Scan 任务没有 MR 级别的多 task 序列、也没有 cases / edit-logs 子接口。
+    真正记录"变化"的只有 translation 自身的 `iteration_history`：
+    当 `iteration > 1` 时，`iteration_history.iteration_1.translation` 保存了
+    AI 第一轮草稿，最终 `translated_text` 是经过 refinement 的定稿。
+
+    Returns:
+        list[dict]: 字段 shape 与 detect_mr_changes 返回值对齐，方便 save_mr_file
+        自动识别为 changes 模式（通过 `prev_translated_text` 非空触发）。
+    """
+    log = progress_callback or print
+    log("  正在获取扫描任务详情...")
+    detail = fetch_scan_task_detail(task_id)
+    project_id = detail.get("project_id", "")
+    base_ref = detail.get("base_ref", "")
+    head_ref = detail.get("head_ref", "")
+    scan_meta = {
+        "mr_link": "",
+        "project_id": project_id,
+        "mr_iid": "",
+        "release": f"{base_ref}..{head_ref}" if base_ref or head_ref else "",
+        "jira_ticket_id": "",
+    }
+
+    log("  正在获取翻译结果...")
+    results = fetch_scan_results(task_id)
+    translations = results.get("translations", [])
+
+    changes = []
+    for t in translations:
+        hist = t.get("iteration_history") or {}
+        if not isinstance(hist, dict):
+            continue
+        iter1 = hist.get("iteration_1")
+        if not isinstance(iter1, dict):
+            continue
+        prev_text = (iter1.get("translation")
+                     or iter1.get("translated_text") or "")
+        curr_text = t.get("translated_text", "")
+        if not prev_text or prev_text == curr_text:
+            continue
+        changes.append({
+            **scan_meta,
+            "opus_id": t.get("opus_id", ""),
+            "source_text": t.get("source_text", ""),
+            "target_language": t.get("target_language", ""),
+            "prev_translated_text": prev_text,
+            "translated_text": curr_text,
+            "prev_task_id": "",
+            "task_id": task_id,
+            "prev_task_created": "",
+            "task_created": detail.get("created_at", ""),
+            "fixed_by": "",
+            "fixed_at": "",
+            "change_source": "scan-refinement",
+            "final_score": t.get("final_score"),
+            "error_category": t.get("error_category"),
+            "reason": t.get("reason"),
+            "iteration": t.get("iteration"),
+        })
+    log(f"  检测到 {len(changes)} 条 refinement 变更")
+    return changes

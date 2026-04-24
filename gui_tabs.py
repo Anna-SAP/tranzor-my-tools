@@ -85,6 +85,17 @@ class MRPipelineTab:
                                     bg="#0a0a1a", fg="#fff", insertbackground="#fff", relief="flat")
         self.ent_mr_iid.pack(side="left", padx=(4, 0), ipady=3)
 
+        # Row 1b: Task ID (UUID from Tranzor Bot notifications)
+        r1b = ttk.Frame(fi, style="Card.TFrame")
+        r1b.pack(fill="x", pady=(0, 6))
+        self.lbl_mr_task_id = ttk.Label(r1b, text="", style="Card.TLabel", width=8)
+        self.lbl_mr_task_id.pack(side="left")
+        self.mr_task_id_var = tk.StringVar()
+        self.ent_mr_task_id = tk.Entry(r1b, textvariable=self.mr_task_id_var, width=40,
+                                        font=(FONT_FAMILY, 10),
+                                        bg="#0a0a1a", fg="#fff", insertbackground="#fff", relief="flat")
+        self.ent_mr_task_id.pack(side="left", padx=(4, 0), ipady=3)
+
         # Row 2: Date range + buttons
         r2 = ttk.Frame(fi, style="Card.TFrame")
         r2.pack(fill="x")
@@ -284,6 +295,7 @@ class MRPipelineTab:
         self.lbl_mr_release.configure(text=t("mr_release"))
         self.lbl_mr_status.configure(text=t("mr_status"))
         self.lbl_mr_date.configure(text=t("mr_date_range"))
+        self.lbl_mr_task_id.configure(text=t("mr_task_id"))
         self.btn_mr_search.configure(text=t("mr_search"))
         self.btn_mr_reset.configure(text=t("mr_reset"))
         self.btn_mr_export.configure(text=t("mr_export"))
@@ -343,6 +355,7 @@ class MRPipelineTab:
         self.mr_release_var.set("")
         self.mr_status_var.set("")
         self.mr_iid_var.set("")
+        self.mr_task_id_var.set("")
         self.mr_date_from.delete(0, "end")
         self.mr_date_to.delete(0, "end")
         self.mr_page = 0
@@ -354,7 +367,12 @@ class MRPipelineTab:
             self._load_tasks()
 
     def _next_page(self):
-        effective_total = self.mr_filtered_total if self.mr_hide_empty_var.get() or self.mr_iid_var.get().strip() else self.mr_total
+        filters_active = (
+            self.mr_hide_empty_var.get()
+            or self.mr_iid_var.get().strip()
+            or self.mr_task_id_var.get().strip()
+        )
+        effective_total = self.mr_filtered_total if filters_active else self.mr_total
         if (self.mr_page + 1) * self.mr_page_size < effective_total:
             self.mr_page += 1
             self._load_tasks()
@@ -425,7 +443,43 @@ class MRPipelineTab:
             rel = self.mr_release_var.get() or None
             status = self.mr_status_var.get() or None
             mr_iid_filter = self.mr_iid_var.get().strip()
+            task_id_filter = self.mr_task_id_var.get().strip()
             hide_empty = self.mr_hide_empty_var.get()
+
+            # Task ID short-circuit: if user pastes a UUID, look it up
+            # directly via /tasks/{task_id} and intersect with the other
+            # filters so results stay consistent with Project/Release/Status/MR#.
+            if task_id_filter:
+                try:
+                    detail = mr_api.fetch_mr_task_detail(task_id_filter)
+                except Exception:
+                    detail = None
+                collected = []
+                if isinstance(detail, dict) and detail.get("task_id"):
+                    if proj and str(detail.get("project_id", "")) != proj:
+                        detail = None
+                if isinstance(detail, dict) and detail.get("task_id"):
+                    if rel and str(detail.get("release", "")) != rel:
+                        detail = None
+                if isinstance(detail, dict) and detail.get("task_id"):
+                    if status and str(detail.get("status", "")) != status:
+                        detail = None
+                if isinstance(detail, dict) and detail.get("task_id"):
+                    if mr_iid_filter and str(detail.get("merge_request_iid", "")) != mr_iid_filter:
+                        detail = None
+                if isinstance(detail, dict) and detail.get("task_id"):
+                    if hide_empty:
+                        self._check_task_translations(detail)
+                        if detail.get("_translations_count", 0) == 0:
+                            detail = None
+                if isinstance(detail, dict) and detail.get("task_id"):
+                    collected.append(detail)
+                matched_total = len(collected)
+                # Single result fits on page 0 — return directly.
+                self.parent.after(0, self._on_tasks_loaded,
+                                  matched_total, collected, matched_total)
+                return
+
             need_filter = hide_empty or bool(mr_iid_filter)
 
             if not need_filter:

@@ -70,6 +70,15 @@ except Exception as _hr_e:  # pragma: no cover
 else:
     _hr_import_error = None
 
+# Optional: Scan Tasks tab (手动触发的 Missing Translation Scan 任务)
+try:
+    import gui_tab_scan_tasks as _st_tab_mod
+except Exception as _st_e:  # pragma: no cover
+    _st_tab_mod = None
+    _st_import_error = _st_e
+else:
+    _st_import_error = None
+
 # ---------------------------------------------------------------------------
 # Tranzor API config (reuse from export_changes)
 # ---------------------------------------------------------------------------
@@ -137,6 +146,7 @@ STRINGS = {
         "mr_release":       "Release",
         "mr_status":        "Status",
         "mr_date_range":    "Date",
+        "mr_task_id":       "Task ID",
         "mr_search":        "🔍 Search",
         "mr_reset":         "Reset",
         "mr_export":        "📦 Export Selected",
@@ -259,6 +269,7 @@ STRINGS = {
         "mr_release":       "版本",
         "mr_status":        "状态",
         "mr_date_range":    "日期",
+        "mr_task_id":       "Task ID",
         "mr_search":        "🔍 查询",
         "mr_reset":         "重置",
         "mr_export":        "📦 导出选中",
@@ -339,6 +350,14 @@ if _ft_tab_mod is not None:
 if _hr_tab_mod is not None:
     try:
         for _lang_code, _extra in _hr_tab_mod.STRINGS.items():
+            STRINGS.setdefault(_lang_code, {}).update(_extra)
+    except Exception:
+        pass
+
+# Merge in strings from the optional Scan Tasks tab (non-destructive).
+if _st_tab_mod is not None:
+    try:
+        for _lang_code, _extra in _st_tab_mod.STRINGS.items():
             STRINGS.setdefault(_lang_code, {}).update(_extra)
     except Exception:
         pass
@@ -769,6 +788,22 @@ class ExportApp:
                 print(f"[Human Revisions tab] init failed: {_e}")
                 self.hr_tab = None
 
+        # --- Tab 6: Scan Tasks (optional, pure additive) ---
+        # 独立显示 Missing Translation Scan 手动触发的扫描任务，与 MR Pipeline
+        # 互不干扰。放在最后以避免影响已有 tab 的动态 index 计算。
+        self.st_tab = None
+        self._st_tab_initialized = False
+        self._st_tab_index = None
+        if _st_tab_mod is not None:
+            try:
+                tab_st = ttk.Frame(self.notebook, style="App.TFrame")
+                self.notebook.add(tab_st, text="")
+                self.st_tab = _st_tab_mod.ScanTasksTab(tab_st, self)
+                self._st_tab_index = self.notebook.index(tab_st)
+            except Exception as _e:
+                print(f"[Scan Tasks tab] init failed: {_e}")
+                self.st_tab = None
+
         # ═══════════════════════════════════════════
         # TAB 1 CONTENTS (File Translation — preserved)
         # ═══════════════════════════════════════════
@@ -1062,6 +1097,12 @@ class ExportApp:
                 self.hr_tab.refresh_text()
             except Exception:
                 pass
+        if self.st_tab is not None and self._st_tab_index is not None:
+            try:
+                self.notebook.tab(self._st_tab_index, text=self._t("tab_scan_tasks"))
+                self.st_tab.refresh_text()
+            except Exception:
+                pass
 
         # Summary panel texts
         self.lbl_summary_title.configure(text=self._t("summary_title"))
@@ -1248,6 +1289,15 @@ class ExportApp:
                         self.hr_tab.on_first_show()
                     except Exception:
                         pass
+            elif (self.st_tab is not None
+                  and self._st_tab_index is not None
+                  and tab_idx == self._st_tab_index
+                  and not self._st_tab_initialized):
+                self._st_tab_initialized = True
+                try:
+                    self.st_tab.on_first_show()
+                except Exception:
+                    pass
 
     # ── Summary panel data loading ──
     def _load_summary_data(self):
