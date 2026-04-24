@@ -24,9 +24,23 @@ jobs:
         run: |
           pyinstaller TranzorExporter_mac.spec --clean
 
-      - name: Upload TranzorExporter.app
+      - name: Package .app with ditto (preserves the .app bundle wrapper)
+        # Why this step exists: actions/upload-artifact@v4 strips the top-level
+        # directory when uploading a folder path, which on macOS means the
+        # ".app" wrapper is lost and Finder ends up showing only the raw Unix
+        # executable inside Contents/MacOS/. Wrapping the bundle with `ditto`
+        # (Apple's native tool for .app packages — preserves symlinks,
+        # executable bits and extended attributes) produces a single .zip
+        # file; uploading that .zip keeps the full TranzorExporter.app
+        # hierarchy intact end-to-end.
+        run: |
+          cd dist
+          ditto -c -k --keepParent TranzorExporter.app TranzorExporter-Mac.zip
+          ls -lh TranzorExporter-Mac.zip
+
+      - name: Upload TranzorExporter.app zip
         uses: actions/upload-artifact@v4
         with:
           name: TranzorExporter-Mac
-          path: dist/TranzorExporter.app
+          path: dist/TranzorExporter-Mac.zip
           retention-days: 90
