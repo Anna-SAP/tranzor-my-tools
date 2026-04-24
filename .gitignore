@@ -10,5 +10,16 @@ dist/
 *.pdf
 CHC_XTM_Transit_Package_Reference.md
 
+# Local export artifacts from running the tool
+MergedTranslations_*.json
+FullTranslations_*.zip
+scan_task_*.html
+scan_task_*.xlsx
+mr_pipeline_*.html
+mr_pipeline_*.xlsx
+
+# node npm lockfile (no package.json in this repo — lockfile is accidental)
+package-lock.json
+
 # Claude Code local session / settings
 .claude/
