@@ -48,6 +48,7 @@ import export_mr_pipeline as _mr            # noqa: E402  — 只读 import
 # Source kind tags used in LightInventory.products[*]["source"]
 SRC_LEGACY = "legacy"
 SRC_MR = "mr"
+SRC_SCAN = "scan"  # Missing Translation Scan (manual scans that fill i18n gaps)
 
 # Source language for the entire Tranzor pipeline. Translation rows store
 # their original en-US copy in the ``source_text`` field; the AP.zip
@@ -258,14 +259,16 @@ class LightInventory:
 
     def split_selection(
         self, selected_ids: Iterable[str]
-    ) -> Tuple[Set[str], Set[str]]:
-        """Split a selection of product IDs into (legacy_projects, mr_projects).
+    ) -> Tuple[Set[str], Set[str], Set[str]]:
+        """Split a selection of product IDs into
+        (legacy_projects, mr_projects, scan_projects).
 
         Each item in selected_ids matches LightInventory.products[*]["id"]
         which is encoded as ``<source>::<project_id>``.
         """
         legacy: Set[str] = set()
         mr: Set[str] = set()
+        scan: Set[str] = set()
         for sid in selected_ids:
             p = self.find(sid)
             if not p:
@@ -274,7 +277,9 @@ class LightInventory:
                 legacy.add(p["project_id"])
             elif p["source"] == SRC_MR:
                 mr.add(p["project_id"])
-        return legacy, mr
+            elif p["source"] == SRC_SCAN:
+                scan.add(p["project_id"])
+        return legacy, mr, scan
 
 
 def _make_product_id(source: str, project_id: str) -> str:
@@ -399,8 +404,62 @@ def _build_mr_light(
     return products, locales
 
 
+def _build_scan_light(
+    progress_cb: ProgressCb,
+) -> Tuple[List[dict], Set[str]]:
+    """Discover Scan Tasks products (by scan.project_id) without pulling text.
+
+    The scan list endpoint is already cheap (no translations joined), so we
+    paginate it once and aggregate distinct ``project_id`` values. Languages
+    are left empty here — Scan tasks don't advertise their target_languages
+    at the task level; the UI will simply offer the combined locale list
+    from the other sources plus whatever the heavy fetch surfaces later.
+    """
+    _log(progress_cb, "  [Scan] 拉取 Missing Translation Scan task 列表...")
+    tasks: List[dict] = []
+    try:
+        offset = 0
+        batch_size = 100
+        while True:
+            total, batch = _mr.fetch_scan_tasks(
+                limit=batch_size, offset=offset)
+            tasks.extend(batch)
+            if not batch or offset + batch_size >= total:
+                break
+            offset += batch_size
+    except Exception as e:
+        _log(progress_cb, f"  ⚠ [Scan] 获取 task 列表失败: {e}")
+        return [], set()
+
+    by_project: Dict[str, dict] = {}
+    for t in tasks:
+        pid = (t.get("project_id") or "").strip()
+        if not pid:
+            continue
+        bucket = by_project.setdefault(
+            pid,
+            {
+                "id": _make_product_id(SRC_SCAN, pid),
+                "label": f"[Scan] {pid}",
+                "source": SRC_SCAN,
+                "project_id": pid,
+                "task_count": 0,
+                "entry_count": None,  # unknown without touching /results
+                "languages": [],
+            },
+        )
+        bucket["task_count"] += 1
+
+    products = list(by_project.values())
+    _log(
+        progress_cb,
+        f"  ✓ [Scan] {len(products)} 个项目",
+    )
+    return products, set()
+
+
 def build_light_inventory(
-    sources: Iterable[str] = (SRC_LEGACY, SRC_MR),
+    sources: Iterable[str] = (SRC_LEGACY, SRC_MR, SRC_SCAN),
     progress_cb: ProgressCb = None,
 ) -> LightInventory:
     """Build the lightweight Product × Language index for the GUI selector.
@@ -413,24 +472,30 @@ def build_light_inventory(
 
     legacy_products: List[dict] = []
     mr_products: List[dict] = []
+    scan_products: List[dict] = []
     legacy_locales: Set[str] = set()
     mr_locales: Set[str] = set()
+    scan_locales: Set[str] = set()
 
     if SRC_LEGACY in sources:
         legacy_products, legacy_locales = _build_legacy_light(progress_cb)
     if SRC_MR in sources:
         mr_products, mr_locales = _build_mr_light(progress_cb)
+    if SRC_SCAN in sources:
+        scan_products, scan_locales = _build_scan_light(progress_cb)
 
-    # Sort: legacy block first (alphabetically), then MR block
+    # Sort: legacy block first (alphabetically), then MR block, then Scan
     legacy_products.sort(key=lambda p: p["project_id"].lower())
     mr_products.sort(key=lambda p: p["project_id"].lower())
+    scan_products.sort(key=lambda p: p["project_id"].lower())
 
-    inv.products = legacy_products + mr_products
+    inv.products = legacy_products + mr_products + scan_products
     # Always offer en-US in the selector. Translation rows are stored by
     # target_language, so en-US is rarely returned by /dashboard/filters,
     # but the AP.zip output should still include the source-language copy
     # whenever the user picks it.
-    inv.locales = sorted(legacy_locales | mr_locales | {SOURCE_LOCALE})
+    inv.locales = sorted(
+        legacy_locales | mr_locales | scan_locales | {SOURCE_LOCALE})
 
     _log(
         progress_cb,
@@ -581,17 +646,97 @@ def _collect_from_mr(
     return added
 
 
+def _collect_from_scan(
+    inv: FullTranslationInventory,
+    progress_cb: ProgressCb,
+    project_filter: Optional[Set[str]] = None,
+) -> int:
+    """从 Missing Translation Scan API 聚合已完成扫描任务的全部译文。
+
+    project_filter: 若非 None/空，则只拉取这些 project_id 下的 completed
+    scan 任务，避免面板里只勾了 1 个产品却扫全量。
+    """
+    _log(progress_cb, "  [Scan] 获取 Missing Translation Scan 已完成任务列表...")
+    all_tasks: List[dict] = []
+
+    def _paginate(project_id: Optional[str]) -> List[dict]:
+        out: List[dict] = []
+        try:
+            offset = 0
+            batch_size = 100
+            while True:
+                total, batch = _mr.fetch_scan_tasks(
+                    project_id=project_id,
+                    status="completed",
+                    limit=batch_size,
+                    offset=offset,
+                )
+                out.extend(batch)
+                if not batch or offset + batch_size >= total:
+                    break
+                offset += batch_size
+        except Exception as e:
+            _log(progress_cb, f"  ⚠ [Scan] 获取 task 列表失败 ({project_id}): {e}")
+        return out
+
+    if project_filter:
+        for pid in sorted(project_filter):
+            all_tasks.extend(_paginate(pid))
+    else:
+        all_tasks.extend(_paginate(None))
+
+    _log(progress_cb, f"  [Scan] 命中 {len(all_tasks)} 个 Completed task")
+
+    added = 0
+    for idx, task in enumerate(all_tasks, 1):
+        tid = task.get("task_id")
+        if not tid:
+            continue
+        try:
+            results = _mr.fetch_scan_results(tid)
+        except Exception as e:
+            _log(progress_cb, f"  ⚠ [Scan {idx}/{len(all_tasks)}] task {tid[:8]}… 失败: {e}")
+            continue
+        trs = (results or {}).get("translations", [])
+        if not trs:
+            continue
+        pid = task.get("project_id", "")
+        base_ref = task.get("base_ref", "")
+        head_ref = task.get("head_ref", "")
+        tname = task.get("task_name", "") or f"Scan {tid[:8]}"
+        n = inv.ingest_entries(
+            trs,
+            opus_key="opus_id",
+            locale_key="target_language",
+            value_key="translated_text",
+            source_locale=SOURCE_LOCALE,
+            source_meta={
+                "source": "Scan",
+                "task_id": str(tid),
+                "task_name": tname,
+                "project_id": pid,
+                "base_ref": base_ref,
+                "head_ref": head_ref,
+            },
+        )
+        added += n
+        if idx % 10 == 0 or n > 0:
+            _log(progress_cb, f"  [Scan {idx}/{len(all_tasks)}] '{tname}' +{n}")
+    return added
+
+
 def collect_full_translations(
-    sources: Iterable[str] = ("legacy", "mr"),
+    sources: Iterable[str] = ("legacy", "mr", "scan"),
     progress_cb: ProgressCb = None,
     legacy_project_filter: Optional[Iterable[str]] = None,
     mr_project_filter: Optional[Iterable[str]] = None,
+    scan_project_filter: Optional[Iterable[str]] = None,
 ) -> FullTranslationInventory:
     """从指定数据源聚合全量翻译。
 
-    sources: {"legacy", "mr"} 的子集。默认两者都聚合。
+    sources: {"legacy", "mr", "scan"} 的子集。默认三者都聚合。
 
-    legacy_project_filter / mr_project_filter:
+    legacy_project_filter / mr_project_filter / scan_project_filter:
         若非 None/空，则在抓取阶段就只命中这些项目下的任务，避免在面板里
         只点了 1 个产品却把整个 completed 任务列表都拉一遍。
 
@@ -601,6 +746,7 @@ def collect_full_translations(
     sources = [s.lower() for s in sources]
     legacy_set = set(legacy_project_filter) if legacy_project_filter else None
     mr_set = set(mr_project_filter) if mr_project_filter else None
+    scan_set = set(scan_project_filter) if scan_project_filter else None
 
     if "legacy" in sources:
         added = _collect_from_legacy(inv, progress_cb, legacy_set)
@@ -609,6 +755,10 @@ def collect_full_translations(
     if "mr" in sources:
         added = _collect_from_mr(inv, progress_cb, mr_set)
         _log(progress_cb, f"  ✓ [MR] 写入 {added} 条")
+
+    if "scan" in sources:
+        added = _collect_from_scan(inv, progress_cb, scan_set)
+        _log(progress_cb, f"  ✓ [Scan] 写入 {added} 条")
 
     _log(progress_cb, f"\n  ✓ 聚合完成：{len(inv.data)} 个产品 / "
                       f"{len(inv.all_locales())} 种语言 / "
@@ -879,11 +1029,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                         help="逗号分隔的产品白名单（默认全部）")
     parser.add_argument("--locales", default=None,
                         help="逗号分隔的语言白名单（默认全部）")
-    parser.add_argument("--sources", default="legacy,mr",
-                        help="数据源，逗号分隔，可选 legacy,mr（默认两者都要）")
+    parser.add_argument("--sources", default="legacy,mr,scan",
+                        help="数据源，逗号分隔，可选 legacy,mr,scan（默认三者都要）")
     args = parser.parse_args(argv)
 
-    sources = _parse_csv(args.sources) or ["legacy", "mr"]
+    sources = _parse_csv(args.sources) or ["legacy", "mr", "scan"]
     inv = collect_full_translations(sources=sources, progress_cb=print)
 
     if not inv.data:

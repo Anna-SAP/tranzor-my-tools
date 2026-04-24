@@ -52,6 +52,7 @@ STRINGS = {
         "ft_sources_label":       "Data Sources",
         "ft_src_legacy":          "File Translation (Legacy)",
         "ft_src_mr":              "MR Pipeline",
+        "ft_src_scan":            "Scan Tasks",
         "ft_refresh":             "🔄 Refresh Inventory",
         "ft_export_selected":     "📦 Export Selected",
         "ft_export_all":          "📦 Export All",
@@ -119,6 +120,7 @@ STRINGS = {
         "ft_sources_label":       "数据源",
         "ft_src_legacy":          "File Translation（Legacy）",
         "ft_src_mr":              "MR Pipeline",
+        "ft_src_scan":            "扫描任务",
         "ft_refresh":             "🔄 刷新清单",
         "ft_export_selected":     "📦 导出选中",
         "ft_export_all":          "📦 全部导出",
@@ -582,6 +584,7 @@ class FullTranslationsTab:
 
         self.var_src_legacy = tk.BooleanVar(value=True)
         self.var_src_mr = tk.BooleanVar(value=True)
+        self.var_src_scan = tk.BooleanVar(value=True)
         self.chk_legacy = ttk.Checkbutton(
             top, text=self._t("ft_src_legacy"),
             variable=self.var_src_legacy, style="Card.TCheckbutton")
@@ -589,7 +592,11 @@ class FullTranslationsTab:
         self.chk_mr = ttk.Checkbutton(
             top, text=self._t("ft_src_mr"),
             variable=self.var_src_mr, style="Card.TCheckbutton")
-        self.chk_mr.pack(side="left", padx=(8, 16))
+        self.chk_mr.pack(side="left", padx=(8, 0))
+        self.chk_scan = ttk.Checkbutton(
+            top, text=self._t("ft_src_scan"),
+            variable=self.var_src_scan, style="Card.TCheckbutton")
+        self.chk_scan.pack(side="left", padx=(8, 16))
 
         self.btn_refresh = self.app._create_button(
             top, text=self._t("ft_refresh"), command=self._on_refresh,
@@ -764,6 +771,7 @@ class FullTranslationsTab:
             self.lbl_src.configure(text=self._t("ft_sources_label"))
             self.chk_legacy.configure(text=self._t("ft_src_legacy"))
             self.chk_mr.configure(text=self._t("ft_src_mr"))
+            self.chk_scan.configure(text=self._t("ft_src_scan"))
             self.lbl_prod.configure(text=self._t("ft_products"))
             self.lbl_prod_filter.configure(text=self._t("ft_filter_label"))
             self.btn_prod_clear_filter.configure(
@@ -1114,7 +1122,9 @@ class FullTranslationsTab:
             sources.append("legacy")
         if self.var_src_mr.get():
             sources.append("mr")
-        return sources or ["legacy", "mr"]
+        if self.var_src_scan.get():
+            sources.append("scan")
+        return sources or ["legacy", "mr", "scan"]
 
     # ---- inventory load (LIGHT — selectors only) --------------------
     def _on_refresh(self) -> None:
@@ -1232,13 +1242,15 @@ class FullTranslationsTab:
                     "Full Translations", self._t("ft_err_no_selection"))
                 return
 
-        legacy_filter, mr_filter = self._light_inv.split_selection(selected_ids)
+        legacy_filter, mr_filter, scan_filter = self._light_inv.split_selection(selected_ids)
         # Restrict the source list to what the user actually selected.
         effective_sources = []
         if "legacy" in sources and legacy_filter:
             effective_sources.append("legacy")
         if "mr" in sources and mr_filter:
             effective_sources.append("mr")
+        if "scan" in sources and scan_filter:
+            effective_sources.append("scan")
         if not effective_sources:
             messagebox.showwarning(
                 "Full Translations", self._t("ft_err_no_selection"))
@@ -1275,7 +1287,8 @@ class FullTranslationsTab:
 
         t = threading.Thread(
             target=self._run_export,
-            args=(out_path, mode, effective_sources, legacy_filter, mr_filter, locales),
+            args=(out_path, mode, effective_sources,
+                  legacy_filter, mr_filter, scan_filter, locales),
             daemon=True,
         )
         t.start()
@@ -1294,7 +1307,8 @@ class FullTranslationsTab:
         except Exception:
             pass
 
-    def _run_export(self, out_path, mode, sources, legacy_filter, mr_filter, locales) -> None:
+    def _run_export(self, out_path, mode, sources,
+                    legacy_filter, mr_filter, scan_filter, locales) -> None:
         """Background: heavy fetch + (zip | merged-json) build, scoped by selection."""
         dlg = self._progress_dlg
         try:
@@ -1307,6 +1321,7 @@ class FullTranslationsTab:
                 progress_cb=self._dialog_log,
                 legacy_project_filter=legacy_filter or None,
                 mr_project_filter=mr_filter or None,
+                scan_project_filter=scan_filter or None,
             )
             if not heavy_inv.data:
                 self.parent.after(
