@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import sys
 import threading
+import time
 import tkinter as tk
 import webbrowser
 from datetime import datetime
@@ -238,6 +239,10 @@ STRINGS = {
         "tw_src_scan":               "Scan Tasks",
         "tw_scan_none_selected":     "Pick at least one source.",
         "tw_scan_progress":          "Scanning {phase}…",
+        "tw_progress_starting":      "Starting…",
+        "tw_progress_fetch":         "Fetching {phase} {scanned}/{total} · ETA {eta}",
+        "tw_progress_match":         "Matching {scanned}/{total} ({pct}%) · ETA {eta}",
+        "tw_progress_eta_unknown":   "calculating…",
         "tw_glossary_col_enabled":   "Enabled",
         "tw_glossary_col_rule":      "Rule ID",
         "tw_glossary_col_term":      "Source Term",
@@ -383,6 +388,10 @@ STRINGS = {
         "tw_src_scan":               "Scan Tasks",
         "tw_scan_none_selected":     "至少选择一个数据源。",
         "tw_scan_progress":          "正在扫描 {phase}…",
+        "tw_progress_starting":      "正在启动…",
+        "tw_progress_fetch":         "拉取 {phase} {scanned}/{total} · 预计还需 {eta}",
+        "tw_progress_match":         "匹配 {scanned}/{total}（{pct}%）· 预计还需 {eta}",
+        "tw_progress_eta_unknown":   "估算中…",
         "tw_glossary_col_enabled":   "启用",
         "tw_glossary_col_rule":      "规则 ID",
         "tw_glossary_col_term":      "源词",
@@ -550,6 +559,30 @@ class TermWatchtowerTab:
             font=(FONT_FAMILY, 11, "bold"),
         )
         self.lbl_state.pack(side="right", padx=(8, 0))
+
+        # Determinate progress bar + ETA — shown only while a scan is
+        # running. Fed by the per-task count callback in collect_full_*
+        # so the bar advances every time an HTTP fetch completes (≈
+        # several times per second when parallel-fetching), instead of
+        # only every 10 tasks like the old text-only status line.
+        self.progress_frame = ttk.Frame(kpi_inner, style="Card.TFrame")
+        self.progress_bar = ttk.Progressbar(
+            self.progress_frame, orient="horizontal", mode="determinate",
+            length=220, maximum=100, value=0,
+        )
+        self.progress_bar.pack(side="left")
+        self.lbl_progress_text = ttk.Label(
+            self.progress_frame, text="", style="Status.TLabel",
+        )
+        self.lbl_progress_text.configure(
+            foreground="#3b82f6", font=(FONT_FAMILY, 10),
+        )
+        self.lbl_progress_text.pack(side="left", padx=(8, 0))
+        # Hidden by default; _launch_scan packs it on scan start.
+        # Stored start time + cached counts for ETA / phase routing.
+        self._scan_started_at: Optional[float] = None
+        self._fetch_phase_totals: Dict[str, int] = {}
+        self._fetch_phase_done: Dict[str, int] = {}
 
         # --- Quick Check info bar (visible only during/after a Quick Check)
         self._build_qc_info_bar(root)
@@ -1237,6 +1270,92 @@ class TermWatchtowerTab:
         self._launch_scan(self.rules, dlg.result)
 
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Progress bar helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _format_eta(seconds: float) -> str:
+        """Human-friendly ETA string. Sub-minute resolution under 1m,
+        ``Xm Ys`` under an hour, ``Xh Ym`` otherwise."""
+        if seconds <= 0 or seconds != seconds:  # NaN guard
+            return "—"
+        s = int(round(seconds))
+        if s < 60:
+            return f"{s}s"
+        if s < 3600:
+            return f"{s // 60}m {s % 60}s"
+        return f"{s // 3600}h {(s % 3600) // 60}m"
+
+    def _show_progress_bar(self):
+        """Pack the progress bar on the right side of kpi_inner and reset
+        accumulated counters. Must be called from the Tk thread."""
+        if not self.progress_frame.winfo_ismapped():
+            self.progress_frame.pack(side="right", padx=(8, 0),
+                                     before=self.lbl_state)
+        self.progress_bar.configure(value=0)
+        self.lbl_progress_text.configure(
+            text=self._t("tw_progress_starting"))
+        self._scan_started_at = time.monotonic()
+        self._fetch_phase_totals = {}
+        self._fetch_phase_done = {}
+
+    def _hide_progress_bar(self):
+        if self.progress_frame.winfo_ismapped():
+            self.progress_frame.pack_forget()
+        self._scan_started_at = None
+
+    def _update_progress_fetch(self, phase: str, scanned: int, total: int):
+        """Aggregate fetch progress across phases (Legacy + MR + Scan run
+        sequentially, one after another). The bar reflects the *current*
+        phase's percentage; the text label shows the phase name + ETA so
+        the user always sees both pieces of context."""
+        if total <= 0:
+            return
+        # Track per-phase counters so totals printed in the label reflect
+        # this phase's task pool, not a stale earlier one.
+        self._fetch_phase_totals[phase] = total
+        self._fetch_phase_done[phase] = scanned
+        pct = max(0, min(100, int(scanned * 100 / total))) if total else 0
+        self.progress_bar.configure(value=pct)
+        eta = self._t("tw_progress_eta_unknown")
+        if self._scan_started_at is not None and scanned > 0 and total > 0:
+            elapsed = time.monotonic() - self._scan_started_at
+            # Project remaining time *for this phase* — a coarse but
+            # honest estimate. Cross-phase ETA would be misleading because
+            # /results latency varies wildly between Legacy/MR/Scan.
+            per_unit = elapsed / max(1, scanned)
+            remaining = per_unit * max(0, total - scanned)
+            eta = self._format_eta(remaining)
+        self.lbl_progress_text.configure(text=self._t(
+            "tw_progress_fetch",
+            phase=phase, scanned=scanned, total=total, eta=eta,
+        ))
+
+    def _update_progress_match(self, scanned: int, total: int):
+        """Drive the bar from the candidate-matching phase (CPU-bound,
+        runs after all fetches complete)."""
+        if total <= 0:
+            return
+        pct = max(0, min(100, int(scanned * 100 / total)))
+        self.progress_bar.configure(value=pct)
+        eta = self._t("tw_progress_eta_unknown")
+        if self._scan_started_at is not None and scanned > 0:
+            # Approximate ETA from the matching phase's own pace —
+            # ignores the (already finished) fetch elapsed time so the
+            # number doesn't lurch when the phase boundary is crossed.
+            now = time.monotonic()
+            phase_start = getattr(self, "_match_started_at", None) or now
+            if phase_start == now:
+                self._match_started_at = now
+            phase_elapsed = max(0.001, now - self._match_started_at)
+            per_unit = phase_elapsed / max(1, scanned)
+            remaining = per_unit * max(0, total - scanned)
+            eta = self._format_eta(remaining)
+        self.lbl_progress_text.configure(text=self._t(
+            "tw_progress_match", scanned=scanned, total=total,
+            pct=pct, eta=eta,
+        ))
+
     def _launch_scan(self, rules, scope, *, progress_label=None,
                      qc_info=None):
         """Shared scan launcher.
@@ -1256,6 +1375,10 @@ class TermWatchtowerTab:
         self.filtered_issues = []
         self._render_table()
         self._render_state()
+        self._show_progress_bar()
+        # Reset matching-phase clock; it's set fresh when the first
+        # match-phase callback fires after fetching completes.
+        self._match_started_at = None
 
         if qc_info is not None:
             self._show_quick_check_info(**qc_info)
@@ -1267,14 +1390,23 @@ class TermWatchtowerTab:
                 text=self._t("tw_scan_progress", phase=str(msg)[:80])
             ))
 
+        def _count(phase, scanned, total):
+            self.parent.after(
+                0, lambda p=phase, s=scanned, t=total:
+                self._update_progress_fetch(p, s, t),
+            )
+
         def _scan_progress(scanned, total):
             if not total:
                 return
-            pct = int(scanned * 100 / total)
-            self.parent.after(0, lambda: self.lbl_state.configure(
-                text=self._t("tw_scan_progress",
-                             phase=f"matching {scanned}/{total} ({pct}%)")
-            ))
+            # First match-phase tick latches the phase start time so ETA
+            # is computed against the matching pace, not fetch elapsed.
+            if self._match_started_at is None:
+                self._match_started_at = time.monotonic()
+            self.parent.after(
+                0, lambda s=scanned, t=total:
+                self._update_progress_match(s, t),
+            )
 
         def _worker():
             failed: List[str] = []
@@ -1295,10 +1427,12 @@ class TermWatchtowerTab:
                             legacy_project_filter=scope.get("legacy") or None,
                             mr_project_filter=scope.get("mr") or None,
                             scan_project_filter=scope.get("scan") or None,
+                            count_cb=_count,
                         )
                     else:
                         inv = _ft_api.collect_full_translations(
                             sources=sources, progress_cb=_phase,
+                            count_cb=_count,
                         )
                     covered = list(sources)
             except Exception as e:
@@ -1337,6 +1471,7 @@ class TermWatchtowerTab:
                 self._refresh_filter_options()
                 self._apply_filters()
                 self._render_state()
+                self._hide_progress_bar()
 
             self.parent.after(0, _done)
 

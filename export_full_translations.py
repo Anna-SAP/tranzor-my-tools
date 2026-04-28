@@ -64,6 +64,15 @@ _RC_PREFIX = "RingCentral."
 _UNKNOWN_PRODUCT = "_unknown"
 
 ProgressCb = Optional[Callable[[str], None]]
+# (phase, scanned, total) — fired per task as parallel fetches complete.
+# Used by the Term Watchtower progress bar; pure log consumers ignore it.
+ProgressCountCb = Optional[Callable[[str, int, int], None]]
+
+# Default fan-out for per-task HTTP fetches. The list endpoints stay serial
+# because they're already cheap (paginated metadata). Eight workers gives
+# a 4–8× wall-clock win on the inner /translations endpoints without
+# overwhelming the backend; tune via env if a deployment needs differently.
+_FETCH_WORKERS = int(os.getenv("TRANZOR_FETCH_WORKERS", "8") or "8")
 
 
 # ---------------------------------------------------------------------------
@@ -510,10 +519,16 @@ def _collect_from_legacy(
     inv: FullTranslationInventory,
     progress_cb: ProgressCb,
     project_filter: Optional[Set[str]] = None,
+    count_cb: ProgressCountCb = None,
 ) -> int:
     """从 Legacy File Translation API 聚合。
 
     project_filter: 若非 None/空，则只抓取 project_name ∈ project_filter 的任务。
+
+    Per-task ``/translations`` fetches run in parallel (``_FETCH_WORKERS``
+    threads) — they're independent HTTP calls and dominate wall-clock time on
+    slow networks. ``inv.ingest_entries`` is already lock-protected, so racing
+    ingests is safe.
     """
     _log(progress_cb, "  [Legacy] 获取 File Translation task 列表...")
     try:
@@ -529,20 +544,28 @@ def _collect_from_legacy(
         ]
     total = len(tasks)
     _log(progress_cb, f"  [Legacy] 命中 {total} 个 Completed task")
+    if count_cb:
+        try:
+            count_cb("Legacy", 0, total)
+        except Exception:
+            pass
 
     added = 0
-    for idx, task in enumerate(tasks, 1):
+    done = 0
+    counter_lock = threading.Lock()
+
+    def _fetch_one(idx: int, task: dict) -> int:
         tid = task.get("id")
         tname = task.get("task_name", "")
         if tid is None:
-            continue
+            return 0
         try:
             entries = _legacy.fetch_all_translations(tid)
         except Exception as e:
             _log(progress_cb, f"  ⚠ [Legacy {idx}/{total}] task {tid} 失败: {e}")
-            continue
+            return 0
         if not entries:
-            continue
+            return 0
         n = inv.ingest_entries(
             entries,
             opus_key="opus_id",
@@ -555,8 +578,26 @@ def _collect_from_legacy(
                 "task_name": tname or f"Legacy Task {tid}",
             },
         )
-        added += n
         _log(progress_cb, f"  [Legacy {idx}/{total}] '{tname}' +{n}")
+        return n
+
+    if total == 0:
+        return 0
+    workers = max(1, min(_FETCH_WORKERS, total))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(_fetch_one, i, t)
+                   for i, t in enumerate(tasks, 1)]
+        for f in as_completed(futures):
+            n = f.result()
+            with counter_lock:
+                added += n
+                done += 1
+                cur = done
+            if count_cb:
+                try:
+                    count_cb("Legacy", cur, total)
+                except Exception:
+                    pass
     return added
 
 
@@ -564,11 +605,16 @@ def _collect_from_mr(
     inv: FullTranslationInventory,
     progress_cb: ProgressCb,
     project_filter: Optional[Set[str]] = None,
+    count_cb: ProgressCountCb = None,
 ) -> int:
     """从 MR Pipeline API 聚合。
 
     project_filter: 若非 None/空，则按 project_id 一次只取该项目下的 completed
     任务，避免拉取整张 completed 任务列表后再做客户端过滤。
+
+    Per-task ``/results`` fetches run in parallel (see ``_FETCH_WORKERS``).
+    Pagination of the task list stays serial — the list endpoint is one
+    aggregate query per page, not the bottleneck.
     """
     _log(progress_cb, "  [MR] 获取 MR Pipeline task 列表...")
     all_tasks: List[dict] = []
@@ -599,21 +645,31 @@ def _collect_from_mr(
     else:
         all_tasks.extend(_paginate(None))
 
-    _log(progress_cb, f"  [MR] 命中 {len(all_tasks)} 个 Completed task")
+    total_tasks = len(all_tasks)
+    _log(progress_cb, f"  [MR] 命中 {total_tasks} 个 Completed task")
+    if count_cb:
+        try:
+            count_cb("MR", 0, total_tasks)
+        except Exception:
+            pass
 
     added = 0
-    for idx, task in enumerate(all_tasks, 1):
+    done = 0
+    counter_lock = threading.Lock()
+
+    def _fetch_one(idx: int, task: dict) -> int:
         tid = task.get("task_id")
         if not tid:
-            continue
+            return 0
         try:
             results = _mr.fetch_mr_results(tid)
         except Exception as e:
-            _log(progress_cb, f"  ⚠ [MR {idx}/{len(all_tasks)}] task {tid[:8]}… 失败: {e}")
-            continue
+            _log(progress_cb,
+                 f"  ⚠ [MR {idx}/{total_tasks}] task {tid[:8]}… 失败: {e}")
+            return 0
         trs = (results or {}).get("translations", [])
         if not trs:
-            continue
+            return 0
         pid = task.get("project_id", "")
         iid = task.get("merge_request_iid", "")
         rel = task.get("release") or ""
@@ -640,9 +696,27 @@ def _collect_from_mr(
                 "release": rel,
             },
         )
-        added += n
-        if idx % 10 == 0 or n > 0:
-            _log(progress_cb, f"  [MR {idx}/{len(all_tasks)}] +{n}")
+        if n > 0:
+            _log(progress_cb, f"  [MR {idx}/{total_tasks}] +{n}")
+        return n
+
+    if total_tasks == 0:
+        return 0
+    workers = max(1, min(_FETCH_WORKERS, total_tasks))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(_fetch_one, i, t)
+                   for i, t in enumerate(all_tasks, 1)]
+        for f in as_completed(futures):
+            n = f.result()
+            with counter_lock:
+                added += n
+                done += 1
+                cur = done
+            if count_cb:
+                try:
+                    count_cb("MR", cur, total_tasks)
+                except Exception:
+                    pass
     return added
 
 
@@ -650,11 +724,14 @@ def _collect_from_scan(
     inv: FullTranslationInventory,
     progress_cb: ProgressCb,
     project_filter: Optional[Set[str]] = None,
+    count_cb: ProgressCountCb = None,
 ) -> int:
     """从 Missing Translation Scan API 聚合已完成扫描任务的全部译文。
 
     project_filter: 若非 None/空，则只拉取这些 project_id 下的 completed
     scan 任务，避免面板里只勾了 1 个产品却扫全量。
+
+    Per-task ``/results`` fetches run in parallel (see ``_FETCH_WORKERS``).
     """
     _log(progress_cb, "  [Scan] 获取 Missing Translation Scan 已完成任务列表...")
     all_tasks: List[dict] = []
@@ -685,21 +762,31 @@ def _collect_from_scan(
     else:
         all_tasks.extend(_paginate(None))
 
-    _log(progress_cb, f"  [Scan] 命中 {len(all_tasks)} 个 Completed task")
+    total_tasks = len(all_tasks)
+    _log(progress_cb, f"  [Scan] 命中 {total_tasks} 个 Completed task")
+    if count_cb:
+        try:
+            count_cb("Scan", 0, total_tasks)
+        except Exception:
+            pass
 
     added = 0
-    for idx, task in enumerate(all_tasks, 1):
+    done = 0
+    counter_lock = threading.Lock()
+
+    def _fetch_one(idx: int, task: dict) -> int:
         tid = task.get("task_id")
         if not tid:
-            continue
+            return 0
         try:
             results = _mr.fetch_scan_results(tid)
         except Exception as e:
-            _log(progress_cb, f"  ⚠ [Scan {idx}/{len(all_tasks)}] task {tid[:8]}… 失败: {e}")
-            continue
+            _log(progress_cb,
+                 f"  ⚠ [Scan {idx}/{total_tasks}] task {tid[:8]}… 失败: {e}")
+            return 0
         trs = (results or {}).get("translations", [])
         if not trs:
-            continue
+            return 0
         pid = task.get("project_id", "")
         base_ref = task.get("base_ref", "")
         head_ref = task.get("head_ref", "")
@@ -719,9 +806,28 @@ def _collect_from_scan(
                 "head_ref": head_ref,
             },
         )
-        added += n
-        if idx % 10 == 0 or n > 0:
-            _log(progress_cb, f"  [Scan {idx}/{len(all_tasks)}] '{tname}' +{n}")
+        if n > 0:
+            _log(progress_cb,
+                 f"  [Scan {idx}/{total_tasks}] '{tname}' +{n}")
+        return n
+
+    if total_tasks == 0:
+        return 0
+    workers = max(1, min(_FETCH_WORKERS, total_tasks))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(_fetch_one, i, t)
+                   for i, t in enumerate(all_tasks, 1)]
+        for f in as_completed(futures):
+            n = f.result()
+            with counter_lock:
+                added += n
+                done += 1
+                cur = done
+            if count_cb:
+                try:
+                    count_cb("Scan", cur, total_tasks)
+                except Exception:
+                    pass
     return added
 
 
@@ -731,6 +837,7 @@ def collect_full_translations(
     legacy_project_filter: Optional[Iterable[str]] = None,
     mr_project_filter: Optional[Iterable[str]] = None,
     scan_project_filter: Optional[Iterable[str]] = None,
+    count_cb: ProgressCountCb = None,
 ) -> FullTranslationInventory:
     """从指定数据源聚合全量翻译。
 
@@ -739,6 +846,10 @@ def collect_full_translations(
     legacy_project_filter / mr_project_filter / scan_project_filter:
         若非 None/空，则在抓取阶段就只命中这些项目下的任务，避免在面板里
         只点了 1 个产品却把整个 completed 任务列表都拉一遍。
+
+    count_cb: 可选的结构化进度回调 ``(phase, scanned, total)``，每个 task
+    fetch 完成时触发一次，供 GUI 渲染进度条/ETA。``progress_cb`` 仍负责
+    日志文字。
 
     返回 FullTranslationInventory。
     """
@@ -749,15 +860,18 @@ def collect_full_translations(
     scan_set = set(scan_project_filter) if scan_project_filter else None
 
     if "legacy" in sources:
-        added = _collect_from_legacy(inv, progress_cb, legacy_set)
+        added = _collect_from_legacy(inv, progress_cb, legacy_set,
+                                     count_cb=count_cb)
         _log(progress_cb, f"  ✓ [Legacy] 写入 {added} 条")
 
     if "mr" in sources:
-        added = _collect_from_mr(inv, progress_cb, mr_set)
+        added = _collect_from_mr(inv, progress_cb, mr_set,
+                                 count_cb=count_cb)
         _log(progress_cb, f"  ✓ [MR] 写入 {added} 条")
 
     if "scan" in sources:
-        added = _collect_from_scan(inv, progress_cb, scan_set)
+        added = _collect_from_scan(inv, progress_cb, scan_set,
+                                   count_cb=count_cb)
         _log(progress_cb, f"  ✓ [Scan] 写入 {added} 条")
 
     _log(progress_cb, f"\n  ✓ 聚合完成：{len(inv.data)} 个产品 / "
