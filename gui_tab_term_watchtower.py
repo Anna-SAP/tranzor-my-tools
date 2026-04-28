@@ -455,54 +455,59 @@ class TermWatchtowerTab:
         top = ttk.Frame(root, style="App.TFrame")
         top.pack(fill="x", pady=(0, 8))
 
-        self.btn_scan = tk.Button(
+        # NOTE: Use the cross-platform _create_button factory so buttons
+        # render correctly on macOS too. Native Aqua tk.Button ignores
+        # bg/activebackground, leaving buttons white on macOS — see
+        # export_gui.MainApp._create_button for the macOS ttk fallback.
+        _accent_bg = getattr(self.app, "ACCENT_BTN", "#e94560")
+        _accent_hover = getattr(self.app, "ACCENT_BTN_HOVER", "#ff6b81")
+
+        self.btn_scan = self.app._create_button(
             top, text=self._t("tw_btn_scan"), command=self._on_scan_now,
+            style_name="Accent",
             font=(FONT_FAMILY, 11, "bold"),
-            bg=getattr(self.app, "ACCENT_BTN", "#e94560"), fg="#fff",
-            activebackground=getattr(self.app, "ACCENT_BTN_HOVER", "#ff6b81"),
-            activeforeground="#fff", relief="flat", padx=14, pady=4,
-            cursor="hand2",
+            bg=_accent_bg, activebackground=_accent_hover,
+            fg="#fff", activeforeground="#fff", padx=14, pady=4,
         )
         self.btn_scan.pack(side="left")
 
-        self.btn_import = tk.Button(
+        self.btn_import = self.app._create_button(
             top, text=self._t("tw_btn_import"), command=self._on_import_glossary,
+            style_name="Secondary",
             font=(FONT_FAMILY, 10),
-            bg="#1f2a48", fg="#fff", activebackground="#2a3a5e",
-            activeforeground="#fff", relief="flat", padx=10, pady=4, cursor="hand2",
+            bg="#1f2a48", activebackground="#2a3a5e",
+            fg="#fff", activeforeground="#fff", padx=10, pady=4,
         )
         self.btn_import.pack(side="left", padx=(8, 0))
 
         # Quick Check + Tranzor Terminology share the same accent-red
         # styling as Scan Now: all three are "click to start a scan"
         # actions so they should look like the same kind of button.
-        _accent_bg = getattr(self.app, "ACCENT_BTN", "#e94560")
-        _accent_hover = getattr(self.app, "ACCENT_BTN_HOVER", "#ff6b81")
-
-        self.btn_quick = tk.Button(
+        self.btn_quick = self.app._create_button(
             top, text=self._t("tw_btn_quick_check"), command=self._on_quick_check,
+            style_name="Accent",
             font=(FONT_FAMILY, 11, "bold"),
-            bg=_accent_bg, fg="#fff",
-            activebackground=_accent_hover, activeforeground="#fff",
-            relief="flat", padx=14, pady=4, cursor="hand2",
+            bg=_accent_bg, activebackground=_accent_hover,
+            fg="#fff", activeforeground="#fff", padx=14, pady=4,
         )
         self.btn_quick.pack(side="left", padx=(8, 0))
 
-        self.btn_tranzor_term = tk.Button(
+        self.btn_tranzor_term = self.app._create_button(
             top, text=self._t("tw_btn_tranzor_term"),
             command=self._on_tranzor_terminology,
+            style_name="Accent",
             font=(FONT_FAMILY, 11, "bold"),
-            bg=_accent_bg, fg="#fff",
-            activebackground=_accent_hover, activeforeground="#fff",
-            relief="flat", padx=14, pady=4, cursor="hand2",
+            bg=_accent_bg, activebackground=_accent_hover,
+            fg="#fff", activeforeground="#fff", padx=14, pady=4,
         )
         self.btn_tranzor_term.pack(side="left", padx=(8, 0))
 
-        self.btn_export = tk.Button(
+        self.btn_export = self.app._create_button(
             top, text=self._t("tw_btn_export_evidence"), command=self._on_export_evidence,
+            style_name="Secondary",
             font=(FONT_FAMILY, 10),
-            bg="#1f2a48", fg="#fff", activebackground="#2a3a5e",
-            activeforeground="#fff", relief="flat", padx=10, pady=4, cursor="hand2",
+            bg="#1f2a48", activebackground="#2a3a5e",
+            fg="#fff", activeforeground="#fff", padx=10, pady=4,
         )
         self.btn_export.pack(side="left", padx=(8, 0))
 
@@ -585,13 +590,13 @@ class TermWatchtowerTab:
         self.qc_lbl_meta = ttk.Label(head, text="", style="Card.TLabel")
         self.qc_lbl_meta.pack(side="left", padx=(12, 0))
 
-        self.qc_btn_close = tk.Button(
+        self.qc_btn_close = self.app._create_button(
             head, text=self._t("tw_qc_info_close"),
             command=self._hide_quick_check_info,
+            style_name="Secondary",
             font=(FONT_FAMILY, 10),
-            bg="#1f2a48", fg="#fff", activebackground="#2a3a5e",
-            activeforeground="#fff", relief="flat", padx=6, pady=0,
-            cursor="hand2",
+            bg="#1f2a48", activebackground="#2a3a5e",
+            fg="#fff", activeforeground="#fff", padx=6, pady=0,
         )
         self.qc_btn_close.pack(side="right")
 
@@ -785,12 +790,13 @@ class TermWatchtowerTab:
             ("tw_act_copy_summary",  self._copy_summary, "btn_act_copy"),
             ("tw_act_export_one",    self._export_selected_issue, "btn_act_export_one"),
         ):
-            b = tk.Button(
+            b = self.app._create_button(
                 actions, text=self._t(key), command=cmd,
+                style_name="SecondarySmall",
                 font=(FONT_FAMILY, 9),
-                bg="#1f2a48", fg="#fff", activebackground="#2a3a5e",
-                activeforeground="#fff", relief="flat", padx=6, pady=2,
-                cursor="hand2", state="disabled",
+                bg="#1f2a48", activebackground="#2a3a5e",
+                fg="#fff", activeforeground="#fff", padx=6, pady=2,
+                state="disabled",
             )
             b.pack(side="left", padx=(0, 4), pady=(2, 0))
             setattr(self, attr, b)
@@ -800,24 +806,27 @@ class TermWatchtowerTab:
         bar = ttk.Frame(parent, style="App.TFrame")
         bar.pack(fill="x", padx=8, pady=(8, 4))
 
-        self.btn_g_import = tk.Button(
+        self.btn_g_import = self.app._create_button(
             bar, text=self._t("tw_btn_import"), command=self._on_import_glossary,
+            style_name="Secondary",
             font=(FONT_FAMILY, 10),
-            bg="#1f2a48", fg="#fff", relief="flat", padx=10, pady=4, cursor="hand2",
+            bg="#1f2a48", fg="#fff", padx=10, pady=4,
         )
         self.btn_g_import.pack(side="left")
 
-        self.btn_g_export = tk.Button(
+        self.btn_g_export = self.app._create_button(
             bar, text=self._t("tw_btn_export_glossary"), command=self._on_export_glossary,
+            style_name="Secondary",
             font=(FONT_FAMILY, 10),
-            bg="#1f2a48", fg="#fff", relief="flat", padx=10, pady=4, cursor="hand2",
+            bg="#1f2a48", fg="#fff", padx=10, pady=4,
         )
         self.btn_g_export.pack(side="left", padx=(8, 0))
 
-        self.btn_g_template = tk.Button(
+        self.btn_g_template = self.app._create_button(
             bar, text=self._t("tw_btn_export_template"), command=self._on_export_template,
+            style_name="Secondary",
             font=(FONT_FAMILY, 10),
-            bg="#1f2a48", fg="#fff", relief="flat", padx=10, pady=4, cursor="hand2",
+            bg="#1f2a48", fg="#fff", padx=10, pady=4,
         )
         self.btn_g_template.pack(side="left", padx=(8, 0))
 
@@ -1658,10 +1667,12 @@ class _TranzorTerminologyDialog(tk.Toplevel):
             ("tw_tt_select_none",    lambda: self._set_all(False)),
             ("tw_tt_select_visible", self._select_visible),
         ):
-            tk.Button(frow, text=tab._t(txt_key), command=cmd,
-                      font=(FONT_FAMILY, 9),
-                      bg="#1f2a48", fg="#fff", relief="flat",
-                      padx=8, pady=2).pack(side="left", padx=(0, 4))
+            tab.app._create_button(
+                frow, text=tab._t(txt_key), command=cmd,
+                style_name="SecondaryTiny",
+                font=(FONT_FAMILY, 9),
+                bg="#1f2a48", fg="#fff", padx=8, pady=2,
+            ).pack(side="left", padx=(0, 4))
 
         self.lbl_selected = ttk.Label(frow, text="0 selected")
         self.lbl_selected.pack(side="right")
@@ -1696,15 +1707,18 @@ class _TranzorTerminologyDialog(tk.Toplevel):
         # ── Buttons ──
         btns = ttk.Frame(body)
         btns.pack(fill="x", pady=(12, 0))
-        tk.Button(btns, text=tab._t("tw_export_btn_cancel"),
-                  command=self._cancel,
-                  bg="#1f2a48", fg="#fff", relief="flat", padx=10, pady=4
-                  ).pack(side="right")
-        self.btn_run = tk.Button(
+        tab.app._create_button(
+            btns, text=tab._t("tw_export_btn_cancel"),
+            command=self._cancel,
+            style_name="Secondary",
+            bg="#1f2a48", fg="#fff", padx=10, pady=4,
+        ).pack(side="right")
+        self.btn_run = tab.app._create_button(
             btns, text=tab._t("tw_tt_run", n=0),
             command=self._ok,
+            style_name="Accent",
             bg=getattr(tab.app, "ACCENT_BTN", "#e94560"), fg="#fff",
-            relief="flat", padx=12, pady=4, state="disabled",
+            padx=12, pady=4, state="disabled",
         )
         self.btn_run.pack(side="right", padx=(0, 8))
 
@@ -1923,11 +1937,11 @@ class _ScopeDialog(tk.Toplevel):
         ttk.Checkbutton(srow, text=tab._t("tw_src_scan"),
                         variable=self.v_scan).pack(side="left", padx=(8, 0))
 
-        self.btn_load = tk.Button(
+        self.btn_load = tab.app._create_button(
             srow, text=tab._t("tw_scope_load"), command=self._load_inventory,
+            style_name="Secondary",
             font=(FONT_FAMILY, 10),
-            bg="#1f2a48", fg="#fff", relief="flat", padx=10, pady=4,
-            cursor="hand2",
+            bg="#1f2a48", fg="#fff", padx=10, pady=4,
         )
         self.btn_load.pack(side="right")
 
@@ -1941,14 +1955,18 @@ class _ScopeDialog(tk.Toplevel):
                  font=(FONT_FAMILY, 10),
                  bg="#0a0a1a", fg="#fff", insertbackground="#fff", relief="flat"
                  ).pack(side="left", padx=(4, 8), ipady=2)
-        tk.Button(frow, text=tab._t("tw_scope_select_all"),
-                  command=lambda: self._set_all(True),
-                  font=(FONT_FAMILY, 9), bg="#1f2a48", fg="#fff",
-                  relief="flat", padx=8, pady=2).pack(side="left", padx=(0, 4))
-        tk.Button(frow, text=tab._t("tw_scope_select_none"),
-                  command=lambda: self._set_all(False),
-                  font=(FONT_FAMILY, 9), bg="#1f2a48", fg="#fff",
-                  relief="flat", padx=8, pady=2).pack(side="left")
+        tab.app._create_button(
+            frow, text=tab._t("tw_scope_select_all"),
+            command=lambda: self._set_all(True),
+            style_name="SecondaryTiny",
+            font=(FONT_FAMILY, 9), bg="#1f2a48", fg="#fff", padx=8, pady=2,
+        ).pack(side="left", padx=(0, 4))
+        tab.app._create_button(
+            frow, text=tab._t("tw_scope_select_none"),
+            command=lambda: self._set_all(False),
+            style_name="SecondaryTiny",
+            font=(FONT_FAMILY, 9), bg="#1f2a48", fg="#fff", padx=8, pady=2,
+        ).pack(side="left")
         self.lbl_status = ttk.Label(frow, text=tab._t("tw_scope_no_projects"))
         self.lbl_status.pack(side="right")
 
@@ -2009,14 +2027,18 @@ class _ScopeDialog(tk.Toplevel):
         # Buttons
         btns = ttk.Frame(body)
         btns.pack(fill="x", pady=(12, 0))
-        tk.Button(btns, text=tab._t("tw_export_btn_cancel"),
-                  command=self._cancel,
-                  bg="#1f2a48", fg="#fff", relief="flat", padx=10, pady=4
-                  ).pack(side="right")
-        tk.Button(btns, text=tab._t("tw_scope_btn_run"), command=self._ok,
-                  bg=getattr(tab.app, "ACCENT_BTN", "#e94560"), fg="#fff",
-                  relief="flat", padx=12, pady=4
-                  ).pack(side="right", padx=(0, 8))
+        tab.app._create_button(
+            btns, text=tab._t("tw_export_btn_cancel"),
+            command=self._cancel,
+            style_name="Secondary",
+            bg="#1f2a48", fg="#fff", padx=10, pady=4,
+        ).pack(side="right")
+        tab.app._create_button(
+            btns, text=tab._t("tw_scope_btn_run"), command=self._ok,
+            style_name="Accent",
+            bg=getattr(tab.app, "ACCENT_BTN", "#e94560"), fg="#fff",
+            padx=12, pady=4,
+        ).pack(side="right", padx=(0, 8))
 
         self.bind("<Escape>", lambda *_: self._cancel())
         self.grab_set()
@@ -2239,13 +2261,17 @@ class _ExportDialog(tk.Toplevel):
 
         btns = ttk.Frame(body)
         btns.pack(fill="x", pady=(14, 0))
-        tk.Button(btns, text=tab._t("tw_export_btn_cancel"), command=self._cancel,
-                  bg="#1f2a48", fg="#fff", relief="flat", padx=10, pady=4
-                  ).pack(side="right")
-        tk.Button(btns, text=tab._t("tw_export_btn_generate"), command=self._ok,
-                  bg=getattr(tab.app, "ACCENT_BTN", "#e94560"), fg="#fff",
-                  relief="flat", padx=12, pady=4
-                  ).pack(side="right", padx=(0, 8))
+        tab.app._create_button(
+            btns, text=tab._t("tw_export_btn_cancel"), command=self._cancel,
+            style_name="Secondary",
+            bg="#1f2a48", fg="#fff", padx=10, pady=4,
+        ).pack(side="right")
+        tab.app._create_button(
+            btns, text=tab._t("tw_export_btn_generate"), command=self._ok,
+            style_name="Accent",
+            bg=getattr(tab.app, "ACCENT_BTN", "#e94560"), fg="#fff",
+            padx=12, pady=4,
+        ).pack(side="right", padx=(0, 8))
 
         self.bind("<Escape>", lambda *_: self._cancel())
         self.grab_set()
@@ -2283,21 +2309,24 @@ class _ImportModeDialog(tk.Toplevel):
         btns = ttk.Frame(body)
         btns.pack(fill="x", pady=(14, 0))
 
-        tk.Button(
+        tab.app._create_button(
             btns, text=tab._t("tw_import_mode_cancel"),
             command=self._cancel,
-            bg="#1f2a48", fg="#fff", relief="flat", padx=10, pady=4,
+            style_name="Secondary",
+            bg="#1f2a48", fg="#fff", padx=10, pady=4,
         ).pack(side="right")
-        tk.Button(
+        tab.app._create_button(
             btns, text=tab._t("tw_import_mode_replace"),
             command=lambda: self._set("replace"),
-            bg="#1f2a48", fg="#fff", relief="flat", padx=10, pady=4,
+            style_name="Secondary",
+            bg="#1f2a48", fg="#fff", padx=10, pady=4,
         ).pack(side="right", padx=(0, 8))
-        tk.Button(
+        tab.app._create_button(
             btns, text=tab._t("tw_import_mode_merge"),
             command=lambda: self._set("merge"),
+            style_name="Accent",
             bg=getattr(tab.app, "ACCENT_BTN", "#e94560"), fg="#fff",
-            relief="flat", padx=12, pady=4,
+            padx=12, pady=4,
         ).pack(side="right", padx=(0, 8))
 
         self.bind("<Escape>", lambda *_: self._cancel())
@@ -2356,33 +2385,33 @@ class _QuickCheckDialog(tk.Toplevel):
 
         # Pack right-to-left so the visual order reads:
         # Paste from clipboard | Reorg | Clear
-        self.btn_clear_pairs = tk.Button(
+        self.btn_clear_pairs = tab.app._create_button(
             title_row, text=tab._t("tw_qc_clear"),
             command=self._clear_pairs,
+            style_name="SecondarySmall",
             font=(FONT_FAMILY, 9),
-            bg="#1f2a48", fg="#fff", activebackground="#2a3a5e",
-            activeforeground="#fff", relief="flat",
-            padx=10, pady=2, cursor="hand2",
+            bg="#1f2a48", activebackground="#2a3a5e",
+            fg="#fff", activeforeground="#fff", padx=10, pady=2,
         )
         self.btn_clear_pairs.pack(side="right")
 
-        self.btn_reorg = tk.Button(
+        self.btn_reorg = tab.app._create_button(
             title_row, text=tab._t("tw_qc_reorg"),
             command=self._reorg_paste,
+            style_name="SecondarySmall",
             font=(FONT_FAMILY, 9),
-            bg="#1f2a48", fg="#fff", activebackground="#2a3a5e",
-            activeforeground="#fff", relief="flat",
-            padx=10, pady=2, cursor="hand2",
+            bg="#1f2a48", activebackground="#2a3a5e",
+            fg="#fff", activeforeground="#fff", padx=10, pady=2,
         )
         self.btn_reorg.pack(side="right", padx=(0, 6))
 
-        self.btn_paste_clip = tk.Button(
+        self.btn_paste_clip = tab.app._create_button(
             title_row, text=tab._t("tw_qc_paste_clipboard"),
             command=self._paste_clipboard,
+            style_name="SecondarySmall",
             font=(FONT_FAMILY, 9),
-            bg="#1f2a48", fg="#fff", activebackground="#2a3a5e",
-            activeforeground="#fff", relief="flat",
-            padx=10, pady=2, cursor="hand2",
+            bg="#1f2a48", activebackground="#2a3a5e",
+            fg="#fff", activeforeground="#fff", padx=10, pady=2,
         )
         self.btn_paste_clip.pack(side="right", padx=(0, 6))
 
@@ -2415,14 +2444,18 @@ class _QuickCheckDialog(tk.Toplevel):
         # Buttons
         btns = ttk.Frame(body)
         btns.pack(fill="x", pady=(12, 0))
-        tk.Button(btns, text=tab._t("tw_export_btn_cancel"),
-                  command=self._cancel,
-                  bg="#1f2a48", fg="#fff", relief="flat", padx=10, pady=4
-                  ).pack(side="right")
-        tk.Button(btns, text=tab._t("tw_qc_run"), command=self._ok,
-                  bg=getattr(tab.app, "ACCENT_BTN", "#e94560"), fg="#fff",
-                  relief="flat", padx=12, pady=4
-                  ).pack(side="right", padx=(0, 8))
+        tab.app._create_button(
+            btns, text=tab._t("tw_export_btn_cancel"),
+            command=self._cancel,
+            style_name="Secondary",
+            bg="#1f2a48", fg="#fff", padx=10, pady=4,
+        ).pack(side="right")
+        tab.app._create_button(
+            btns, text=tab._t("tw_qc_run"), command=self._ok,
+            style_name="Accent",
+            bg=getattr(tab.app, "ACCENT_BTN", "#e94560"), fg="#fff",
+            padx=12, pady=4,
+        ).pack(side="right", padx=(0, 8))
 
         self.bind("<Escape>", lambda *_: self._cancel())
         self.ent_term.focus_set()
