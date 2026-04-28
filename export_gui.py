@@ -79,6 +79,15 @@ except Exception as _st_e:  # pragma: no cover
 else:
     _st_import_error = None
 
+# Optional: Term Watchtower tab (terminology compliance — Phase 1)
+try:
+    import gui_tab_term_watchtower as _tw_tab_mod
+except Exception as _tw_e:  # pragma: no cover
+    _tw_tab_mod = None
+    _tw_import_error = _tw_e
+else:
+    _tw_import_error = None
+
 # ---------------------------------------------------------------------------
 # Tranzor API config (reuse from export_changes)
 # ---------------------------------------------------------------------------
@@ -358,6 +367,14 @@ if _hr_tab_mod is not None:
 if _st_tab_mod is not None:
     try:
         for _lang_code, _extra in _st_tab_mod.STRINGS.items():
+            STRINGS.setdefault(_lang_code, {}).update(_extra)
+    except Exception:
+        pass
+
+# Merge in strings from the optional Term Watchtower tab (non-destructive).
+if _tw_tab_mod is not None:
+    try:
+        for _lang_code, _extra in _tw_tab_mod.STRINGS.items():
             STRINGS.setdefault(_lang_code, {}).update(_extra)
     except Exception:
         pass
@@ -804,6 +821,19 @@ class ExportApp:
                 print(f"[Scan Tasks tab] init failed: {_e}")
                 self.st_tab = None
 
+        # --- Tab 7: Term Watchtower (optional, pure additive) ---
+        self.tw_tab = None
+        self._tw_tab_index = None
+        if _tw_tab_mod is not None:
+            try:
+                tab_tw = ttk.Frame(self.notebook, style="App.TFrame")
+                self.notebook.add(tab_tw, text="")
+                self.tw_tab = _tw_tab_mod.TermWatchtowerTab(tab_tw, self)
+                self._tw_tab_index = self.notebook.index(tab_tw)
+            except Exception as _e:
+                print(f"[Term Watchtower tab] init failed: {_e}")
+                self.tw_tab = None
+
         # ═══════════════════════════════════════════
         # TAB 1 CONTENTS (File Translation — preserved)
         # ═══════════════════════════════════════════
@@ -1101,6 +1131,12 @@ class ExportApp:
             try:
                 self.notebook.tab(self._st_tab_index, text=self._t("tab_scan_tasks"))
                 self.st_tab.refresh_text()
+            except Exception:
+                pass
+        if self.tw_tab is not None and self._tw_tab_index is not None:
+            try:
+                self.notebook.tab(self._tw_tab_index, text=self._t("tab_term_watchtower"))
+                self.tw_tab.refresh_text()
             except Exception:
                 pass
 

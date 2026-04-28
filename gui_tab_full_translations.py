@@ -75,6 +75,7 @@ STRINGS = {
         "ft_err_module":          "export_full_translations module failed to load.",
         "ft_select_all":          "Select All",
         "ft_clear_all":           "Clear",
+        "ft_invert_selection":    "Invert",
         "ft_keys_pending":        "…",
         "ft_filter_label":        "Filter:",
         "ft_filter_hint":         "Type to filter products",
@@ -143,6 +144,7 @@ STRINGS = {
         "ft_err_module":          "export_full_translations 模块加载失败。",
         "ft_select_all":          "全选",
         "ft_clear_all":           "清空",
+        "ft_invert_selection":    "反选",
         "ft_keys_pending":        "…",
         "ft_filter_label":        "过滤：",
         "ft_filter_hint":         "输入关键字过滤产品",
@@ -709,6 +711,11 @@ class FullTranslationsTab:
             command=lambda: self._check_all(self.prod_tree, False),
             style_name="SecondaryTiny", padx=10, pady=2)
         self.btn_prod_clear.pack(side="left", padx=(6, 0))
+        self.btn_prod_invert = self.app._create_button(
+            prod_btns, text=self._t("ft_invert_selection"),
+            command=lambda: self._invert_check(self.prod_tree),
+            style_name="SecondaryTiny", padx=10, pady=2)
+        self.btn_prod_invert.pack(side="left", padx=(6, 0))
 
         # Locales (Treeview with checkbox column)
         self.lbl_loc = ttk.Label(right, text=self._t("ft_locales"),
@@ -747,6 +754,11 @@ class FullTranslationsTab:
             command=lambda: self._check_all(self.loc_tree, False),
             style_name="SecondaryTiny", padx=10, pady=2)
         self.btn_loc_clear.pack(side="left", padx=(6, 0))
+        self.btn_loc_invert = self.app._create_button(
+            loc_btns, text=self._t("ft_invert_selection"),
+            command=lambda: self._invert_check(self.loc_tree),
+            style_name="SecondaryTiny", padx=10, pady=2)
+        self.btn_loc_invert.pack(side="left", padx=(6, 0))
 
         # Status bar
         self.lbl_status = ttk.Label(
@@ -793,8 +805,10 @@ class FullTranslationsTab:
                 self.btn_merge_json.configure(text=self._t("ft_merge_json"))
                 self.btn_prod_all.configure(text=self._t("ft_select_all"))
                 self.btn_prod_clear.configure(text=self._t("ft_clear_all"))
+                self.btn_prod_invert.configure(text=self._t("ft_invert_selection"))
                 self.btn_loc_all.configure(text=self._t("ft_select_all"))
                 self.btn_loc_clear.configure(text=self._t("ft_clear_all"))
+                self.btn_loc_invert.configure(text=self._t("ft_invert_selection"))
             except Exception:
                 pass
         except Exception:
@@ -830,6 +844,16 @@ class FullTranslationsTab:
     def _check_all(self, tree: ttk.Treeview, on: bool = True) -> None:
         for iid in tree.get_children():
             self._set_check(tree, iid, on)
+
+    def _invert_check(self, tree: ttk.Treeview) -> None:
+        """Flip every checkbox in the tree. Useful when the user has
+        narrowed selection one way and now wants the complement set."""
+        for iid in tree.get_children():
+            vals = list(tree.item(iid, "values"))
+            if not vals:
+                continue
+            vals[0] = CHECK_OFF if vals[0] == CHECK_ON else CHECK_ON
+            tree.item(iid, values=vals)
 
     def _checked_iids(self, tree: ttk.Treeview) -> list:
         out = []
