@@ -24,6 +24,24 @@ jobs:
         run: |
           pyinstaller TranzorExporter_mac.spec --clean
 
+      - name: Ad-hoc codesign the .app bundle
+        # The bundle is built unsigned (spec has codesign_identity=None and no
+        # Apple Developer ID is available in this repo). On macOS 15 Sequoia,
+        # an unsigned + quarantined .app produces a Gatekeeper dialog with no
+        # inline "Open Anyway" button. An ad-hoc signature does NOT satisfy
+        # notarization, but it gives the universal2 bundle an internally
+        # consistent signature so users can reliably bypass via
+        # `xattr -dr com.apple.quarantine` or System Settings → Privacy &
+        # Security → Open Anyway, and avoids the secondary "app is damaged"
+        # failure mode. Long-term proper fix: enroll in Apple Developer
+        # Program, store DEVELOPER_ID_APPLICATION cert + notarytool credentials
+        # as repo secrets, and replace this with a real signature +
+        # `xcrun notarytool submit --wait` + `xcrun stapler staple`.
+        run: |
+          codesign --force --deep --sign - dist/TranzorExporter.app
+          codesign --verify --deep --strict --verbose=2 dist/TranzorExporter.app
+          codesign -dv --verbose=4 dist/TranzorExporter.app || true
+
       - name: Package .app with ditto (preserves the .app bundle wrapper)
         # Why this step exists: actions/upload-artifact@v4 strips the top-level
         # directory when uploading a folder path, which on macOS means the
