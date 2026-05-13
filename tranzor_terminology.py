@@ -40,16 +40,18 @@ import terminology_watchtower as tw
 
 TRANZOR_URL = "http://tranzor-platform.int.rclabenv.com"
 TERMINOLOGY_API = f"{TRANZOR_URL}/context/api/v1/terminology"
-TERMINOLOGY_WEB = f"{TRANZOR_URL}/context/terminology"
+TERMINOLOGY_WEB = f"{TRANZOR_URL}/static/terminology"
 
 
-def terminology_detail_url(numeric_id: int) -> str:
-    """Browser URL for a single term's detail page on Tranzor Platform.
+def terminology_app_url() -> str:
+    """Browser URL for the Tranzor Platform terminology SPA entry.
 
-    Mirrors the API path under ``/context/`` minus the ``api/v1`` segment,
-    which is the same convention used by the platform's SPA router.
+    The SPA renders per-term details inside a modal and does not expose
+    a deep link per id, so callers that need to show a single term
+    should fetch :func:`fetch_terminology_detail` and render the data
+    in-app instead of opening a browser tab here.
     """
-    return f"{TERMINOLOGY_WEB}/{int(numeric_id)}"
+    return TERMINOLOGY_WEB
 
 PAGE_SIZE_MAX = 200  # server caps anything higher at 200
 DEFAULT_TIMEOUT = 30

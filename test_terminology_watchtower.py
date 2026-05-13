@@ -864,15 +864,18 @@ class TranzorTerminologyClientTests(unittest.TestCase):
         self.assertEqual(len(rules), 2)
         self.assertEqual({r.source_term for r in rules}, {"A", "B"})
 
-    def test_terminology_detail_url(self):
+    def test_terminology_app_url(self):
         import tranzor_terminology as tz
-        url = tz.terminology_detail_url(8858)
+        url = tz.terminology_app_url()
         self.assertTrue(url.startswith(tz.TRANZOR_URL))
-        self.assertTrue(url.endswith("/terminology/8858"))
+        # SPA entry — the static asset path, NOT the API. Past mistake
+        # was returning /context/terminology/{id} which 404s because
+        # that's the backend API namespace.
+        self.assertTrue(url.endswith("/static/terminology"))
         self.assertNotIn("/api/", url)
-        # Coerces to int (defends against accidentally passing a str)
-        self.assertEqual(tz.terminology_detail_url("42"),
-                         tz.terminology_detail_url(42))
+        self.assertFalse(hasattr(tz, "terminology_detail_url"),
+                         "stale per-id URL builder must be removed — "
+                         "SPA has no deep links per term")
 
 
 if __name__ == "__main__":
