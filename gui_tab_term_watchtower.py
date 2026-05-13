@@ -145,8 +145,30 @@ STRINGS = {
         "tw_tt_error":               "Failed to load terminology: {err}",
         "tw_tt_unavailable":         "Tranzor Terminology client not available.",
         "tw_tt_skipped_dnt":         "Skipped {n} DNT term(s).",
-        "tw_tt_double_click_hint":   "Tip: double-click a term to open its definition page on Tranzor Platform.",
-        "tw_tt_open_failed":         "Failed to open term page: {err}",
+        "tw_tt_double_click_hint":   "Tip: double-click a term to view its definition, pulled live from Tranzor Platform.",
+        # ── Term Definition dialog (opened by double-click) ──
+        "tw_td_title":               "Term Definition — {name}",
+        "tw_td_loading":             "Loading definition…",
+        "tw_td_error":               "Failed to load: {err}",
+        "tw_td_empty":               "No details available.",
+        "tw_td_dnt_yes":             "DNT: Yes",
+        "tw_td_dnt_no":              "DNT: No",
+        "tw_td_definition":          "Definition",
+        "tw_td_context":             "Context",
+        "tw_td_part_of_speech":      "Part of speech",
+        "tw_td_reference":           "Reference",
+        "tw_td_remarks":             "Remarks",
+        "tw_td_notes":               "Notes",
+        "tw_td_translations":        "Translations",
+        "tw_td_variants":            "Variants",
+        "tw_td_col_lang":            "Language",
+        "tw_td_col_text":            "Text",
+        "tw_td_col_remarks":         "Remarks",
+        "tw_td_col_type":            "Type",
+        "tw_td_col_name":            "Name",
+        "tw_td_open_browser":        "Open Terminology Page",
+        "tw_td_open_failed":         "Failed to open page: {err}",
+        "tw_td_close":               "Close",
         "tw_qc_run":                 "Run Quick Scan…",
         "tw_qc_no_pairs":            "Provide at least one (locale, approved translation) pair.",
         "tw_qc_running":             "Quick Check on '{term}' ({n} locales)…",
@@ -296,8 +318,30 @@ STRINGS = {
         "tw_tt_error":               "加载术语库失败：{err}",
         "tw_tt_unavailable":         "Tranzor 术语库客户端不可用。",
         "tw_tt_skipped_dnt":         "已跳过 {n} 个 DNT 术语。",
-        "tw_tt_double_click_hint":   "提示：双击术语条目可在浏览器中打开其在 Tranzor 平台上的术语定义页。",
-        "tw_tt_open_failed":         "打开术语页失败：{err}",
+        "tw_tt_double_click_hint":   "提示：双击术语条目可查看从 Tranzor 平台实时拉取的术语定义详情。",
+        # ── 术语定义弹窗（双击触发） ──
+        "tw_td_title":               "术语定义 — {name}",
+        "tw_td_loading":             "正在加载术语定义…",
+        "tw_td_error":               "加载失败：{err}",
+        "tw_td_empty":               "暂无详情数据。",
+        "tw_td_dnt_yes":             "DNT：是",
+        "tw_td_dnt_no":              "DNT：否",
+        "tw_td_definition":          "定义",
+        "tw_td_context":             "上下文",
+        "tw_td_part_of_speech":      "词性",
+        "tw_td_reference":           "参考",
+        "tw_td_remarks":             "备注",
+        "tw_td_notes":               "说明",
+        "tw_td_translations":        "译法",
+        "tw_td_variants":            "变体",
+        "tw_td_col_lang":            "语种",
+        "tw_td_col_text":            "译法",
+        "tw_td_col_remarks":         "备注",
+        "tw_td_col_type":            "类型",
+        "tw_td_col_name":            "名称",
+        "tw_td_open_browser":        "打开术语主页",
+        "tw_td_open_failed":         "打开页面失败：{err}",
+        "tw_td_close":               "关闭",
         "tw_qc_run":                 "运行快速扫描…",
         "tw_qc_no_pairs":            "至少提供一对（locale, 已批准译法）。",
         "tw_qc_running":             "Quick Check「{term}」（{n} 个语种）…",
@@ -1962,11 +2006,11 @@ class _TranzorTerminologyDialog(tk.Toplevel):
         self._update_run_btn()
 
     def _on_tree_double_click(self, event):
-        """Open the term's detail page on Tranzor Platform in the browser.
+        """Show the term's live definition pulled from Tranzor Platform.
 
-        Double-click anywhere on the row except the check column (whose
-        single-click already toggles selection — a double-click there
-        would just be a redundant toggle).
+        Double-click on any row column EXCEPT the check column, which
+        single-click already handles. The platform SPA has no per-term
+        deep link, so we render the API detail in a child dialog.
         """
         region = self.tree.identify("region", event.x, event.y)
         col = self.tree.identify_column(event.x)
@@ -1979,13 +2023,13 @@ class _TranzorTerminologyDialog(tk.Toplevel):
             tid = int(iid[1:])
         except ValueError:
             return
-        url = tz_term.terminology_detail_url(tid)
         try:
-            webbrowser.open(url)
-        except Exception as e:
-            messagebox.showerror(self.tab._t("tw_btn_tranzor_term"),
-                                 self.tab._t("tw_tt_open_failed", err=str(e)),
-                                 parent=self)
+            vals = self.tree.item(iid, "values")
+        except Exception:
+            vals = ()
+        preview_name = vals[1] if len(vals) > 1 else ""
+        preview_scope = vals[2] if len(vals) > 2 else ""
+        _TermDetailDialog(self, self.tab, tid, preview_name, preview_scope)
 
     def _set_all(self, on: bool):
         for iid in self._iid_by_id.values():
@@ -2068,6 +2112,201 @@ class _TranzorTerminologyDialog(tk.Toplevel):
     def _cancel(self):
         self.result = None
         self.destroy()
+
+
+class _TermDetailDialog(tk.Toplevel):
+    """Read-only window showing one term's full definition, fetched live
+    from Tranzor Platform.
+
+    The platform SPA renders term details inside a modal and does not
+    expose a deep link per id, so opening a browser tab from
+    ``tw_btn_tranzor_term``'s picker would land on a 404. Instead, this
+    dialog replicates the relevant fields of the "View Term" modal
+    in-app using :func:`tranzor_terminology.fetch_terminology_detail`.
+    """
+
+    def __init__(self, parent, tab: TermWatchtowerTab, term_id: int,
+                 preview_name: str = "", preview_scope: str = ""):
+        super().__init__(parent)
+        self.tab = tab
+        self.term_id = int(term_id)
+        self.title(tab._t("tw_td_title", name=preview_name or f"#{term_id}"))
+        self.transient(parent)
+        self.resizable(True, True)
+        self.geometry("720x640")
+
+        body = ttk.Frame(self)
+        body.pack(padx=14, pady=12, fill="both", expand=True)
+
+        head = ttk.Frame(body)
+        head.pack(fill="x")
+        self.lbl_name = ttk.Label(
+            head, text=preview_name or "…",
+            font=(FONT_FAMILY, 14, "bold"),
+        )
+        self.lbl_name.pack(side="left", anchor="w")
+        self.lbl_scope = ttk.Label(
+            head, text=preview_scope or "",
+            foreground="#7a7a8a",
+        )
+        self.lbl_scope.pack(side="right", anchor="e")
+
+        self.lbl_meta = ttk.Label(
+            body, text=tab._t("tw_td_loading"),
+            foreground="#7a7a8a",
+        )
+        self.lbl_meta.pack(fill="x", anchor="w", pady=(2, 8))
+
+        canvas_wrap = ttk.Frame(body)
+        canvas_wrap.pack(fill="both", expand=True)
+        self._canvas = tk.Canvas(canvas_wrap, highlightthickness=0,
+                                 bg=self.cget("background"))
+        sbar = ttk.Scrollbar(canvas_wrap, orient="vertical",
+                             command=self._canvas.yview)
+        self.content = ttk.Frame(self._canvas)
+        self._content_window = self._canvas.create_window(
+            (0, 0), window=self.content, anchor="nw")
+        self.content.bind(
+            "<Configure>",
+            lambda e: self._canvas.configure(
+                scrollregion=self._canvas.bbox("all")),
+        )
+        self._canvas.bind(
+            "<Configure>",
+            lambda e: self._canvas.itemconfigure(
+                self._content_window, width=e.width),
+        )
+        self._canvas.configure(yscrollcommand=sbar.set)
+        self._canvas.pack(side="left", fill="both", expand=True)
+        sbar.pack(side="right", fill="y")
+
+        btns = ttk.Frame(self)
+        btns.pack(fill="x", padx=14, pady=(0, 12))
+        tab.app._create_button(
+            btns, text=tab._t("tw_td_open_browser"),
+            command=self._open_in_browser,
+            style_name="Secondary",
+            bg="#1f2a48", fg="#fff", padx=10, pady=4,
+        ).pack(side="left")
+        tab.app._create_button(
+            btns, text=tab._t("tw_td_close"),
+            command=self.destroy,
+            style_name="Secondary",
+            bg="#1f2a48", fg="#fff", padx=10, pady=4,
+        ).pack(side="right")
+
+        self.bind("<Escape>", lambda *_: self.destroy())
+        threading.Thread(target=self._worker, daemon=True).start()
+
+    # ---- detail fetch -----------------------------------------------------
+    def _worker(self):
+        try:
+            detail = tz_term.fetch_terminology_detail(self.term_id)
+            self.after(0, self._render, detail, None)
+        except Exception as e:
+            self.after(0, self._render, None, str(e))
+
+    # ---- rendering --------------------------------------------------------
+    def _render(self, detail, err):
+        for w in self.content.winfo_children():
+            w.destroy()
+        if err is not None:
+            self.lbl_meta.configure(
+                text=self.tab._t("tw_td_error", err=err))
+            return
+        if not detail:
+            self.lbl_meta.configure(text=self.tab._t("tw_td_empty"))
+            return
+
+        name = (detail.get("name") or "").strip() \
+            or self.lbl_name.cget("text")
+        scope = (detail.get("scope") or "").strip()
+        code = (detail.get("code") or "").strip()
+        dnt = bool(detail.get("dnt"))
+        self.lbl_name.configure(text=name)
+        if scope:
+            self.lbl_scope.configure(text=scope)
+        self.title(self.tab._t("tw_td_title", name=name))
+
+        meta_parts = [f"ID: {self.term_id}"]
+        if code:
+            meta_parts.append(f"Code: {code}")
+        meta_parts.append(self.tab._t("tw_td_dnt_yes")
+                          if dnt else self.tab._t("tw_td_dnt_no"))
+        self.lbl_meta.configure(text="  ·  ".join(meta_parts))
+
+        def _field(label_key, value):
+            value = (value or "").strip() if isinstance(value, str) else value
+            if not value:
+                return
+            ttk.Label(self.content,
+                      text=self.tab._t(label_key) + ":",
+                      font=(FONT_FAMILY, 10, "bold")
+                      ).pack(anchor="w", pady=(8, 0))
+            ttk.Label(self.content, text=str(value),
+                      wraplength=640, justify="left"
+                      ).pack(anchor="w", fill="x")
+
+        _field("tw_td_definition", detail.get("definition"))
+        _field("tw_td_context", detail.get("context"))
+        _field("tw_td_part_of_speech", detail.get("part_of_speech"))
+        _field("tw_td_reference", detail.get("reference"))
+        _field("tw_td_remarks", detail.get("remarks"))
+        _field("tw_td_notes", detail.get("notes"))
+
+        translations = detail.get("translations") or []
+        if translations:
+            ttk.Label(self.content,
+                      text=self.tab._t("tw_td_translations"),
+                      font=(FONT_FAMILY, 10, "bold")
+                      ).pack(anchor="w", pady=(12, 4))
+            tr_cols = ("lang", "text", "remarks")
+            tr = ttk.Treeview(self.content, columns=tr_cols,
+                              show="headings",
+                              height=min(len(translations) + 1, 10))
+            tr.heading("lang", text=self.tab._t("tw_td_col_lang"))
+            tr.heading("text", text=self.tab._t("tw_td_col_text"))
+            tr.heading("remarks", text=self.tab._t("tw_td_col_remarks"))
+            tr.column("lang", width=80, anchor="w", stretch=False)
+            tr.column("text", width=320, anchor="w", stretch=True)
+            tr.column("remarks", width=180, anchor="w", stretch=False)
+            tr.pack(fill="x")
+            for t in translations:
+                tr.insert("", "end", values=(
+                    t.get("language_code") or "",
+                    t.get("translated_name") or "",
+                    t.get("remarks") or "",
+                ))
+
+        variants = detail.get("variants") or []
+        if variants:
+            ttk.Label(self.content,
+                      text=self.tab._t("tw_td_variants"),
+                      font=(FONT_FAMILY, 10, "bold")
+                      ).pack(anchor="w", pady=(12, 4))
+            v_cols = ("type", "name")
+            tv = ttk.Treeview(self.content, columns=v_cols,
+                              show="headings",
+                              height=min(len(variants) + 1, 6))
+            tv.heading("type", text=self.tab._t("tw_td_col_type"))
+            tv.heading("name", text=self.tab._t("tw_td_col_name"))
+            tv.column("type", width=120, anchor="w", stretch=False)
+            tv.column("name", width=320, anchor="w", stretch=True)
+            tv.pack(fill="x")
+            for v in variants:
+                tv.insert("", "end", values=(
+                    v.get("type") or "",
+                    v.get("name") or "",
+                ))
+
+    def _open_in_browser(self):
+        try:
+            webbrowser.open(tz_term.terminology_app_url())
+        except Exception as e:
+            messagebox.showerror(self.tab._t("tw_btn_tranzor_term"),
+                                 self.tab._t("tw_td_open_failed",
+                                              err=str(e)),
+                                 parent=self)
 
 
 class _ScopeDialog(tk.Toplevel):
