@@ -1,0 +1,61 @@
+name: Build Windows EXE
+
+on:
+  workflow_dispatch:  # 手动触发 — 在 GitHub Actions 页面点击 Run workflow
+  push:
+    branches: [master]
+    # 只有核心源文件 / 构建脚本变动才触发 — 避免文档改动浪费 runner 分钟数。
+    paths:
+      - 'TranzorExporter.spec'
+      - 'export_gui.py'
+      - 'export_changes.py'
+      - 'export_translations.py'
+      - 'export_full_translations.py'
+      - 'export_mr_pipeline.py'
+      - 'quality_overview.py'
+      - 'gui_tabs.py'
+      - 'gui_tab_full_translations.py'
+      - 'gui_tab_human_revisions.py'
+      - 'gui_tab_scan_tasks.py'
+      - 'gui_tab_term_watchtower.py'
+      - 'terminology_watchtower.py'
+      - 'tranzor_terminology.py'
+      - 'gitlab_client.py'
+      - 'pyi_rth_tkinter_fix.py'
+      - 'pyinstaller_hooks/**'
+      - '.github/workflows/build-windows.yml'
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install requests openpyxl pyinstaller
+
+      - name: Build EXE with PyInstaller
+        run: |
+          pyinstaller TranzorExporter.spec --clean
+
+      - name: Verify EXE exists
+        shell: pwsh
+        run: |
+          $exe = Get-Item "dist\TranzorExporter.exe" -ErrorAction Stop
+          $sizeMB = [math]::Round($exe.Length / 1MB, 2)
+          Write-Host "Built EXE: $($exe.FullName) ($sizeMB MB)"
+
+      - name: Upload TranzorExporter EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: TranzorExporter-Windows
+          path: dist/TranzorExporter.exe
+          retention-days: 90
