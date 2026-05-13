@@ -88,6 +88,16 @@ except Exception as _tw_e:  # pragma: no cover
 else:
     _tw_import_error = None
 
+# Optional: TM & Context Insight tab (visualizes Tranzor's TM / Context Service
+# black boxes so non-technical language experts can monitor pipeline routing).
+try:
+    import gui_tab_tm_context_insight as _tci_tab_mod
+except Exception as _tci_e:  # pragma: no cover
+    _tci_tab_mod = None
+    _tci_import_error = _tci_e
+else:
+    _tci_import_error = None
+
 # ---------------------------------------------------------------------------
 # Tranzor API config (reuse from export_changes)
 # ---------------------------------------------------------------------------
@@ -375,6 +385,14 @@ if _st_tab_mod is not None:
 if _tw_tab_mod is not None:
     try:
         for _lang_code, _extra in _tw_tab_mod.STRINGS.items():
+            STRINGS.setdefault(_lang_code, {}).update(_extra)
+    except Exception:
+        pass
+
+# Merge in strings from the optional TM & Context Insight tab.
+if _tci_tab_mod is not None:
+    try:
+        for _lang_code, _extra in _tci_tab_mod.STRINGS.items():
             STRINGS.setdefault(_lang_code, {}).update(_extra)
     except Exception:
         pass
@@ -834,6 +852,21 @@ class ExportApp:
                 print(f"[Term Watchtower tab] init failed: {_e}")
                 self.tw_tab = None
 
+        # --- Tab 8: TM & Context Insight (optional, pure additive) ---
+        # 可视化 Tranzor TM / Context Service 黑盒，让语言专家直观看到管线路由。
+        self.tci_tab = None
+        self._tci_tab_initialized = False
+        self._tci_tab_index = None
+        if _tci_tab_mod is not None:
+            try:
+                tab_tci = ttk.Frame(self.notebook, style="App.TFrame")
+                self.notebook.add(tab_tci, text="")
+                self.tci_tab = _tci_tab_mod.TmContextInsightTab(tab_tci, self)
+                self._tci_tab_index = self.notebook.index(tab_tci)
+            except Exception as _e:
+                print(f"[TM & Context Insight tab] init failed: {_e}")
+                self.tci_tab = None
+
         # ═══════════════════════════════════════════
         # TAB 1 CONTENTS (File Translation — preserved)
         # ═══════════════════════════════════════════
@@ -1139,6 +1172,12 @@ class ExportApp:
                 self.tw_tab.refresh_text()
             except Exception:
                 pass
+        if self.tci_tab is not None and self._tci_tab_index is not None:
+            try:
+                self.notebook.tab(self._tci_tab_index, text=self._t("tab_tm_context_insight"))
+                self.tci_tab.refresh_text()
+            except Exception:
+                pass
 
         # Summary panel texts
         self.lbl_summary_title.configure(text=self._t("summary_title"))
@@ -1332,6 +1371,15 @@ class ExportApp:
                 self._st_tab_initialized = True
                 try:
                     self.st_tab.on_first_show()
+                except Exception:
+                    pass
+            elif (self.tci_tab is not None
+                  and self._tci_tab_index is not None
+                  and tab_idx == self._tci_tab_index
+                  and not self._tci_tab_initialized):
+                self._tci_tab_initialized = True
+                try:
+                    self.tci_tab.on_first_show()
                 except Exception:
                     pass
 

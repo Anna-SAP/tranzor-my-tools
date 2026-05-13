@@ -1,0 +1,861 @@
+"""
+TM & Context Insight — GUI Tab
+==============================
+让非技术背景的语言专家直观看到 Tranzor Platform 内部的两个"黑盒"：
+
+1. **Translation Memory (TM)** —— 一条翻译是从 TM / ICE / 缓存 / LLM / 人工修订
+   哪个环节产生的？
+2. **Context Service** —— 翻译时有没有挂上下文？上下文拉取是否失败？
+
+数据完全由现有 Tranzor HTTP API 提供，不依赖任何后端改动：
+- 聚合 & 行级数据来源：GET /api/v1/dashboard/cases （MR Pipeline 范畴）
+- 上下文正文：GET /api/v1/context/record/{context_id}
+
+设计原则
+--------
+- v1 仅覆盖 MR Pipeline 范畴（dashboard/cases）。File Translation (Legacy) schema
+  略有差异（没有 tm_match 字段），后续再扩展。
+- 上半区聚合面板用 Unicode 块字符画条形图，零额外依赖。
+- 下半区表格双击行 → 抽屉显示上下文 JSON。
+"""
+from __future__ import annotations
+
+import os
+import sys
+import json
+import threading
+import tkinter as tk
+from tkinter import ttk
+from datetime import date, datetime, timedelta
+from collections import defaultdict
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import export_mr_pipeline as mr_api
+from export_gui import FONT_FAMILY, FONT_MONO, IS_MAC
+
+try:
+    import requests
+except ImportError:
+    requests = None
+
+
+# ============================================================
+# i18n
+# ============================================================
+STRINGS = {
+    "en": {
+        "tab_tm_context_insight":   "🔬 TM & Context Insight",
+        # filter bar
+        "tci_filter_project":       "Project",
+        "tci_filter_language":      "Language",
+        "tci_filter_date_start":    "From",
+        "tci_filter_date_end":      "To",
+        "tci_filter_refresh":       "🔍 Refresh",
+        "tci_filter_reset":         "Reset",
+        # aggregate panel
+        "tci_agg_title":            "Translation Source Composition (MR Pipeline)",
+        "tci_agg_subtitle":         "How each translation was produced — by target language",
+        "tci_agg_total":            "Total translations",
+        "tci_agg_no_data":          "No data in this range. Try widening the date range.",
+        "tci_ctx_title":            "Context Service Coverage",
+        "tci_ctx_subtitle":         "Did the LLM receive contextual evidence for the translation?",
+        # row table
+        "tci_row_title":            "Recent Translations — drill down",
+        "tci_row_hint":             "Double-click a row to view the context snippet (if any)",
+        "tci_col_idx":              "#",
+        "tci_col_project":          "Project",
+        "tci_col_mr":               "MR#",
+        "tci_col_lang":             "Language",
+        "tci_col_opus":             "String Key",
+        "tci_col_source":           "Source",
+        "tci_col_badges":           "Badges",
+        "tci_col_score":            "Score",
+        # badges
+        "tci_badge_tm":             "TM",
+        "tci_badge_ice":            "ICE",
+        "tci_badge_cached":         "Cached",
+        "tci_badge_llm":            "LLM",
+        "tci_badge_refined":        "Refined",
+        "tci_badge_human":          "Human",
+        "tci_badge_ctx_ok":         "Ctx✓",
+        "tci_badge_ctx_none":       "NoCtx",
+        # sidebar
+        "tci_sidebar_title":        "📈 Pipeline Routing",
+        "tci_stat_total":           "Total",
+        "tci_stat_tm":              "TM hits",
+        "tci_stat_ice":             "ICE hits",
+        "tci_stat_cached":          "Cached",
+        "tci_stat_llm":             "LLM (fresh)",
+        "tci_stat_refined":         "Refined (iter ≥ 2)",
+        "tci_stat_human":           "Human-fixed",
+        "tci_stat_ctx_ok":          "With context",
+        "tci_stat_ctx_none":        "No context",
+        # context drawer
+        "tci_drawer_title":         "Context Snippet",
+        "tci_drawer_no_id":         "This translation has no context_id — Context Service was not consulted.",
+        "tci_drawer_loading":       "Loading context from Tranzor…",
+        "tci_drawer_error":         "Failed to load context: {err}",
+        "tci_drawer_close":         "Close",
+        # status
+        "tci_status_ready":         "Ready",
+        "tci_status_loading":       "Loading",
+        "tci_status_done":          "✓ Loaded",
+        "tci_status_error":         "⚠ {err}",
+    },
+    "zh": {
+        "tab_tm_context_insight":   "🔬 TM 与上下文洞察",
+        # filter bar
+        "tci_filter_project":       "项目",
+        "tci_filter_language":      "语言",
+        "tci_filter_date_start":    "起",
+        "tci_filter_date_end":      "止",
+        "tci_filter_refresh":       "🔍 刷新",
+        "tci_filter_reset":         "重置",
+        # aggregate panel
+        "tci_agg_title":            "翻译来源构成（MR Pipeline）",
+        "tci_agg_subtitle":         "每条翻译是从哪条管线产生的 — 按目标语言分行",
+        "tci_agg_total":            "翻译总条数",
+        "tci_agg_no_data":          "此区间无数据，请放宽日期范围。",
+        "tci_ctx_title":            "Context Service 覆盖率",
+        "tci_ctx_subtitle":         "LLM 翻译时是否拿到了上下文证据？",
+        # row table
+        "tci_row_title":            "最近翻译 — 行级钻取",
+        "tci_row_hint":             "双击任意一行可查看该翻译当时使用的上下文片段",
+        "tci_col_idx":              "#",
+        "tci_col_project":          "项目",
+        "tci_col_mr":               "MR#",
+        "tci_col_lang":             "语言",
+        "tci_col_opus":             "String Key",
+        "tci_col_source":           "原文",
+        "tci_col_badges":           "来源徽章",
+        "tci_col_score":            "分数",
+        # badges
+        "tci_badge_tm":             "TM",
+        "tci_badge_ice":            "ICE",
+        "tci_badge_cached":         "缓存",
+        "tci_badge_llm":            "LLM",
+        "tci_badge_refined":        "精炼",
+        "tci_badge_human":          "人工",
+        "tci_badge_ctx_ok":         "有上下文",
+        "tci_badge_ctx_none":       "无上下文",
+        # sidebar
+        "tci_sidebar_title":        "📈 管线路由",
+        "tci_stat_total":           "总计",
+        "tci_stat_tm":              "TM 命中",
+        "tci_stat_ice":             "ICE 命中",
+        "tci_stat_cached":          "缓存复用",
+        "tci_stat_llm":             "LLM 新译",
+        "tci_stat_refined":         "精炼（迭代 ≥ 2）",
+        "tci_stat_human":           "人工修订",
+        "tci_stat_ctx_ok":          "携带上下文",
+        "tci_stat_ctx_none":        "无上下文",
+        # context drawer
+        "tci_drawer_title":         "上下文片段",
+        "tci_drawer_no_id":         "该翻译没有 context_id —— Context Service 未被调用。",
+        "tci_drawer_loading":       "正在从 Tranzor 拉取上下文…",
+        "tci_drawer_error":         "上下文加载失败：{err}",
+        "tci_drawer_close":         "关闭",
+        # status
+        "tci_status_ready":         "就绪",
+        "tci_status_loading":       "加载中",
+        "tci_status_done":          "✓ 已加载",
+        "tci_status_error":         "⚠ {err}",
+    },
+}
+
+
+# Context Service proxy endpoint
+CONTEXT_RECORD_URL = f"{mr_api.TRANZOR_URL}/api/v1/context/record"
+
+
+def _fetch_context_record(context_id: str, timeout: int = 15) -> dict:
+    """Fetch a single context record via Tranzor's existing proxy endpoint.
+
+    Returns the raw JSON dict, or raises on HTTP / network error.
+    """
+    if requests is None:
+        raise RuntimeError("requests package not available")
+    resp = requests.get(f"{CONTEXT_RECORD_URL}/{context_id}", timeout=timeout)
+    resp.raise_for_status()
+    return resp.json()
+
+
+# ============================================================
+# Bar drawing helpers (pure Unicode, no chart library)
+# ============================================================
+_BAR_BLOCK = "█"
+_BAR_LIGHT = "░"
+_BAR_WIDTH = 30  # cells
+
+
+def _stacked_bar(counts: list, total: int, width: int = _BAR_WIDTH) -> str:
+    """Render a stacked bar for ``counts`` (in order), normalized to ``total``.
+
+    Returns a string of ``width`` cells. Uses distinct shading per segment via
+    cycling block density characters.
+    """
+    if not total:
+        return _BAR_LIGHT * width
+    cells = []
+    remaining = width
+    for n in counts:
+        chunk = int(round(n / total * width))
+        chunk = min(chunk, remaining)
+        cells.append(_BAR_BLOCK * chunk)
+        remaining -= chunk
+    if remaining > 0:
+        cells.append(_BAR_LIGHT * remaining)
+    return "".join(cells)
+
+
+# ============================================================
+# Classifier — assign each case to a single "primary source"
+# ============================================================
+# Priority order matters: a TM-matched row that was later refined still came
+# from TM in the first place. We surface the *earliest* decisive label so the
+# language expert can see "would this have hit LLM if TM were missing?".
+def _classify_source(case: dict) -> str:
+    """Map one case dict to a single source bucket."""
+    if case.get("fixed_by_lead"):
+        return "human"
+    tt = (case.get("translation_type") or "").strip().lower()
+    if case.get("tm_match"):
+        return "tm"
+    if case.get("ice_match"):
+        return "ice"
+    if case.get("cached"):
+        return "cached"
+    if tt == "manual edit":
+        return "human"
+    if tt == "llm retranslate":
+        return "refined"
+    iteration = case.get("iteration") or 0
+    if iteration and iteration >= 2:
+        return "refined"
+    # default — plain first-pass LLM
+    return "llm"
+
+
+def _classify_context(case: dict) -> str:
+    """Map one case dict to a context bucket."""
+    if case.get("has_context_details"):
+        return "ctx_ok"
+    if case.get("context_id"):
+        # has an id but no detail — treat as partial / not useful
+        return "ctx_partial"
+    return "ctx_none"
+
+
+# ============================================================
+# Main tab
+# ============================================================
+class TmContextInsightTab:
+    """Builds and manages the TM & Context Insight tab content."""
+
+    SOURCE_KEYS = ("tm", "ice", "cached", "llm", "refined", "human")
+    CONTEXT_KEYS = ("ctx_ok", "ctx_partial", "ctx_none")
+
+    # Colors for badges — match the dashboard's visual language
+    BADGE_COLORS = {
+        "tm":      ("#1abc9c", "#0a0a1a"),
+        "ice":     ("#3498db", "#0a0a1a"),
+        "cached":  ("#9b59b6", "#0a0a1a"),
+        "llm":     ("#7f8c8d", "#fff"),
+        "refined": ("#e67e22", "#0a0a1a"),
+        "human":   ("#e94560", "#fff"),
+        "ctx_ok":  ("#2ecc71", "#0a0a1a"),
+        "ctx_partial": ("#f39c12", "#0a0a1a"),
+        "ctx_none": ("#34495e", "#fff"),
+    }
+
+    DEFAULT_PAGE_SIZE = 100  # MRs per fetch
+
+    def __init__(self, parent, app):
+        self.app = app
+        self.parent = parent
+        self.loading = False
+        self._loading_anim_id = None
+        self._loading_dot_count = 0
+        self._cases: list = []      # flat list of case dicts (with MR metadata)
+        self._build(parent)
+
+    def _t(self, key):
+        return self.app._t(key)
+
+    # ------------------------------------------------------------------
+    # Build UI
+    # ------------------------------------------------------------------
+    def _build(self, parent):
+        content = ttk.Frame(parent, style="App.TFrame")
+        content.pack(fill="both", expand=True, padx=16, pady=8)
+
+        left = ttk.Frame(content, style="App.TFrame")
+        left.pack(side="left", fill="both", expand=True)
+
+        right = ttk.Frame(content, style="App.TFrame", width=260)
+        right.pack(side="right", fill="y", padx=(12, 0))
+        right.pack_propagate(False)
+
+        # ── Filter bar ──
+        filt = ttk.Frame(left, style="Card.TFrame")
+        filt.pack(fill="x", pady=(0, 8))
+        filt.configure(borderwidth=1, relief="solid")
+        fi = ttk.Frame(filt, style="Card.TFrame")
+        fi.pack(fill="x", padx=12, pady=10)
+
+        # Row 1: project + language
+        r1 = ttk.Frame(fi, style="Card.TFrame")
+        r1.pack(fill="x", pady=(0, 6))
+
+        self.lbl_project = ttk.Label(r1, text="", style="Card.TLabel", width=8)
+        self.lbl_project.pack(side="left")
+        self.project_var = tk.StringVar()
+        self.ent_project = tk.Entry(r1, textvariable=self.project_var,
+                                    width=24, font=(FONT_FAMILY, 10),
+                                    bg="#0a0a1a", fg="#fff",
+                                    insertbackground="#fff", relief="flat")
+        self.ent_project.pack(side="left", padx=(4, 12), ipady=3)
+
+        self.lbl_lang = ttk.Label(r1, text="", style="Card.TLabel", width=8)
+        self.lbl_lang.pack(side="left")
+        self.lang_var = tk.StringVar()
+        self.ent_lang = tk.Entry(r1, textvariable=self.lang_var,
+                                 width=12, font=(FONT_FAMILY, 10),
+                                 bg="#0a0a1a", fg="#fff",
+                                 insertbackground="#fff", relief="flat")
+        self.ent_lang.pack(side="left", padx=(4, 12), ipady=3)
+
+        # Row 2: date range
+        r2 = ttk.Frame(fi, style="Card.TFrame")
+        r2.pack(fill="x", pady=(0, 6))
+        self.lbl_date_start = ttk.Label(r2, text="", style="Card.TLabel", width=8)
+        self.lbl_date_start.pack(side="left")
+        default_start = (date.today() - timedelta(days=30)).isoformat()
+        self.start_var = tk.StringVar(value=default_start)
+        self.ent_start = tk.Entry(r2, textvariable=self.start_var,
+                                  width=14, font=(FONT_FAMILY, 10),
+                                  bg="#0a0a1a", fg="#fff",
+                                  insertbackground="#fff", relief="flat")
+        self.ent_start.pack(side="left", padx=(4, 12), ipady=3)
+
+        self.lbl_date_end = ttk.Label(r2, text="", style="Card.TLabel", width=4)
+        self.lbl_date_end.pack(side="left")
+        self.end_var = tk.StringVar(value=date.today().isoformat())
+        self.ent_end = tk.Entry(r2, textvariable=self.end_var,
+                                width=14, font=(FONT_FAMILY, 10),
+                                bg="#0a0a1a", fg="#fff",
+                                insertbackground="#fff", relief="flat")
+        self.ent_end.pack(side="left", padx=(4, 12), ipady=3)
+
+        # Row 3: buttons
+        r3 = ttk.Frame(fi, style="Card.TFrame")
+        r3.pack(fill="x")
+        self.btn_refresh = self.app._create_button(
+            r3, text="", command=self._on_refresh,
+            style_name="AccentSmall",
+            font=(FONT_FAMILY, 10, "bold"),
+            bg="#e94560", fg="#fff", padx=14, pady=3)
+        self.btn_refresh.pack(side="left", padx=(0, 6))
+        self.btn_reset = self.app._create_button(
+            r3, text="", command=self._on_reset,
+            style_name="SecondarySmall",
+            font=(FONT_FAMILY, 10),
+            bg="#0f3460", fg="#ccc", padx=14, pady=3)
+        self.btn_reset.pack(side="left")
+
+        self.lbl_status = ttk.Label(r3, text="", style="Status.TLabel")
+        self.lbl_status.pack(side="left", padx=(16, 0))
+
+        # ── Upper aggregate area (two stacked cards) ──
+        upper = ttk.Frame(left, style="App.TFrame")
+        upper.pack(fill="x", pady=(0, 8))
+
+        self.lbl_agg_title = ttk.Label(upper, text="", style="CardBold.TLabel",
+                                       font=(FONT_FAMILY, 11, "bold"))
+        self.lbl_agg_title.pack(anchor="w")
+        self.lbl_agg_subtitle = ttk.Label(upper, text="", style="Status.TLabel")
+        self.lbl_agg_subtitle.pack(anchor="w", pady=(0, 4))
+
+        self.agg_text = tk.Text(
+            upper, height=10, font=(FONT_MONO, 10),
+            bg="#0a0a1a", fg="#e4e7ef",
+            relief="flat", borderwidth=0,
+            wrap="none", state="disabled",
+        )
+        self.agg_text.pack(fill="x")
+
+        self.lbl_ctx_title = ttk.Label(upper, text="", style="CardBold.TLabel",
+                                       font=(FONT_FAMILY, 11, "bold"))
+        self.lbl_ctx_title.pack(anchor="w", pady=(10, 0))
+        self.lbl_ctx_subtitle = ttk.Label(upper, text="", style="Status.TLabel")
+        self.lbl_ctx_subtitle.pack(anchor="w", pady=(0, 4))
+
+        self.ctx_text = tk.Text(
+            upper, height=8, font=(FONT_MONO, 10),
+            bg="#0a0a1a", fg="#e4e7ef",
+            relief="flat", borderwidth=0,
+            wrap="none", state="disabled",
+        )
+        self.ctx_text.pack(fill="x")
+
+        # ── Lower row table area ──
+        self.lbl_row_title = ttk.Label(left, text="", style="CardBold.TLabel",
+                                       font=(FONT_FAMILY, 11, "bold"))
+        self.lbl_row_title.pack(anchor="w", pady=(10, 0))
+        self.lbl_row_hint = ttk.Label(left, text="", style="Status.TLabel")
+        self.lbl_row_hint.pack(anchor="w", pady=(0, 4))
+
+        tree_frame = ttk.Frame(left, style="App.TFrame")
+        tree_frame.pack(fill="both", expand=True)
+
+        cols = ("idx", "project", "mr", "lang", "opus", "source", "badges", "score")
+        self.tree = ttk.Treeview(tree_frame, columns=cols, show="headings",
+                                 style="Summary.Treeview",
+                                 height=12, selectmode="browse")
+        col_widths = {"idx": 40, "project": 110, "mr": 70, "lang": 70,
+                      "opus": 200, "source": 240, "badges": 200, "score": 60}
+        for c in cols:
+            anchor = "w" if c in ("project", "opus", "source", "badges") else "center"
+            self.tree.column(c, width=col_widths.get(c, 80), anchor=anchor)
+
+        scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scroll.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+
+        self.tree.bind("<Double-1>", self._on_row_double_click)
+
+        self.loading_overlay = tk.Label(
+            tree_frame, text="",
+            font=(FONT_FAMILY, 15),
+            fg="#9aa0b0", bg=self.app.BG, anchor="center")
+
+        # ── Right sidebar ──
+        self._build_sidebar(right)
+
+    def _build_sidebar(self, parent):
+        panel = ttk.Frame(parent, style="Summary.TFrame")
+        panel.pack(fill="both", expand=True)
+        panel.configure(borderwidth=1, relief="solid")
+        inner = ttk.Frame(panel, style="Summary.TFrame")
+        inner.pack(fill="both", expand=True, padx=14, pady=14)
+
+        self.lbl_sidebar_title = ttk.Label(inner, text="", style="SummaryTitle.TLabel")
+        self.lbl_sidebar_title.pack(anchor="w")
+        tk.Frame(inner, bg="#2a2a4a", height=1).pack(fill="x", pady=(8, 10))
+
+        stats = ttk.Frame(inner, style="Summary.TFrame")
+        stats.pack(fill="x")
+        self.stat_labels = {}
+        for key in ("total", "tm", "ice", "cached", "llm", "refined", "human",
+                    "ctx_ok", "ctx_none"):
+            row = ttk.Frame(stats, style="Summary.TFrame")
+            row.pack(fill="x", pady=3)
+            lbl = ttk.Label(row, text="", style="Card.TLabel")
+            lbl.pack(side="left")
+            val = ttk.Label(row, text="—", style="CardBold.TLabel")
+            val.pack(side="right")
+            self.stat_labels[key] = (lbl, val)
+
+    # ------------------------------------------------------------------
+    # i18n
+    # ------------------------------------------------------------------
+    def refresh_text(self):
+        t = self._t
+        self.lbl_project.configure(text=t("tci_filter_project"))
+        self.lbl_lang.configure(text=t("tci_filter_language"))
+        self.lbl_date_start.configure(text=t("tci_filter_date_start"))
+        self.lbl_date_end.configure(text=t("tci_filter_date_end"))
+        self.btn_refresh.configure(text=t("tci_filter_refresh"))
+        self.btn_reset.configure(text=t("tci_filter_reset"))
+
+        self.lbl_agg_title.configure(text=t("tci_agg_title"))
+        self.lbl_agg_subtitle.configure(text=t("tci_agg_subtitle"))
+        self.lbl_ctx_title.configure(text=t("tci_ctx_title"))
+        self.lbl_ctx_subtitle.configure(text=t("tci_ctx_subtitle"))
+
+        self.lbl_row_title.configure(text=t("tci_row_title"))
+        self.lbl_row_hint.configure(text=t("tci_row_hint"))
+        for col, key in (("idx", "tci_col_idx"), ("project", "tci_col_project"),
+                         ("mr", "tci_col_mr"), ("lang", "tci_col_lang"),
+                         ("opus", "tci_col_opus"), ("source", "tci_col_source"),
+                         ("badges", "tci_col_badges"), ("score", "tci_col_score")):
+            self.tree.heading(col, text=t(key))
+
+        self.lbl_sidebar_title.configure(text=t("tci_sidebar_title"))
+        for key in ("total", "tm", "ice", "cached", "llm", "refined", "human",
+                    "ctx_ok", "ctx_none"):
+            self.stat_labels[key][0].configure(text=t(f"tci_stat_{key}"))
+
+        # Re-render the aggregate panels with localized labels
+        if self._cases:
+            self._render_aggregates(self._cases)
+            self._render_rows(self._cases)
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+    def on_first_show(self):
+        """Lazy-load on first tab activation."""
+        if not self._cases:
+            self._load()
+
+    def _on_refresh(self):
+        self._load()
+
+    def _on_reset(self):
+        self.project_var.set("")
+        self.lang_var.set("")
+        self.start_var.set((date.today() - timedelta(days=30)).isoformat())
+        self.end_var.set(date.today().isoformat())
+        self._load()
+
+    # ------------------------------------------------------------------
+    # Data loading
+    # ------------------------------------------------------------------
+    def _load(self):
+        if self.loading:
+            return
+        self.loading = True
+        self._set_controls_enabled(False)
+        self.loading_overlay.configure(text=self._t("tci_status_loading") + "...")
+        self.loading_overlay.place(relx=0.5, rely=0.4, anchor="center")
+        self._loading_dot_count = 0
+        self._animate_loading()
+        threading.Thread(target=self._fetch, daemon=True).start()
+
+    def _animate_loading(self):
+        if not self.loading:
+            return
+        self._loading_dot_count = (self._loading_dot_count % 3) + 1
+        dots = "." * self._loading_dot_count
+        base = self._t("tci_status_loading")
+        self.lbl_status.configure(text=f"{base}{dots}")
+        self.loading_overlay.configure(text=f"{base}{dots}")
+        self._loading_anim_id = self.parent.after(500, self._animate_loading)
+
+    def _stop_loading_anim(self):
+        if self._loading_anim_id is not None:
+            self.parent.after_cancel(self._loading_anim_id)
+            self._loading_anim_id = None
+        self.loading_overlay.place_forget()
+
+    def _set_controls_enabled(self, enabled):
+        state = "normal" if enabled else "disabled"
+        if IS_MAC:
+            flag = ["!disabled"] if enabled else ["disabled"]
+            self.btn_refresh.state(flag)
+            self.btn_reset.state(flag)
+        else:
+            self.btn_refresh.configure(state=state)
+            self.btn_reset.configure(state=state)
+
+    def _fetch(self):
+        try:
+            project = self.project_var.get().strip() or None
+            lang = self.lang_var.get().strip() or None
+            start_str = self.start_var.get().strip() or None
+            end_str = self.end_var.get().strip() or None
+
+            # Convert ISO date to ISO datetime (start = 00:00, end = 23:59:59)
+            start_time = f"{start_str}T00:00:00" if start_str else None
+            end_time = f"{end_str}T23:59:59" if end_str else None
+
+            payload = mr_api.fetch_all_dashboard_cases(
+                project_id=project,
+                language=[lang] if lang else None,
+                start_time=start_time,
+                end_time=end_time,
+                page_size=self.DEFAULT_PAGE_SIZE,
+            )
+            flat = []
+            for mr in payload.get("mrs", []):
+                mr_meta = {
+                    "project_id": mr.get("project_id"),
+                    "mr_iid": mr.get("mr_iid"),
+                }
+                for case in mr.get("cases", []) or []:
+                    case = dict(case)
+                    case["_project_id"] = mr_meta["project_id"]
+                    case["_mr_iid"] = mr_meta["mr_iid"]
+                    flat.append(case)
+            self.parent.after(0, self._on_loaded, flat)
+        except Exception as e:
+            self.parent.after(0, self._on_error, str(e))
+
+    def _on_loaded(self, cases):
+        self.loading = False
+        self._stop_loading_anim()
+        self._set_controls_enabled(True)
+        self._cases = cases
+        self.lbl_status.configure(
+            text=f"{self._t('tci_status_done')} ({len(cases)})"
+        )
+        self._render_aggregates(cases)
+        self._render_rows(cases)
+        self._render_sidebar(cases)
+
+    def _on_error(self, err):
+        self.loading = False
+        self._stop_loading_anim()
+        self._set_controls_enabled(True)
+        self.lbl_status.configure(
+            text=self._t("tci_status_error").format(err=err[:60])
+        )
+
+    # ------------------------------------------------------------------
+    # Render: aggregate panels
+    # ------------------------------------------------------------------
+    def _render_aggregates(self, cases):
+        # Group counts by target_language
+        # source_counts[lang][key] = count
+        source_counts = defaultdict(lambda: {k: 0 for k in self.SOURCE_KEYS})
+        ctx_counts = defaultdict(lambda: {k: 0 for k in self.CONTEXT_KEYS})
+        for case in cases:
+            lang = case.get("target_language") or "?"
+            source_counts[lang][_classify_source(case)] += 1
+            ctx_counts[lang][_classify_context(case)] += 1
+
+        self.agg_text.configure(state="normal")
+        self.agg_text.delete("1.0", "end")
+        if not source_counts:
+            self.agg_text.insert("end", self._t("tci_agg_no_data") + "\n")
+        else:
+            header = (
+                f"{'Language':<10} {'Bar':<{_BAR_WIDTH}}  "
+                f"{self._t('tci_badge_tm'):>4} "
+                f"{self._t('tci_badge_ice'):>4} "
+                f"{self._t('tci_badge_cached'):>6} "
+                f"{self._t('tci_badge_llm'):>5} "
+                f"{self._t('tci_badge_refined'):>7} "
+                f"{self._t('tci_badge_human'):>5}  "
+                f"{self._t('tci_agg_total'):>8}\n"
+            )
+            self.agg_text.insert("end", header)
+            self.agg_text.insert("end", "─" * (len(header) + 4) + "\n")
+            for lang in sorted(source_counts.keys()):
+                buckets = source_counts[lang]
+                total = sum(buckets.values())
+                bar = _stacked_bar(
+                    [buckets[k] for k in self.SOURCE_KEYS],
+                    total,
+                )
+                line = (
+                    f"{lang:<10} {bar:<{_BAR_WIDTH}}  "
+                    f"{buckets['tm']:>4} "
+                    f"{buckets['ice']:>4} "
+                    f"{buckets['cached']:>6} "
+                    f"{buckets['llm']:>5} "
+                    f"{buckets['refined']:>7} "
+                    f"{buckets['human']:>5}  "
+                    f"{total:>8}\n"
+                )
+                self.agg_text.insert("end", line)
+        self.agg_text.configure(state="disabled")
+
+        # Context panel
+        self.ctx_text.configure(state="normal")
+        self.ctx_text.delete("1.0", "end")
+        if not ctx_counts:
+            self.ctx_text.insert("end", self._t("tci_agg_no_data") + "\n")
+        else:
+            header = (
+                f"{'Language':<10} {'Bar':<{_BAR_WIDTH}}  "
+                f"{self._t('tci_badge_ctx_ok'):>10} "
+                f"{'partial':>8} "
+                f"{self._t('tci_badge_ctx_none'):>8}  "
+                f"{self._t('tci_agg_total'):>8}\n"
+            )
+            self.ctx_text.insert("end", header)
+            self.ctx_text.insert("end", "─" * (len(header) + 4) + "\n")
+            for lang in sorted(ctx_counts.keys()):
+                buckets = ctx_counts[lang]
+                total = sum(buckets.values())
+                bar = _stacked_bar(
+                    [buckets[k] for k in self.CONTEXT_KEYS],
+                    total,
+                )
+                line = (
+                    f"{lang:<10} {bar:<{_BAR_WIDTH}}  "
+                    f"{buckets['ctx_ok']:>10} "
+                    f"{buckets['ctx_partial']:>8} "
+                    f"{buckets['ctx_none']:>8}  "
+                    f"{total:>8}\n"
+                )
+                self.ctx_text.insert("end", line)
+        self.ctx_text.configure(state="disabled")
+
+    # ------------------------------------------------------------------
+    # Render: row table
+    # ------------------------------------------------------------------
+    def _render_rows(self, cases):
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+
+        # Show at most 500 rows to keep the table responsive.
+        max_rows = 500
+        for i, case in enumerate(cases[:max_rows], start=1):
+            source_key = _classify_source(case)
+            ctx_key = _classify_context(case)
+            badges = []
+            # Source badges (mutually exclusive, but show TM/ICE/Cached even
+            # if iteration shows refinement happened on top).
+            if case.get("tm_match"):
+                badges.append(self._t("tci_badge_tm"))
+            if case.get("ice_match"):
+                badges.append(self._t("tci_badge_ice"))
+            if case.get("cached"):
+                badges.append(self._t("tci_badge_cached"))
+            if source_key == "llm":
+                badges.append(self._t("tci_badge_llm"))
+            if (case.get("iteration") or 0) >= 2:
+                badges.append(f"{self._t('tci_badge_refined')}×{case['iteration']}")
+            if case.get("fixed_by_lead"):
+                badges.append(self._t("tci_badge_human"))
+            # Context badge
+            if ctx_key == "ctx_ok":
+                badges.append(self._t("tci_badge_ctx_ok"))
+            elif ctx_key == "ctx_none":
+                badges.append(self._t("tci_badge_ctx_none"))
+            else:
+                badges.append("Ctx◐")
+
+            source_text = (case.get("source_text") or "").replace("\n", " ")
+            if len(source_text) > 60:
+                source_text = source_text[:57] + "…"
+
+            score = case.get("final_score")
+            score_str = str(score) if score is not None else "—"
+
+            self.tree.insert(
+                "", "end",
+                values=(
+                    i,
+                    case.get("_project_id", "")[:18],
+                    case.get("_mr_iid", ""),
+                    case.get("target_language", ""),
+                    (case.get("opus_id") or "")[:24],
+                    source_text,
+                    "  ".join(badges),
+                    score_str,
+                ),
+                tags=(case.get("translation_id") or "",
+                      case.get("context_id") or ""),
+            )
+
+    # ------------------------------------------------------------------
+    # Render: sidebar stats
+    # ------------------------------------------------------------------
+    def _render_sidebar(self, cases):
+        total = len(cases)
+        buckets = {k: 0 for k in self.SOURCE_KEYS}
+        ctx_ok = 0
+        ctx_none = 0
+        for case in cases:
+            buckets[_classify_source(case)] += 1
+            ck = _classify_context(case)
+            if ck == "ctx_ok":
+                ctx_ok += 1
+            elif ck == "ctx_none":
+                ctx_none += 1
+
+        self.stat_labels["total"][1].configure(text=str(total))
+        self.stat_labels["tm"][1].configure(text=str(buckets["tm"]))
+        self.stat_labels["ice"][1].configure(text=str(buckets["ice"]))
+        self.stat_labels["cached"][1].configure(text=str(buckets["cached"]))
+        self.stat_labels["llm"][1].configure(text=str(buckets["llm"]))
+        self.stat_labels["refined"][1].configure(text=str(buckets["refined"]))
+        self.stat_labels["human"][1].configure(text=str(buckets["human"]))
+        self.stat_labels["ctx_ok"][1].configure(text=str(ctx_ok))
+        self.stat_labels["ctx_none"][1].configure(text=str(ctx_none))
+
+    # ------------------------------------------------------------------
+    # Context drawer
+    # ------------------------------------------------------------------
+    def _on_row_double_click(self, _event):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        tags = self.tree.item(sel[0], "tags")
+        context_id = tags[1] if len(tags) >= 2 else ""
+
+        # Find the matching case (by translation_id in tag[0])
+        translation_id = tags[0] if tags else ""
+        case = None
+        for c in self._cases:
+            if c.get("translation_id") == translation_id:
+                case = c
+                break
+
+        self._show_context_drawer(case, context_id)
+
+    def _show_context_drawer(self, case, context_id):
+        win = tk.Toplevel(self.parent)
+        win.title(self._t("tci_drawer_title"))
+        win.geometry("780x560")
+        try:
+            win.configure(bg=self.app.BG)
+        except Exception:
+            pass
+
+        header = ttk.Frame(win, style="Card.TFrame")
+        header.pack(fill="x", padx=12, pady=(12, 6))
+
+        if case:
+            meta = (
+                f"{case.get('_project_id') or ''}  "
+                f"MR!{case.get('_mr_iid') or ''}  ·  "
+                f"{case.get('target_language') or ''}  ·  "
+                f"{(case.get('opus_id') or '')[:40]}"
+            )
+            ttk.Label(header, text=meta, style="CardBold.TLabel",
+                      font=(FONT_FAMILY, 10, "bold")).pack(anchor="w")
+            src = (case.get("source_text") or "").strip()
+            tgt = (case.get("translated_text") or "").strip()
+            ttk.Label(header, text=f"EN: {src[:300]}", style="Card.TLabel",
+                      wraplength=720, justify="left").pack(anchor="w", pady=(4, 0))
+            ttk.Label(header, text=f"→ : {tgt[:300]}", style="Card.TLabel",
+                      wraplength=720, justify="left").pack(anchor="w")
+
+        body = tk.Text(
+            win, font=(FONT_MONO, 10),
+            bg="#0a0a1a", fg="#e4e7ef",
+            relief="flat", borderwidth=0,
+            wrap="word",
+        )
+        body.pack(fill="both", expand=True, padx=12, pady=8)
+
+        btn_close = self.app._create_button(
+            win, text=self._t("tci_drawer_close"),
+            command=win.destroy,
+            style_name="SecondarySmall",
+            font=(FONT_FAMILY, 10),
+            bg="#0f3460", fg="#ccc", padx=14, pady=4,
+        )
+        btn_close.pack(pady=(0, 12))
+
+        if not context_id:
+            body.insert("end", self._t("tci_drawer_no_id"))
+            body.configure(state="disabled")
+            return
+
+        body.insert("end", self._t("tci_drawer_loading"))
+        body.configure(state="disabled")
+
+        def _load_ctx():
+            try:
+                payload = _fetch_context_record(context_id)
+                pretty = json.dumps(payload, indent=2, ensure_ascii=False)
+                win.after(0, lambda: self._fill_drawer(body, pretty))
+            except Exception as e:
+                err = str(e)[:160]
+                win.after(0, lambda: self._fill_drawer(
+                    body, self._t("tci_drawer_error").format(err=err)))
+
+        threading.Thread(target=_load_ctx, daemon=True).start()
+
+    def _fill_drawer(self, body_widget, text):
+        body_widget.configure(state="normal")
+        body_widget.delete("1.0", "end")
+        body_widget.insert("end", text)
+        body_widget.configure(state="disabled")
