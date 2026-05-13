@@ -25,6 +25,7 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
+import zlib
 from pathlib import Path
 from tkinter import ttk, filedialog, messagebox, simpledialog
 from datetime import date
@@ -38,6 +39,90 @@ except Exception:  # pragma: no cover — defensive
 # Unicode check glyphs used by the products / languages multi-select trees.
 CHECK_OFF = "\u2610"  # ☐
 CHECK_ON = "\u2611"   # ☑
+
+
+# ---------------------------------------------------------------------------
+# Row coloring for the Products tree
+# ---------------------------------------------------------------------------
+# Once the inventory has many MR + Scan tasks, users need to scan
+# "which data source x which project" at a glance. Row background
+# hashes the first-level project name to a pastel palette; row
+# foreground encodes the data source. Legacy rows ignore the project
+# component (per spec: "don't bother color-coding File Translation
+# projects").
+_PROJECT_PALETTE = (
+    "#fff1b8",  # warm yellow
+    "#ffd7c2",  # peach
+    "#ffc8c8",  # soft pink
+    "#e8d4f4",  # lavender
+    "#d4e2ff",  # powder blue
+    "#c7e9f7",  # sky
+    "#c7f2d7",  # mint
+    "#e8f0c2",  # pale lime
+    "#f2e2c7",  # tan
+    "#e4e4f0",  # blue-gray
+)
+_LEGACY_BG = "#ececec"
+_SOURCE_FG = {
+    "Legacy": "#3a3a4a",
+    "MR":     "#1f3d7a",
+    "Scan":   "#1f5a3a",
+}
+
+
+def _parse_product_label(label: str):
+    """Return ``(source, first_level_project)`` parsed from a label like
+    ``"[MR] admin-web/frontend"`` or ``"[Legacy] CoreLib/mthor"``."""
+    src = ""
+    rest = label or ""
+    if rest.startswith("[") and "]" in rest:
+        end = rest.index("]")
+        src = rest[1:end].strip()
+        rest = rest[end + 1:].lstrip()
+    first = rest.split("/", 1)[0].strip()
+    return src, first
+
+
+def _product_row_tag(label: str) -> str:
+    """Map a product label to a tag name pre-registered on the tree.
+
+    Tag scheme:
+      ``src_legacy``                - all Legacy rows
+      ``proj_mr_{0..9}``            - MR rows keyed by first-level dir
+      ``proj_scan_{0..9}``          - Scan rows keyed by first-level dir
+      ``src_mr_default`` / ``src_scan_default``
+                                    - fallback when no first-level dir
+    """
+    src, first = _parse_product_label(label)
+    src_key = src.lower()
+    if src_key == "legacy":
+        return "src_legacy"
+    if src_key not in ("mr", "scan"):
+        return "src_legacy"
+    if not first:
+        return f"src_{src_key}_default"
+    idx = zlib.crc32(first.lower().encode("utf-8")) % len(_PROJECT_PALETTE)
+    return f"proj_{src_key}_{idx}"
+
+
+def _configure_product_row_tags(tree):
+    """Register every row tag :func:`_product_row_tag` may return."""
+    tree.tag_configure(
+        "src_legacy",
+        background=_LEGACY_BG,
+        foreground=_SOURCE_FG["Legacy"],
+    )
+    for src_label, src_key in (("MR", "mr"), ("Scan", "scan")):
+        fg = _SOURCE_FG[src_label]
+        tree.tag_configure(
+            f"src_{src_key}_default", foreground=fg,
+        )
+        for i, bg in enumerate(_PROJECT_PALETTE):
+            tree.tag_configure(
+                f"proj_{src_key}_{i}",
+                background=bg,
+                foreground=fg,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -692,6 +777,7 @@ class FullTranslationsTab:
         self.prod_tree.column("check", width=32, anchor="center", stretch=False)
         self.prod_tree.column("product", width=220, anchor="w")
         self.prod_tree.column("keys", width=80, anchor="e")
+        _configure_product_row_tags(self.prod_tree)
         self.prod_tree.bind("<ButtonRelease-1>", self._on_prod_click)
         prod_scroll = ttk.Scrollbar(prod_frame, orient="vertical",
                                      command=self.prod_tree.yview)
@@ -1194,7 +1280,9 @@ class FullTranslationsTab:
             keys_cell = f"{count:,}" if isinstance(count, int) else pending
             self.prod_tree.insert(
                 "", "end", iid=p["id"],
-                values=(CHECK_ON, p["label"], keys_cell))
+                values=(CHECK_ON, p["label"], keys_cell),
+                tags=(_product_row_tag(p["label"]),),
+            )
             self._all_prod_iids.append(p["id"])
 
         # Honour any keyword the user typed before the inventory finished
