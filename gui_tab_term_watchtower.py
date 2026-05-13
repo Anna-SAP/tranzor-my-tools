@@ -145,6 +145,8 @@ STRINGS = {
         "tw_tt_error":               "Failed to load terminology: {err}",
         "tw_tt_unavailable":         "Tranzor Terminology client not available.",
         "tw_tt_skipped_dnt":         "Skipped {n} DNT term(s).",
+        "tw_tt_double_click_hint":   "Tip: double-click a term to open its definition page on Tranzor Platform.",
+        "tw_tt_open_failed":         "Failed to open term page: {err}",
         "tw_qc_run":                 "Run Quick Scan…",
         "tw_qc_no_pairs":            "Provide at least one (locale, approved translation) pair.",
         "tw_qc_running":             "Quick Check on '{term}' ({n} locales)…",
@@ -294,6 +296,8 @@ STRINGS = {
         "tw_tt_error":               "加载术语库失败：{err}",
         "tw_tt_unavailable":         "Tranzor 术语库客户端不可用。",
         "tw_tt_skipped_dnt":         "已跳过 {n} 个 DNT 术语。",
+        "tw_tt_double_click_hint":   "提示：双击术语条目可在浏览器中打开其在 Tranzor 平台上的术语定义页。",
+        "tw_tt_open_failed":         "打开术语页失败：{err}",
         "tw_qc_run":                 "运行快速扫描…",
         "tw_qc_no_pairs":            "至少提供一对（locale, 已批准译法）。",
         "tw_qc_running":             "Quick Check「{term}」（{n} 个语种）…",
@@ -1834,6 +1838,13 @@ class _TranzorTerminologyDialog(tk.Toplevel):
         self.tree.configure(yscrollcommand=vsb.set)
         vsb.pack(side="right", fill="y")
         self.tree.bind("<Button-1>", self._on_tree_click)
+        self.tree.bind("<Double-Button-1>", self._on_tree_double_click)
+
+        self.lbl_double_click = ttk.Label(
+            body, text=tab._t("tw_tt_double_click_hint"),
+            foreground="#7a7a8a",
+        )
+        self.lbl_double_click.pack(anchor="w", pady=(4, 0))
 
         # Scope is picked downstream via the unified _ScopeDialog so all
         # three entry points (Scan Now, Quick Check, Tranzor Terminology)
@@ -1949,6 +1960,32 @@ class _TranzorTerminologyDialog(tk.Toplevel):
         vals[0] = CHECK_OFF if vals[0] == CHECK_ON else CHECK_ON
         self.tree.item(iid, values=vals)
         self._update_run_btn()
+
+    def _on_tree_double_click(self, event):
+        """Open the term's detail page on Tranzor Platform in the browser.
+
+        Double-click anywhere on the row except the check column (whose
+        single-click already toggles selection — a double-click there
+        would just be a redundant toggle).
+        """
+        region = self.tree.identify("region", event.x, event.y)
+        col = self.tree.identify_column(event.x)
+        if region != "cell" or col == "#1":
+            return
+        iid = self.tree.identify_row(event.y)
+        if not iid or not iid.startswith("t"):
+            return
+        try:
+            tid = int(iid[1:])
+        except ValueError:
+            return
+        url = tz_term.terminology_detail_url(tid)
+        try:
+            webbrowser.open(url)
+        except Exception as e:
+            messagebox.showerror(self.tab._t("tw_btn_tranzor_term"),
+                                 self.tab._t("tw_tt_open_failed", err=str(e)),
+                                 parent=self)
 
     def _set_all(self, on: bool):
         for iid in self._iid_by_id.values():

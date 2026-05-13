@@ -40,6 +40,16 @@ import terminology_watchtower as tw
 
 TRANZOR_URL = "http://tranzor-platform.int.rclabenv.com"
 TERMINOLOGY_API = f"{TRANZOR_URL}/context/api/v1/terminology"
+TERMINOLOGY_WEB = f"{TRANZOR_URL}/context/terminology"
+
+
+def terminology_detail_url(numeric_id: int) -> str:
+    """Browser URL for a single term's detail page on Tranzor Platform.
+
+    Mirrors the API path under ``/context/`` minus the ``api/v1`` segment,
+    which is the same convention used by the platform's SPA router.
+    """
+    return f"{TERMINOLOGY_WEB}/{int(numeric_id)}"
 
 PAGE_SIZE_MAX = 200  # server caps anything higher at 200
 DEFAULT_TIMEOUT = 30
