@@ -864,6 +864,16 @@ class TranzorTerminologyClientTests(unittest.TestCase):
         self.assertEqual(len(rules), 2)
         self.assertEqual({r.source_term for r in rules}, {"A", "B"})
 
+    def test_terminology_detail_url(self):
+        import tranzor_terminology as tz
+        url = tz.terminology_detail_url(8858)
+        self.assertTrue(url.startswith(tz.TRANZOR_URL))
+        self.assertTrue(url.endswith("/terminology/8858"))
+        self.assertNotIn("/api/", url)
+        # Coerces to int (defends against accidentally passing a str)
+        self.assertEqual(tz.terminology_detail_url("42"),
+                         tz.terminology_detail_url(42))
+
 
 if __name__ == "__main__":
     unittest.main()
