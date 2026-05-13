@@ -166,6 +166,8 @@ STRINGS = {
         "tw_td_col_remarks":         "Remarks",
         "tw_td_col_type":            "Type",
         "tw_td_col_name":            "Name",
+        "tw_td_copy_btn":            "📋 Copy",
+        "tw_td_copied":              "✓ Copied",
         "tw_td_open_browser":        "Open Terminology Page",
         "tw_td_open_failed":         "Failed to open page: {err}",
         "tw_td_close":               "Close",
@@ -339,6 +341,8 @@ STRINGS = {
         "tw_td_col_remarks":         "备注",
         "tw_td_col_type":            "类型",
         "tw_td_col_name":            "名称",
+        "tw_td_copy_btn":            "📋 复制",
+        "tw_td_copied":              "✓ 已复制",
         "tw_td_open_browser":        "打开术语主页",
         "tw_td_open_failed":         "打开页面失败：{err}",
         "tw_td_close":               "关闭",
@@ -2260,23 +2264,29 @@ class _TermDetailDialog(tk.Toplevel):
                       text=self.tab._t("tw_td_translations"),
                       font=(FONT_FAMILY, 10, "bold")
                       ).pack(anchor="w", pady=(12, 4))
-            tr_cols = ("lang", "text", "remarks")
+            tr_cols = ("lang", "text", "remarks", "copy")
             tr = ttk.Treeview(self.content, columns=tr_cols,
                               show="headings",
                               height=min(len(translations) + 1, 10))
             tr.heading("lang", text=self.tab._t("tw_td_col_lang"))
             tr.heading("text", text=self.tab._t("tw_td_col_text"))
             tr.heading("remarks", text=self.tab._t("tw_td_col_remarks"))
+            tr.heading("copy", text="")
             tr.column("lang", width=80, anchor="w", stretch=False)
-            tr.column("text", width=320, anchor="w", stretch=True)
-            tr.column("remarks", width=180, anchor="w", stretch=False)
+            tr.column("text", width=300, anchor="w", stretch=True)
+            tr.column("remarks", width=160, anchor="w", stretch=False)
+            tr.column("copy", width=84, anchor="center", stretch=False)
             tr.pack(fill="x")
+            copy_label = self.tab._t("tw_td_copy_btn")
             for t in translations:
+                text = (t.get("translated_name") or "").strip()
                 tr.insert("", "end", values=(
                     t.get("language_code") or "",
-                    t.get("translated_name") or "",
+                    text,
                     t.get("remarks") or "",
+                    copy_label if text else "",
                 ))
+            tr.bind("<Button-1>", self._on_translation_click)
 
         variants = detail.get("variants") or []
         if variants:
@@ -2307,6 +2317,55 @@ class _TermDetailDialog(tk.Toplevel):
                                  self.tab._t("tw_td_open_failed",
                                               err=str(e)),
                                  parent=self)
+
+    # ---- per-row copy ----------------------------------------------------
+    def _on_translation_click(self, event):
+        """Single-click on the rightmost 'Copy' column → copy that row's
+        Text to the OS clipboard and flash a transient '✓ Copied' state.
+        """
+        tree = event.widget
+        region = tree.identify("region", event.x, event.y)
+        col = tree.identify_column(event.x)
+        if region != "cell" or col != "#4":
+            return
+        iid = tree.identify_row(event.y)
+        if not iid:
+            return
+        try:
+            vals = list(tree.item(iid, "values"))
+        except Exception:
+            return
+        if len(vals) < 4 or not (vals[1] or "").strip():
+            return
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(str(vals[1]))
+            # tkinter clipboard only persists while the app lives; on
+            # most desktops this is fine because users paste right away.
+        except Exception as e:
+            messagebox.showerror(self.tab._t("tw_btn_tranzor_term"),
+                                 str(e), parent=self)
+            return
+        vals[3] = self.tab._t("tw_td_copied")
+        try:
+            tree.item(iid, values=vals)
+        except Exception:
+            return
+        self.after(900, lambda: self._restore_copy_label(tree, iid))
+
+    def _restore_copy_label(self, tree, iid):
+        try:
+            vals = list(tree.item(iid, "values"))
+        except Exception:
+            return
+        if len(vals) < 4:
+            return
+        vals[3] = (self.tab._t("tw_td_copy_btn")
+                   if (vals[1] or "").strip() else "")
+        try:
+            tree.item(iid, values=vals)
+        except Exception:
+            pass
 
 
 class _ScopeDialog(tk.Toplevel):
