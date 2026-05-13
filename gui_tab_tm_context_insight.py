@@ -78,6 +78,7 @@ STRINGS = {
         "tci_badge_refined":        "Refined",
         "tci_badge_human":          "Human",
         "tci_badge_ctx_ok":         "Ctx✓",
+        "tci_badge_ctx_partial":    "partial",
         "tci_badge_ctx_none":       "NoCtx",
         # sidebar
         "tci_sidebar_title":        "📈 Pipeline Routing",
@@ -199,6 +200,7 @@ STRINGS = {
         "tci_badge_refined":        "精炼",
         "tci_badge_human":          "人工",
         "tci_badge_ctx_ok":         "有上下文",
+        "tci_badge_ctx_partial":    "部分",
         "tci_badge_ctx_none":       "无上下文",
         # sidebar
         "tci_sidebar_title":        "📈 管线路由",
@@ -507,7 +509,16 @@ class TmContextInsightTab:
                                        font=(FONT_FAMILY, 11, "bold"))
         self.lbl_agg_title.pack(anchor="w")
         self.lbl_agg_subtitle = ttk.Label(upper, text="", style="Status.TLabel")
-        self.lbl_agg_subtitle.pack(anchor="w", pady=(0, 4))
+        self.lbl_agg_subtitle.pack(anchor="w", pady=(0, 2))
+
+        # Inline color legend — small colored squares + localized labels.
+        # Lets first-time users instantly map bar segments to pipeline sources
+        # without having to read the help guide.
+        self.agg_legend_frame = ttk.Frame(upper, style="App.TFrame")
+        self.agg_legend_frame.pack(anchor="w", pady=(0, 4))
+        self.agg_legend_labels = self._build_legend(
+            self.agg_legend_frame, self.SOURCE_KEYS
+        )
 
         self.agg_text = tk.Text(
             upper, height=10, font=(FONT_MONO, 10),
@@ -521,7 +532,13 @@ class TmContextInsightTab:
                                        font=(FONT_FAMILY, 11, "bold"))
         self.lbl_ctx_title.pack(anchor="w", pady=(10, 0))
         self.lbl_ctx_subtitle = ttk.Label(upper, text="", style="Status.TLabel")
-        self.lbl_ctx_subtitle.pack(anchor="w", pady=(0, 4))
+        self.lbl_ctx_subtitle.pack(anchor="w", pady=(0, 2))
+
+        self.ctx_legend_frame = ttk.Frame(upper, style="App.TFrame")
+        self.ctx_legend_frame.pack(anchor="w", pady=(0, 4))
+        self.ctx_legend_labels = self._build_legend(
+            self.ctx_legend_frame, self.CONTEXT_KEYS
+        )
 
         self.ctx_text = tk.Text(
             upper, height=8, font=(FONT_MONO, 10),
@@ -612,6 +629,12 @@ class TmContextInsightTab:
         self.lbl_agg_subtitle.configure(text=t("tci_agg_subtitle"))
         self.lbl_ctx_title.configure(text=t("tci_ctx_title"))
         self.lbl_ctx_subtitle.configure(text=t("tci_ctx_subtitle"))
+
+        # Re-localize legend chip text labels (color stays constant)
+        for _chip, text_lbl, key in self.agg_legend_labels:
+            text_lbl.configure(text=t(f"tci_badge_{key}"))
+        for _chip, text_lbl, key in self.ctx_legend_labels:
+            text_lbl.configure(text=t(f"tci_badge_{key}"))
 
         self.lbl_row_title.configure(text=t("tci_row_title"))
         self.lbl_row_hint.configure(text=t("tci_row_hint"))
@@ -767,6 +790,36 @@ class TmContextInsightTab:
         for widget in (self.agg_text, self.ctx_text):
             for key, color in self.BAR_PALETTE.items():
                 widget.tag_configure(f"bar_{key}", foreground=color)
+
+    def _build_legend(self, parent_frame, keys):
+        """Pack a row of colored chip + text-label pairs into ``parent_frame``.
+
+        Returns a list of (chip_label, text_label, key) tuples so
+        ``refresh_text`` can re-localize the text labels later. Chip
+        squares stay colored across language switches; only the text
+        labels change.
+        """
+        labels = []
+        bg = self.app.BG
+        for key in keys:
+            color = self.BAR_PALETTE.get(key, "#888")
+            # Colored block — use a solid bg label so the patch reads
+            # cleanly against the panel background.
+            chip = tk.Label(
+                parent_frame, text="  ",
+                bg=color, fg=color,
+                relief="flat", borderwidth=0,
+                font=(FONT_FAMILY, 9),
+            )
+            chip.pack(side="left", padx=(0, 4), ipadx=1, ipady=0)
+            text_lbl = tk.Label(
+                parent_frame, text="",
+                fg="#9aa0b0", bg=bg,
+                font=(FONT_FAMILY, 9),
+            )
+            text_lbl.pack(side="left", padx=(0, 12))
+            labels.append((chip, text_lbl, key))
+        return labels
 
     def _insert_colored_bar(self, widget, segments, total, width=_BAR_WIDTH):
         """Insert a stacked bar of █ characters into ``widget``.
