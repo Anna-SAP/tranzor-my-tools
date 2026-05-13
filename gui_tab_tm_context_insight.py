@@ -101,6 +101,68 @@ STRINGS = {
         "tci_status_loading":       "Loading",
         "tci_status_done":          "✓ Loaded",
         "tci_status_error":         "⚠ {err}",
+        # help button + modal
+        "tci_help_btn":             "❓ Help",
+        "tci_help_title":           "TM & Context Insight — Quick Help",
+        "tci_help_close":           "Close",
+        "tci_help_full_guide_hint": "See TM_Context_Insight_Help.md for the full guide.",
+        "tci_help_body": (
+            "WHAT THIS PANEL SHOWS\n"
+            "─────────────────────\n"
+            "Tranzor produces every translation through a hidden pipeline:\n"
+            "TM reuse → ICE reuse → cache reuse → LLM translation → optional refinement.\n"
+            "This panel exposes which path produced each translation, and whether\n"
+            "the LLM received context evidence — so you can monitor pipeline\n"
+            "behavior without asking the dev team.\n"
+            "\n"
+            "THREE REGIONS\n"
+            "─────────────\n"
+            "① Upper aggregate — stacked bars per target language. Read each row\n"
+            "  left-to-right: TM | ICE | Cached | LLM | Refined | Human. A second\n"
+            "  block shows context coverage (with / partial / none).\n"
+            "\n"
+            "② Lower table — one row per translation (up to 500). Look at the\n"
+            "  'Badges' column to see how that row was produced.\n"
+            "  DOUBLE-CLICK any row to open a drawer with the actual context\n"
+            "  snippet the LLM saw at translation time.\n"
+            "\n"
+            "③ Right sidebar — nine KPIs: total / TM hits / ICE hits / Cached /\n"
+            "  LLM-fresh / Refined / Human-fixed / With context / No context.\n"
+            "\n"
+            "BADGE DICTIONARY\n"
+            "────────────────\n"
+            "  TM        Reused from Translation Memory (approved before, free)\n"
+            "  ICE       Same project's history had an identical translation\n"
+            "  Cached    Tranzor cache hit (same string in a recent task)\n"
+            "  LLM       Fresh LLM translation\n"
+            "  Refined×N LLM output was re-run N times (low score retry)\n"
+            "  Human     Edited by a Language Lead in the Dashboard\n"
+            "  Ctx ✓     LLM received meaningful context evidence (best)\n"
+            "  Ctx ◐     Context lookup happened but returned empty content\n"
+            "  NoCtx     No context attached at all\n"
+            "\n"
+            "A single row can carry multiple badges. Example:\n"
+            "  'TM  Refined×2  Ctx ✓'  →  TM hit first, low score so refined twice,\n"
+            "                            and context was attached during translation.\n"
+            "\n"
+            "FILTERS\n"
+            "───────\n"
+            "  Project   Empty = all; or type a project ID (CoreLib/mthor, web/chc)\n"
+            "  Language  Empty = all; or type a language code (zh-CN, fr-FR)\n"
+            "  From/To   Date range; default is last 30 days\n"
+            "  Reset     Restores defaults\n"
+            "  Refresh   Re-fetches with current filters\n"
+            "\n"
+            "TIPS\n"
+            "────\n"
+            "• If 'No context' dominates a language, flag the project to the\n"
+            "  Tranzor team — Context Service may not be onboarded there.\n"
+            "• If 'Refined ratio' is > 20% somewhere, initial-translation quality\n"
+            "  is weak; share the language + project with the platform team.\n"
+            "• v1 scope: MR Pipeline only (File Translation has no tm_match field;\n"
+            "  use the Full Translations tab for that data).\n"
+            "• Context snippets are fetched on demand (1-2s delay on first click).\n"
+        ),
     },
     "zh": {
         "tab_tm_context_insight":   "🔬 TM 与上下文洞察",
@@ -160,6 +222,68 @@ STRINGS = {
         "tci_status_loading":       "加载中",
         "tci_status_done":          "✓ 已加载",
         "tci_status_error":         "⚠ {err}",
+        # help button + modal
+        "tci_help_btn":             "❓ 帮助",
+        "tci_help_title":           "TM 与上下文洞察 — 快速帮助",
+        "tci_help_close":           "关闭",
+        "tci_help_full_guide_hint": "完整指南见 TM_Context_Insight_Help-zh.md",
+        "tci_help_body": (
+            "面板做什么\n"
+            "─────────\n"
+            "Tranzor 给你每一条翻译时，内部走的是一条隐形管线：\n"
+            "TM 复用 → ICE 复用 → 缓存复用 → LLM 翻译 → 必要时回炼。\n"
+            "本面板把这条管线敞开 —— 你能看到每条翻译走的哪条路，\n"
+            "以及 LLM 翻译时有没有拿到上下文证据。无须问开发团队。\n"
+            "\n"
+            "三个区域\n"
+            "────────\n"
+            "① 上半区聚合 —— 按目标语言展示堆叠条形图，从左到右是\n"
+            "  TM | ICE | 缓存 | LLM | 精炼 | 人工 的占比。下面再一块\n"
+            "  展示「上下文覆盖率」（有 / 部分 / 无）。\n"
+            "\n"
+            "② 下半区表格 —— 每条翻译一行（最多 500 行）。重点看\n"
+            "  「来源徽章」列，它告诉你这一条是怎么产生的。\n"
+            "  **双击任意一行** → 弹出抽屉，显示该翻译当时 LLM\n"
+            "  实际拿到的上下文片段（JSON）。\n"
+            "\n"
+            "③ 右侧侧边栏 —— 九个 KPI：总计 / TM 命中 / ICE 命中 /\n"
+            "  缓存复用 / LLM 新译 / 精炼 / 人工修订 / 携带上下文 /\n"
+            "  无上下文。每周扫一眼判断管线健康度。\n"
+            "\n"
+            "徽章字典\n"
+            "────────\n"
+            "  TM        来自翻译记忆库（之前批准过，零成本复用）\n"
+            "  ICE       同项目历史里有一字不差的译文\n"
+            "  缓存      Tranzor 缓存命中（上个任务刚翻过同样字符串）\n"
+            "  LLM       LLM 新译\n"
+            "  精炼×N    LLM 译完分数低，回炼了 N 轮\n"
+            "  人工      Language Lead 在 Dashboard 上修订过\n"
+            "  有上下文  LLM 拿到了实质性的上下文证据（最理想）\n"
+            "  Ctx ◐    查询了上下文但内容为空/弱\n"
+            "  无上下文  完全没挂上下文\n"
+            "\n"
+            "一条翻译可同时带多个徽章。例如：\n"
+            "  「TM  精炼×2  有上下文」 → 先 TM 命中，但分数低被回炼\n"
+            "                          了两轮，且翻译时挂了上下文。\n"
+            "\n"
+            "筛选器\n"
+            "──────\n"
+            "  项目   留空 = 全部；或填项目 ID（CoreLib/mthor、web/chc）\n"
+            "  语言   留空 = 全部；或填语言代码（zh-CN、fr-FR）\n"
+            "  起/止  日期范围；默认近 30 天\n"
+            "  重置   恢复默认\n"
+            "  刷新   按当前筛选重新拉取\n"
+            "\n"
+            "小贴士\n"
+            "──────\n"
+            "• 如果某语言「无上下文」占大多数，跟 Tranzor 团队反馈一下\n"
+            "  该项目是否接入了 Context Service。\n"
+            "• 「精炼比例 > 20%」意味着初译质量普遍不高，建议把语言+\n"
+            "  项目反馈给平台团队。\n"
+            "• v1 仅覆盖 MR Pipeline（File Translation 没有 tm_match\n"
+            "  字段，那部分数据请去 Full Translations tab 看）。\n"
+            "• 上下文片段是按需拉取的，首次双击有 1~2 秒延迟正常。\n"
+        ),
     },
 }
 
@@ -366,6 +490,15 @@ class TmContextInsightTab:
         self.lbl_status = ttk.Label(r3, text="", style="Status.TLabel")
         self.lbl_status.pack(side="left", padx=(16, 0))
 
+        # Help button — pinned to the right edge so it's discoverable from
+        # day one and never hidden by long status text.
+        self.btn_help = self.app._create_button(
+            r3, text="", command=self._show_help,
+            style_name="SecondarySmall",
+            font=(FONT_FAMILY, 10),
+            bg="#0f3460", fg="#9aa0b0", padx=10, pady=3)
+        self.btn_help.pack(side="right")
+
         # ── Upper aggregate area (two stacked cards) ──
         upper = ttk.Frame(left, style="App.TFrame")
         upper.pack(fill="x", pady=(0, 8))
@@ -468,6 +601,7 @@ class TmContextInsightTab:
         self.lbl_date_end.configure(text=t("tci_filter_date_end"))
         self.btn_refresh.configure(text=t("tci_filter_refresh"))
         self.btn_reset.configure(text=t("tci_filter_reset"))
+        self.btn_help.configure(text=t("tci_help_btn"))
 
         self.lbl_agg_title.configure(text=t("tci_agg_title"))
         self.lbl_agg_subtitle.configure(text=t("tci_agg_subtitle"))
@@ -859,3 +993,58 @@ class TmContextInsightTab:
         body_widget.delete("1.0", "end")
         body_widget.insert("end", text)
         body_widget.configure(state="disabled")
+
+    # ------------------------------------------------------------------
+    # Help modal
+    # ------------------------------------------------------------------
+    def _show_help(self):
+        """Open a self-contained help window with the panel cheat-sheet.
+
+        Content is hard-coded into STRINGS (per language), so this works
+        even after PyInstaller packaging where the markdown sibling file
+        may not be present.
+        """
+        win = tk.Toplevel(self.parent)
+        win.title(self._t("tci_help_title"))
+        win.geometry("760x600")
+        try:
+            win.configure(bg=self.app.BG)
+        except Exception:
+            pass
+
+        header = ttk.Frame(win, style="Card.TFrame")
+        header.pack(fill="x", padx=12, pady=(12, 6))
+        ttk.Label(
+            header,
+            text=self._t("tci_help_title"),
+            style="CardBold.TLabel",
+            font=(FONT_FAMILY, 12, "bold"),
+        ).pack(anchor="w")
+
+        body = tk.Text(
+            win, font=(FONT_MONO, 10),
+            bg="#0a0a1a", fg="#e4e7ef",
+            relief="flat", borderwidth=0,
+            wrap="word", padx=12, pady=8,
+        )
+        body.pack(fill="both", expand=True, padx=12, pady=(0, 6))
+        body.insert("end", self._t("tci_help_body"))
+        body.configure(state="disabled")
+
+        footer = ttk.Frame(win, style="Card.TFrame")
+        footer.pack(fill="x", padx=12, pady=(0, 12))
+
+        ttk.Label(
+            footer,
+            text=self._t("tci_help_full_guide_hint"),
+            style="Status.TLabel",
+        ).pack(side="left")
+
+        btn_close = self.app._create_button(
+            footer, text=self._t("tci_help_close"),
+            command=win.destroy,
+            style_name="SecondarySmall",
+            font=(FONT_FAMILY, 10),
+            bg="#0f3460", fg="#ccc", padx=14, pady=4,
+        )
+        btn_close.pack(side="right")
