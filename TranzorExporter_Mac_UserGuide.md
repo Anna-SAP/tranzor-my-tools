@@ -25,8 +25,15 @@ Download **TranzorExporter.app** from our GitHub repository:
 
 Double-click `TranzorExporter.app` to launch.
 
-> **First launch note:** macOS may block the app since it's not from the App Store.
-> If you see a warning, go to **System Settings → Privacy & Security → scroll down → click "Open Anyway"**.
+> **First launch note (macOS Sequoia / 15 and later):** Because the app isn't notarized with an Apple Developer ID, macOS will block the first launch with a dialog saying *"Apple could not verify TranzorExporter is free of malware"* — and on Sequoia this dialog only offers **Done / Move to Trash** (no inline "Open Anyway" button).
+>
+> **Recommended (one Terminal command):** open Terminal and run:
+> ```bash
+> xattr -dr com.apple.quarantine ~/Downloads/TranzorExporter.app
+> ```
+> (Adjust the path if you moved the app, e.g. `/Applications/TranzorExporter.app`.) Then double-click the app — it will launch normally. You only need to do this once per download.
+>
+> **Fallback (GUI):** if you prefer not to use Terminal, double-click the app once and click **Done** to dismiss the warning. Then open **System Settings → Privacy & Security**, scroll to the bottom, and within about a minute you'll see a row *"'TranzorExporter' was blocked…"* with an **Open Anyway** button. Click it, authenticate, and confirm in the follow-up dialog.
 
 ### Step 2: Connect to VPN
 
@@ -64,7 +71,8 @@ The interface is identical to the Windows version:
 
 | Issue | Solution |
 |-------|----------|
-| App blocked by macOS | System Settings → Privacy & Security → "Open Anyway" |
+| App blocked by macOS ("Apple could not verify…") | Run `xattr -dr com.apple.quarantine ~/Downloads/TranzorExporter.app` in Terminal, then double-click. Or use System Settings → Privacy & Security → "Open Anyway" after a blocked attempt. |
+| App "is damaged and can't be opened" | Same fix: `xattr -dr com.apple.quarantine <path-to-TranzorExporter.app>`. This is caused by the quarantine flag, not actual file corruption. |
 | Connection timeout | Check that your VPN is active |
 | App doesn't open | Make sure you unzipped the download first |
 
