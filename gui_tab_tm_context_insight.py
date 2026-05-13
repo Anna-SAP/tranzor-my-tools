@@ -531,6 +531,11 @@ class TmContextInsightTab:
         )
         self.ctx_text.pack(fill="x")
 
+        # Register per-segment foreground colors so the stacked bars are
+        # actually decipherable — same character █ in different colors per
+        # pipeline source, matching the badge palette.
+        self._setup_bar_tags()
+
         # ── Lower row table area ──
         self.lbl_row_title = ttk.Label(left, text="", style="CardBold.TLabel",
                                        font=(FONT_FAMILY, 11, "bold"))
@@ -738,6 +743,56 @@ class TmContextInsightTab:
         )
 
     # ------------------------------------------------------------------
+    # Bar coloring helpers
+    # ------------------------------------------------------------------
+    # Foreground colors per bar segment. Bright enough to read on the
+    # dark #0a0a1a Text background, distinct enough to tell adjacent
+    # segments apart at a glance. Aligned with BADGE_COLORS so the
+    # legend (badges in the table) matches the bar colors.
+    BAR_PALETTE = {
+        "tm":          "#1abc9c",  # teal
+        "ice":         "#3498db",  # blue
+        "cached":      "#9b59b6",  # purple
+        "llm":         "#bdc3c7",  # light gray — most common, kept neutral
+        "refined":     "#e67e22",  # orange
+        "human":       "#e94560",  # red
+        "ctx_ok":      "#2ecc71",  # green
+        "ctx_partial": "#f39c12",  # amber
+        "ctx_none":    "#566273",  # muted slate
+        "empty":       "#1f2540",  # near-background filler
+    }
+
+    def _setup_bar_tags(self):
+        """Configure foreground tags on both bar Text widgets."""
+        for widget in (self.agg_text, self.ctx_text):
+            for key, color in self.BAR_PALETTE.items():
+                widget.tag_configure(f"bar_{key}", foreground=color)
+
+    def _insert_colored_bar(self, widget, segments, total, width=_BAR_WIDTH):
+        """Insert a stacked bar of █ characters into ``widget``.
+
+        ``segments`` is an iterable of (count, palette_key) tuples in the
+        visual order they should appear. Remaining cells get the ``empty``
+        tag so the bar always occupies exactly ``width`` columns (keeps
+        right-hand columns aligned in monospace).
+        """
+        if not total:
+            widget.insert("end", _BAR_LIGHT * width, "bar_empty")
+            return
+        remaining = width
+        for count, key in segments:
+            if count <= 0 or remaining <= 0:
+                continue
+            chunk = int(round(count / total * width))
+            chunk = min(chunk, remaining)
+            if chunk <= 0:
+                continue
+            widget.insert("end", _BAR_BLOCK * chunk, f"bar_{key}")
+            remaining -= chunk
+        if remaining > 0:
+            widget.insert("end", _BAR_LIGHT * remaining, "bar_empty")
+
+    # ------------------------------------------------------------------
     # Render: aggregate panels
     # ------------------------------------------------------------------
     def _render_aggregates(self, cases):
@@ -770,13 +825,14 @@ class TmContextInsightTab:
             for lang in sorted(source_counts.keys()):
                 buckets = source_counts[lang]
                 total = sum(buckets.values())
-                bar = _stacked_bar(
-                    [buckets[k] for k in self.SOURCE_KEYS],
+                self.agg_text.insert("end", f"{lang:<10} ")
+                self._insert_colored_bar(
+                    self.agg_text,
+                    [(buckets[k], k) for k in self.SOURCE_KEYS],
                     total,
                 )
-                line = (
-                    f"{lang:<10} {bar:<{_BAR_WIDTH}}  "
-                    f"{buckets['tm']:>4} "
+                tail = (
+                    f"  {buckets['tm']:>4} "
                     f"{buckets['ice']:>4} "
                     f"{buckets['cached']:>6} "
                     f"{buckets['llm']:>5} "
@@ -784,7 +840,7 @@ class TmContextInsightTab:
                     f"{buckets['human']:>5}  "
                     f"{total:>8}\n"
                 )
-                self.agg_text.insert("end", line)
+                self.agg_text.insert("end", tail)
         self.agg_text.configure(state="disabled")
 
         # Context panel
@@ -805,18 +861,19 @@ class TmContextInsightTab:
             for lang in sorted(ctx_counts.keys()):
                 buckets = ctx_counts[lang]
                 total = sum(buckets.values())
-                bar = _stacked_bar(
-                    [buckets[k] for k in self.CONTEXT_KEYS],
+                self.ctx_text.insert("end", f"{lang:<10} ")
+                self._insert_colored_bar(
+                    self.ctx_text,
+                    [(buckets[k], k) for k in self.CONTEXT_KEYS],
                     total,
                 )
-                line = (
-                    f"{lang:<10} {bar:<{_BAR_WIDTH}}  "
-                    f"{buckets['ctx_ok']:>10} "
+                tail = (
+                    f"  {buckets['ctx_ok']:>10} "
                     f"{buckets['ctx_partial']:>8} "
                     f"{buckets['ctx_none']:>8}  "
                     f"{total:>8}\n"
                 )
-                self.ctx_text.insert("end", line)
+                self.ctx_text.insert("end", tail)
         self.ctx_text.configure(state="disabled")
 
     # ------------------------------------------------------------------
