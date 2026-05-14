@@ -14,13 +14,17 @@ Download the Mac build from our GitHub repository:
 
 1. Click the latest **Build Mac App** workflow run (with ✅ green checkmark)
 2. Scroll to the **Artifacts** section at the bottom
-3. Download **TranzorExporter-Mac**
-4. Unzip it once → you'll get a `TranzorExporter-Mac/` folder
+3. Download **TranzorExporter-Mac** — you get `TranzorExporter-Mac.zip`
+4. Unzip **twice** — GitHub wraps the artifact in an outer zip, and we ship the .app inside an inner ditto zip so its code signature survives the trip intact:
+   - Double-click the downloaded `TranzorExporter-Mac.zip` → you get another `TranzorExporter-Mac.zip` (macOS may add ` 2` to disambiguate)
+   - Double-click that one → you get a `TranzorExporter-Mac/` folder
 
 Inside the `TranzorExporter-Mac/` folder you'll see two items side by side:
 
 - **TranzorExporter.app** — the main program
 - **首次打开必读.txt** — first-launch guide (two Gatekeeper-bypass methods)
+
+> Why two unzip steps? Without the inner ditto zip the .app's code signature gets damaged in transit through GitHub Actions and macOS refuses to launch it even after the Gatekeeper bypass. The inner zip is what keeps the .app working.
 
 ---
 
@@ -90,7 +94,8 @@ The interface is identical to the Windows version:
 |-------|----------|
 | App blocked by macOS ("Apple could not verify…") | Pick either method above. Recommended: `xattr -dr com.apple.quarantine /Applications/TranzorExporter.app` in Terminal. |
 | App "is damaged and can't be opened" | Same fix — caused by the quarantine flag, not actual corruption. |
-| Folder is empty after unzipping | Unzip the downloaded `TranzorExporter-Mac.zip`. You should get a `TranzorExporter-Mac/` folder with two items inside. |
+| Folder is empty after unzipping | Make sure you unzipped **twice** — once for the GitHub artifact wrapper, once for the inner ditto zip. After the second unzip you should get a `TranzorExporter-Mac/` folder with two items inside. |
+| App still won't open even after "Open Anyway" in System Settings | The .app's code signature may be damaged. Re-download the artifact and make sure you unzipped both layers (outer GitHub wrapper + inner ditto zip). Skipping the inner zip step is what damages the signature. |
 | Connection timeout | Check that your VPN is active. |
 | App still won't open after `xattr` | Make sure you ran it against the actual install path. If the app is somewhere other than `/Applications`, replace the path in the command. |
 

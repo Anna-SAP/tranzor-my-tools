@@ -81,11 +81,12 @@
 
 ### 验证
 
-- [ ] 已下载 `TranzorExporter-Mac` artifact 并解压一次，得到 `TranzorExporter-Mac/` 文件夹。
+- [ ] 已下载 `TranzorExporter-Mac` artifact，并解压**两次**（外层 GitHub artifact 包装 + 内层 ditto zip），得到 `TranzorExporter-Mac/` 文件夹。
 - [ ] 文件夹里能看到两项并列内容：`TranzorExporter.app`、`首次打开必读.txt`。
+- [ ] workflow 的 CI log 中能看到 round-trip codesign verify 步骤通过（防 .app 完整性损坏的内部校验）。
 - [ ] 已把 `.app` 拖到 `/Applications`。
 - [ ] 已按 `首次打开必读.txt` 中任一种方式（终端 `xattr` / 系统设置）解除 Gatekeeper 拦截。
-- [ ] 已在真实 Mac 上尝试打开 `.app`。
+- [ ] **已在真实 Mac 上实际启动 `.app` —— 重点：能弹出主窗口，不只是 codesign 通过**（事故复盘见 mac_build_guide.md）。
 - [ ] 已确认主窗口可以正常显示。
 - [ ] 已确认关键标签页至少可基本切换。
 

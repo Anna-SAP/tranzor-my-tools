@@ -96,18 +96,15 @@ jobs:
           codesign -dv --verbose=4 dist/TranzorExporter.app || true
 
       - name: Stage release contents (.app + README)
-        # 在一个独立目录里准备发布内容。直接把这个目录交给 upload-artifact,
-        # GitHub 会用自己的 zip 把目录内容(而非目录本身)打成 artifact zip,
-        # 用户下载 + 解压一次即拿到 .app 和 README。
-        #
-        # 注意:macOS Finder 的 Archive Utility 在解压含多个顶层项目的 zip 时
-        # 一定会创建以 zip 名命名的文件夹(Finder 的行为,zip 内部布局改不了);
-        # 想完全没有文件夹只能扔掉 README、单 ship .app。当前做了取舍 ——
-        # 保留 README 便于用户读首次启动指引,接受一次套壳文件夹。
+        # 用 ditto 把 .app 复制到 staging,而不是 cp -R。
+        # 关键原因:cp -R 在某些 macOS 版本/挂载点上对 .app 的 extended
+        # attributes / symlink 保真度并不可靠,而 ditto 是 Apple 原生工具,
+        # 专门设计来在 Mac 上完整搬运 bundle 结构(symlink / 可执行位 /
+        # xattr / 资源叉)。详见 mac_build_guide.md 末尾的事故复盘。
         run: |
           rm -rf staging
           mkdir -p staging
-          cp -R dist/TranzorExporter.app staging/
+          ditto dist/TranzorExporter.app staging/TranzorExporter.app
 
           # 纯文本 README — TextEdit 打开 .txt 文件不会触发 Gatekeeper,
           # 因此即使没有先做任何配置,用户也能正常看到说明并复制粘贴命令。
@@ -155,14 +152,52 @@ jobs:
           目前本项目暂未启用该路径,所以才需要以上一次性操作。
           README
 
+          # 复制完立刻 verify 一次签名,确认 ditto 没破坏 codesign seal。
+          # 如果这里就 fail,说明 cp 那一步出问题,而不是后面的 zip。
+          codesign --verify --deep --strict --verbose=2 staging/TranzorExporter.app
           ls -la staging/
 
+      - name: Pack release zip with ditto + round-trip verify
+        # 关键:用 ditto 自己打 zip,而不是让 upload-artifact 打包目录。
+        #
+        # 事故复盘(2026-05-14,build #34):一度尝试过省掉这层 ditto zip,
+        # 直接把 staging/ 交给 upload-artifact 打包。结果用户下载解压后
+        # codesign 校验失败,.app 即使解除 quarantine 也无法启动 —— 因为
+        # upload-artifact 内部用的 Node.js zip 实现没能完整保留 .app bundle
+        # 里的 symlink / xattr / 文件 mtime,_CodeSignature/CodeResources 里
+        # 登记的 hash 与解压出的文件实际不一致,macOS 直接拒绝启动。
+        #
+        # 用 ditto 打 zip:Apple 原生工具,byte-level 保留 bundle 结构;
+        # upload-artifact 拿到的是单个 .zip 文件,它只会做无损封装。整条
+        # 链路对 .app 完整性是 lossless 的。
+        #
+        # 代价:用户要双击解压两次(外层 GitHub artifact zip → 内层 ditto
+        # zip → .app + README 文件夹)。这是没有 Apple 公证条件下保 .app
+        # 完整性的必要权衡。
+        #
+        # 防止再次踩坑:本步骤最后做了 round-trip 校验 —— 解压回来再
+        # codesign --verify,如果未来有人改这段并破坏完整性,CI 立刻红。
+        run: |
+          mkdir -p dist
+          rm -f dist/TranzorExporter-Mac.zip
+          cd staging
+          ditto -c -k . ../dist/TranzorExporter-Mac.zip
+          cd ..
+          ls -lh dist/TranzorExporter-Mac.zip
+          unzip -l dist/TranzorExporter-Mac.zip | head -20
+
+          # round-trip 校验:解压到临时目录,再 codesign --verify
+          rm -rf /tmp/roundtrip
+          mkdir -p /tmp/roundtrip
+          ditto -x -k dist/TranzorExporter-Mac.zip /tmp/roundtrip
+          codesign --verify --deep --strict --verbose=2 \
+            /tmp/roundtrip/TranzorExporter.app
+
       - name: Upload TranzorExporter artifact
-        # upload-artifact@v4:path 指向目录时,会把目录的"内容"(.app + README)
-        # 作为 artifact zip 的根项目。用户下载到一个 TranzorExporter-Mac.zip,
-        # 双击解压后 Finder 创建 TranzorExporter-Mac/ 文件夹,内含两件套。
+        # path 指向单个 .zip 文件,upload-artifact 对单文件是无损封装
+        # (不会再用 Node.js zip 去重新打包内容),保证 ditto zip 字节不变。
         uses: actions/upload-artifact@v4
         with:
           name: TranzorExporter-Mac
-          path: staging/
+          path: dist/TranzorExporter-Mac.zip
           retention-days: 90
