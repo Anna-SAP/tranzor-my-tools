@@ -2,49 +2,6 @@ name: Build Mac App
 
 on:
   workflow_dispatch:  # 手动触发 — 在 GitHub 页面点击 Run workflow
-  push:
-    branches: [master]
-    # 仅当与 Mac 构建相关的源文件 / 构建脚本变动时才触发,避免文档改动浪费
-    # macOS runner 分钟数(macOS runner 在 Actions 计费上 ≈ Linux 的 10×)。
-    # 与 build-windows.yml 的 path 列表对齐,但用 Mac 专属的 spec 文件名。
-    paths:
-      - 'TranzorExporter_mac.spec'
-      - 'export_gui.py'
-      - 'export_changes.py'
-      - 'export_translations.py'
-      - 'export_full_translations.py'
-      - 'export_mr_pipeline.py'
-      - 'quality_overview.py'
-      - 'gui_tabs.py'
-      - 'gui_tab_full_translations.py'
-      - 'gui_tab_human_revisions.py'
-      - 'gui_tab_scan_tasks.py'
-      - 'gui_tab_term_watchtower.py'
-      - 'terminology_watchtower.py'
-      - 'tranzor_terminology.py'
-      - 'gitlab_client.py'
-      - 'pyinstaller_hooks/**'
-      - '.github/workflows/build-mac.yml'
-  pull_request:
-    branches: [master]
-    paths:
-      - 'TranzorExporter_mac.spec'
-      - 'export_gui.py'
-      - 'export_changes.py'
-      - 'export_translations.py'
-      - 'export_full_translations.py'
-      - 'export_mr_pipeline.py'
-      - 'quality_overview.py'
-      - 'gui_tabs.py'
-      - 'gui_tab_full_translations.py'
-      - 'gui_tab_human_revisions.py'
-      - 'gui_tab_scan_tasks.py'
-      - 'gui_tab_term_watchtower.py'
-      - 'terminology_watchtower.py'
-      - 'tranzor_terminology.py'
-      - 'gitlab_client.py'
-      - 'pyinstaller_hooks/**'
-      - '.github/workflows/build-mac.yml'
 
 jobs:
   build:
@@ -59,7 +16,7 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install Python dependencies
+      - name: Install dependencies
         run: |
           pip install requests openpyxl pyinstaller
 
@@ -68,101 +25,40 @@ jobs:
           pyinstaller TranzorExporter_mac.spec --clean
 
       - name: Ad-hoc codesign the .app bundle
-        # 没有 Apple Developer Program ($99/年) 提供的证书 + 公证,Gatekeeper
-        # 在首次启动时一定会拦截。ad-hoc 签名解决的是"应用已损坏"二次错误,
-        # 让首次拦截只会出现 Apple 的标准提示框。
-        #
-        # 配合下面打进 artifact 的 "首次打开必读.txt",用户解压后即可看到所有
-        # 解除拦截的说明,README 是纯文本不会被 Gatekeeper 拦,可以直接读
-        # 并复制 xattr 命令。
-        #
-        # 为什么用 zip 而不是 DMG:macOS 15 Sequoia 起,unsigned DMG 在 mount
-        # 阶段就会被 Gatekeeper 拦截 — 比 zip 多一道关,反而让用户体验更差。
-        #
-        # 若以后启用真正的公证,需要的改动:
-        #   1. 加 GitHub Secrets: APPLE_CERT_P12_BASE64, APPLE_CERT_PASSWORD,
-        #      APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD。
-        #   2. 把本步骤换成:
-        #        security import 证书 -> security set-key-partition-list
-        #        codesign --options=runtime --timestamp --sign "Developer ID Application: ..."
-        #        xcrun notarytool submit --wait
-        #        xcrun stapler staple
-        # 升级路径见 mac_build_guide.md 末尾的章节。
+        # The bundle is built unsigned (spec has codesign_identity=None and no
+        # Apple Developer ID is available in this repo). On macOS 15 Sequoia,
+        # an unsigned + quarantined .app produces a Gatekeeper dialog with no
+        # inline "Open Anyway" button. An ad-hoc signature does NOT satisfy
+        # notarization, but it gives the universal2 bundle an internally
+        # consistent signature so users can reliably bypass via
+        # `xattr -dr com.apple.quarantine` or System Settings → Privacy &
+        # Security → Open Anyway, and avoids the secondary "app is damaged"
+        # failure mode. Long-term proper fix: enroll in Apple Developer
+        # Program, store DEVELOPER_ID_APPLICATION cert + notarytool credentials
+        # as repo secrets, and replace this with a real signature +
+        # `xcrun notarytool submit --wait` + `xcrun stapler staple`.
         run: |
-          codesign --force --deep --sign - --options=runtime \
-            dist/TranzorExporter.app
-          codesign --verify --deep --strict --verbose=2 \
-            dist/TranzorExporter.app
+          codesign --force --deep --sign - dist/TranzorExporter.app
+          codesign --verify --deep --strict --verbose=2 dist/TranzorExporter.app
           codesign -dv --verbose=4 dist/TranzorExporter.app || true
 
-      - name: Stage release contents (.app + README)
-        # 在一个独立目录里准备发布内容。直接把这个目录交给 upload-artifact,
-        # GitHub 会用自己的 zip 把目录内容(而非目录本身)打成 artifact zip,
-        # 用户下载 + 解压一次即拿到 .app 和 README。
-        #
-        # 注意:macOS Finder 的 Archive Utility 在解压含多个顶层项目的 zip 时
-        # 一定会创建以 zip 名命名的文件夹(Finder 的行为,zip 内部布局改不了);
-        # 想完全没有文件夹只能扔掉 README、单 ship .app。当前做了取舍 ——
-        # 保留 README 便于用户读首次启动指引,接受一次套壳文件夹。
+      - name: Package .app with ditto (preserves the .app bundle wrapper)
+        # Why this step exists: actions/upload-artifact@v4 strips the top-level
+        # directory when uploading a folder path, which on macOS means the
+        # ".app" wrapper is lost and Finder ends up showing only the raw Unix
+        # executable inside Contents/MacOS/. Wrapping the bundle with `ditto`
+        # (Apple's native tool for .app packages — preserves symlinks,
+        # executable bits and extended attributes) produces a single .zip
+        # file; uploading that .zip keeps the full TranzorExporter.app
+        # hierarchy intact end-to-end.
         run: |
-          rm -rf staging
-          mkdir -p staging
-          cp -R dist/TranzorExporter.app staging/
+          cd dist
+          ditto -c -k --keepParent TranzorExporter.app TranzorExporter-Mac.zip
+          ls -lh TranzorExporter-Mac.zip
 
-          # 纯文本 README — TextEdit 打开 .txt 文件不会触发 Gatekeeper,
-          # 因此即使没有先做任何配置,用户也能正常看到说明并复制粘贴命令。
-          cat > "staging/首次打开必读.txt" <<'README'
-          =========================================================
-            TranzorExporter — 首次打开必读
-          =========================================================
-
-          因为本工具尚未购买 Apple 开发者签名,macOS 在首次打开时
-          会拦截并提示"无法验证开发者"或"已损坏,应移到废纸篓"。
-
-          这不是真的损坏,只是 macOS 给所有从网络下载的文件加了
-          com.apple.quarantine 属性。下面任选一种方式去掉它,
-          整个工具只需做一次。
-
-          ---------------------------------------------------------
-            安装步骤
-          ---------------------------------------------------------
-          1. 把 TranzorExporter.app 拖到 /Applications 文件夹
-          2. 任选下面 A / B 之一解除拦截即可
-
-          ---------------------------------------------------------
-            方式 A:终端一行命令(推荐,最稳)
-          ---------------------------------------------------------
-          1. 打开"终端"(Launchpad → 搜索 Terminal)
-          2. 粘贴下面这行,回车:
-
-                xattr -dr com.apple.quarantine /Applications/TranzorExporter.app
-
-          3. 之后双击 TranzorExporter.app 即可正常启动
-
-          ---------------------------------------------------------
-            方式 B:纯 GUI(完全不进终端)
-          ---------------------------------------------------------
-          1. 双击 TranzorExporter.app(会被拦截,正常)
-          2. 打开"系统设置 → 隐私与安全性",滚到底部
-          3. 在被拦截记录右侧,点击"仍要打开"
-          4. 输入登录密码确认 → 再次双击应用即可
-
-          ---------------------------------------------------------
-            为什么 macOS 会拦?能让它默认放行吗?
-          ---------------------------------------------------------
-          能,但需要购买 Apple Developer Program ($99/年),并对
-          构建出的 .app 做 codesign + notarize + staple 三步。
-          目前本项目暂未启用该路径,所以才需要以上一次性操作。
-          README
-
-          ls -la staging/
-
-      - name: Upload TranzorExporter artifact
-        # upload-artifact@v4:path 指向目录时,会把目录的"内容"(.app + README)
-        # 作为 artifact zip 的根项目。用户下载到一个 TranzorExporter-Mac.zip,
-        # 双击解压后 Finder 创建 TranzorExporter-Mac/ 文件夹,内含两件套。
+      - name: Upload TranzorExporter.app zip
         uses: actions/upload-artifact@v4
         with:
           name: TranzorExporter-Mac
-          path: staging/
+          path: dist/TranzorExporter-Mac.zip
           retention-days: 90
