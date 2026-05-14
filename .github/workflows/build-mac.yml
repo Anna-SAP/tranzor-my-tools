@@ -184,7 +184,12 @@ jobs:
           ditto -c -k . ../dist/TranzorExporter-Mac.zip
           cd ..
           ls -lh dist/TranzorExporter-Mac.zip
-          unzip -l dist/TranzorExporter-Mac.zip | head -20
+          # 把 unzip 列表先写到文件再 head,避免 pipefail 下 head 提前关 stdin
+          # 让 unzip 拿 SIGPIPE (141) 失败整步 — 真实 .app 的 listing 远超
+          # 20 行,管道关闭很容易在 buffer 满后触发。
+          unzip -l dist/TranzorExporter-Mac.zip > /tmp/zip-listing.txt
+          echo "zip listing has $(wc -l < /tmp/zip-listing.txt) lines; first 20:"
+          head -20 /tmp/zip-listing.txt
 
           # round-trip 校验:解压到临时目录,再 codesign --verify
           rm -rf /tmp/roundtrip
