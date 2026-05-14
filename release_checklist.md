@@ -74,17 +74,14 @@
 
 ### GitHub Actions
 
-- [ ] 已触发 `Build Mac App` workflow（手动 Run workflow，或最近一次 push/PR 自动触发也算）。
+- [ ] 已手动触发 `Build Mac App` workflow。
 - [ ] workflow 运行成功。
 - [ ] 没有依赖安装失败或 PyInstaller 构建失败。
 - [ ] 已从 Artifacts 下载 `TranzorExporter-Mac`。
 
 ### 验证
 
-- [ ] 已下载 `TranzorExporter-Mac` artifact 并解压一次，得到 `TranzorExporter-Mac/` 文件夹。
-- [ ] 文件夹里能看到两项并列内容：`TranzorExporter.app`、`首次打开必读.txt`。
-- [ ] 已把 `.app` 拖到 `/Applications`。
-- [ ] 已按 `首次打开必读.txt` 中任一种方式（终端 `xattr` / 系统设置）解除 Gatekeeper 拦截。
+- [ ] 已确认下载产物中包含 `TranzorExporter.app`。
 - [ ] 已在真实 Mac 上尝试打开 `.app`。
 - [ ] 已确认主窗口可以正常显示。
 - [ ] 已确认关键标签页至少可基本切换。
