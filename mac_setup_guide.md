@@ -91,5 +91,5 @@ pyinstaller --onefile --windowed --name "Tranzor导出器" \
 | `No module named 'requests'` | 运行 `pip3 install requests openpyxl` |
 | 双击 .command 提示"无法打开" | 右键 → 打开，或在系统偏好设置中允许运行 |
 | GUI 窗口显示异常 | macOS 可能需安装 `python-tk`：`brew install python-tk` |
-| 双击 `TranzorExporter.app` 提示"Apple 无法验证 ……是否包含恶意软件"（macOS 15 Sequoia） | 在终端运行 `xattr -dr com.apple.quarantine ~/Downloads/TranzorExporter.app` 后再双击；或先双击触发一次拦截，然后到 **系统设置 → 隐私与安全性** 底部点击 **"仍要打开"**。 |
+| 双击 `TranzorExporter.app` 提示"Apple 无法验证 ……是否包含恶意软件"（macOS 15 Sequoia） | 这是因为本工具没有 Apple 公证，属于一次性问题。最快的处理：`xattr -dr com.apple.quarantine /Applications/TranzorExporter.app` 后再双击；或走 **系统设置 → 隐私与安全性 → 仍要打开**。详细两种方式见 [TranzorExporter_Mac_UserGuide.md](TranzorExporter_Mac_UserGuide.md)。 |
 | 双击 `.app` 提示"已损坏，应移到废纸篓" | 同上：执行 `xattr -dr com.apple.quarantine <.app 路径>` 即可，并非文件真的损坏，是 quarantine 属性导致。 |

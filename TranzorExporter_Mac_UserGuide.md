@@ -8,38 +8,55 @@ Great news — **TranzorExporter is now available for macOS**! It has full featu
 
 ## ⬇️ Download
 
-Download **TranzorExporter.app** from our GitHub repository:
+Download the Mac build from our GitHub repository:
 
 👉 https://github.com/Anna-SAP/tranzor-my-tools/actions
 
 1. Click the latest **Build Mac App** workflow run (with ✅ green checkmark)
 2. Scroll to the **Artifacts** section at the bottom
-3. Download **TranzorExporter-Mac** (13.4 MB)
-4. Unzip the downloaded file → you'll get `TranzorExporter.app`
+3. Download **TranzorExporter-Mac**
+4. Unzip it once → you'll get a `TranzorExporter-Mac/` folder
+
+Inside the `TranzorExporter-Mac/` folder you'll see two items side by side:
+
+- **TranzorExporter.app** — the main program
+- **首次打开必读.txt** — first-launch guide (two Gatekeeper-bypass methods)
 
 ---
 
 ## 🚀 Getting Started
 
-### Step 1: Open the App
+### Step 1: Install the app
 
-Double-click `TranzorExporter.app` to launch.
+Drag `TranzorExporter.app` from the unzipped folder into your `/Applications` folder.
 
-> **First launch note (macOS Sequoia / 15 and later):** Because the app isn't notarized with an Apple Developer ID, macOS will block the first launch with a dialog saying *"Apple could not verify TranzorExporter is free of malware"* — and on Sequoia this dialog only offers **Done / Move to Trash** (no inline "Open Anyway" button).
->
-> **Recommended (one Terminal command):** open Terminal and run:
-> ```bash
-> xattr -dr com.apple.quarantine ~/Downloads/TranzorExporter.app
-> ```
-> (Adjust the path if you moved the app, e.g. `/Applications/TranzorExporter.app`.) Then double-click the app — it will launch normally. You only need to do this once per download.
->
-> **Fallback (GUI):** if you prefer not to use Terminal, double-click the app once and click **Done** to dismiss the warning. Then open **System Settings → Privacy & Security**, scroll to the bottom, and within about a minute you'll see a row *"'TranzorExporter' was blocked…"* with an **Open Anyway** button. Click it, authenticate, and confirm in the follow-up dialog.
+### Step 2: Get past the first-launch Gatekeeper prompt
 
-### Step 2: Connect to VPN
+> Because the app isn't notarized with an Apple Developer ID, macOS will block the first launch with a dialog saying *"Apple could not verify TranzorExporter is free of malware"* — on Sequoia (macOS 15+) this dialog only offers **Done / Move to Trash** with no inline "Open Anyway" button. You only need to do this **once per download**.
+
+Pick whichever of these two feels easiest — they do the same thing:
+
+**A. One Terminal command (recommended, fastest)**
+
+```bash
+xattr -dr com.apple.quarantine /Applications/TranzorExporter.app
+```
+
+Then double-click `TranzorExporter.app` — it launches normally.
+
+**B. Pure GUI (no Terminal at all)**
+
+1. Double-click `TranzorExporter.app` — let it get blocked.
+2. Open **System Settings → Privacy & Security**, scroll to the bottom.
+3. Click **Open Anyway** next to the blocked entry, authenticate, and confirm the follow-up dialog.
+
+After either of these, double-clicking the app from now on just works.
+
+### Step 3: Connect to VPN
 
 Make sure your VPN is connected so the app can reach the Tranzor platform.
 
-### Step 3: Start Exporting!
+### Step 4: Start Exporting!
 
 The interface is identical to the Windows version:
 
@@ -71,10 +88,11 @@ The interface is identical to the Windows version:
 
 | Issue | Solution |
 |-------|----------|
-| App blocked by macOS ("Apple could not verify…") | Run `xattr -dr com.apple.quarantine ~/Downloads/TranzorExporter.app` in Terminal, then double-click. Or use System Settings → Privacy & Security → "Open Anyway" after a blocked attempt. |
-| App "is damaged and can't be opened" | Same fix: `xattr -dr com.apple.quarantine <path-to-TranzorExporter.app>`. This is caused by the quarantine flag, not actual file corruption. |
-| Connection timeout | Check that your VPN is active |
-| App doesn't open | Make sure you unzipped the download first |
+| App blocked by macOS ("Apple could not verify…") | Pick either method above. Recommended: `xattr -dr com.apple.quarantine /Applications/TranzorExporter.app` in Terminal. |
+| App "is damaged and can't be opened" | Same fix — caused by the quarantine flag, not actual corruption. |
+| Folder is empty after unzipping | Unzip the downloaded `TranzorExporter-Mac.zip`. You should get a `TranzorExporter-Mac/` folder with two items inside. |
+| Connection timeout | Check that your VPN is active. |
+| App still won't open after `xattr` | Make sure you ran it against the actual install path. If the app is somewhere other than `/Applications`, replace the path in the command. |
 
 ---
 
