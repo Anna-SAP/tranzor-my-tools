@@ -52,6 +52,7 @@
     let tickMode = true;            // also tick the platform's own checkbox on each matched row
     let tickedNodes = new Set();    // rows whose checkbox WE ticked (so close can untick cleanly)
     let lastHighlightStats = { found: 0, ticked: 0 };
+    let currentFilterKey = null;    // the String Key currently filtering Tranzor's search box
     let dismissed = false;          // user clicked ✕ to hide the panel
     let dismissedEnvelopeId = null; // remember which envelope was dismissed (auto-reopen for new ones)
 
@@ -173,6 +174,27 @@
         border-left: 3px solid #E67E22;
         color: #fdba74; font-size: 11px; line-height: 1.45;
         padding: 8px 10px; margin: 0 0 10px 0; border-radius: 4px;
+    }
+    .tz-bridge-key-group {
+        border: 1px solid #1e293b; border-radius: 6px;
+        padding: 8px 8px 4px 8px; margin-bottom: 10px;
+    }
+    .tz-bridge-key-group.current {
+        border-color: #4472C4; box-shadow: 0 0 0 1px rgba(68, 114, 196, 0.4);
+    }
+    .tz-bridge-key-group-head {
+        display: flex; align-items: flex-start; gap: 6px; margin-bottom: 6px;
+    }
+    .tz-bridge-key-group-head .tz-bridge-key {
+        flex: 1; font-size: 11px;
+    }
+    .tz-bridge-key-group-count {
+        font-size: 10px; color: #94a3b8; background: #1e293b;
+        padding: 1px 6px; border-radius: 999px; flex-shrink: 0;
+        font-family: monospace;
+    }
+    .tz-bridge-key-group .tz-bridge-item {
+        padding: 4px 8px; margin-left: 8px;
     }
     `;
 
@@ -392,20 +414,43 @@
             }
         }
 
-        const itemsHtml = currentEnvelope.items.map((it, i) => {
-            const state = progress[it.string_key] || '';
-            const cls = state ? ' ' + state : '';
+        // Group items by unique String Key. Tranzor's list is one big paginated
+        // table of (key, language) entries, so the user's 22 selections often
+        // reduce to a handful of unique keys — each driving one "fill Tranzor's
+        // search → tick matching rows → click Batch Retranslate" cycle.
+        const keyGroups = uniqueStringKeyGroups();
+        const currentKeyIdx = currentFilterKey
+            ? Math.max(0, keyGroups.findIndex(g => g.key === currentFilterKey))
+            : -1;
+
+        const groupsHtml = keyGroups.map((grp, gIdx) => {
+            const isCurrent = grp.key === currentFilterKey;
+            const groupItemsHtml = grp.items.map(it => {
+                const state = progress[it.string_key] || '';
+                const cls = state ? ' ' + state : '';
+                return `
+                    <div class="tz-bridge-item${cls}" data-key="${escapeHtml(it.string_key)}">
+                        <div class="tz-bridge-meta">${escapeHtml(it.language || '')} · ${escapeHtml(it.translation_type || '')}</div>
+                        <div class="tz-bridge-row">
+                            <button class="tz-bridge-btn primary" data-action="find">🔍 Find</button>
+                            <button class="tz-bridge-btn fix${state === 'fixed' ? ' active' : ''}" data-action="fix">✓ Fixed</button>
+                            <button class="tz-bridge-btn skip${state === 'skipped' ? ' active' : ''}" data-action="skip">⤵ Skip</button>
+                        </div>
+                    </div>
+                `;
+            }).join('');
             return `
-                <div class="tz-bridge-item${cls}" data-key="${escapeHtml(it.string_key)}">
-                    <div class="tz-bridge-row">
-                        <span class="tz-bridge-key" title="Click to copy">${escapeHtml(it.string_key)}</span>
+                <div class="tz-bridge-key-group${isCurrent ? ' current' : ''}" data-key="${escapeHtml(grp.key)}">
+                    <div class="tz-bridge-key-group-head">
+                        <span class="tz-bridge-key" title="Click to copy">${escapeHtml(grp.key)}</span>
+                        <span class="tz-bridge-key-group-count">${grp.items.length} langs</span>
                     </div>
-                    <div class="tz-bridge-meta">${escapeHtml(it.language || '')} · ${escapeHtml(it.translation_type || '')}</div>
-                    <div class="tz-bridge-row">
-                        <button class="tz-bridge-btn primary" data-action="find">🔍 Find</button>
-                        <button class="tz-bridge-btn fix${state === 'fixed' ? ' active' : ''}" data-action="fix">✓ Fixed</button>
-                        <button class="tz-bridge-btn skip${state === 'skipped' ? ' active' : ''}" data-action="skip">⤵ Skip</button>
+                    <div class="tz-bridge-row" style="margin-bottom:6px;">
+                        <button class="tz-bridge-btn primary" data-action="filter-key" data-key-idx="${gIdx}">
+                            🎯 ${isCurrent ? 'Re-filter' : 'Filter Tranzor by this key'}${isCurrent ? '' : ` (${gIdx + 1}/${keyGroups.length})`}
+                        </button>
                     </div>
+                    ${groupItemsHtml}
                 </div>
             `;
         }).join('');
@@ -416,20 +461,31 @@
             ? ` · ${hlStats.found}/${total} on page${tickMode ? ` · ${tickedNodes.size} ticked` : ''}`
             : '';
 
-        // Language distribution chips. The most common cause of "0 on page"
-        // is that selected items span multiple languages and Tranzor's task
-        // page only renders one at a time. Showing this up front saves a
-        // confused user from thinking the feature is broken.
+        // Language distribution chips give a quick read of how many languages
+        // the selection spans (cosmetic context, not action-driving).
         const langChips = envelopeLanguages().map(({ lang, n }) =>
             `<span class="tz-bridge-lang-chip">${escapeHtml(lang)} · ${n}</span>`
         ).join('');
-        const showHelp = onTaskPage && hlStats.found < total;
-        const helpHtml = showHelp
-            ? `<div class="tz-bridge-help">
-                ${hlStats.found === 0
-                    ? "Tranzor hasn't rendered any of these rows yet — they may be in collapsed language sections or other pagination pages. Click 🔄 Re-scan, or open the relevant language section/page; rows get ticked as they appear."
-                    : `Some rows aren't visible yet (probably in collapsed language sections or other pages). Open the rest and they'll be ticked automatically, or click 🔄 Re-scan.`}
-              </div>`
+
+        // Workflow guidance. Tranzor's list is paginated across all (key,lang)
+        // entries; "Filter by next key" → tick → Batch Retranslate → repeat.
+        let helpHtml = '';
+        if (onTaskPage && keyGroups.length > 1 && hlStats.found < total) {
+            helpHtml = `<div class="tz-bridge-help">
+                Your selection has <b>${keyGroups.length} unique String Keys</b> across ${total} (key, language) entries. Tranzor's list shows one filter at a time — click <b>🎯 Filter Tranzor</b> on each group to walk through them. Each pass auto-ticks the matched rows; then click Tranzor's <b>Batch Retranslate</b>.
+            </div>`;
+        } else if (onTaskPage && hlStats.found === 0 && keyGroups.length === 1) {
+            helpHtml = `<div class="tz-bridge-help">
+                No rows on screen yet. Click <b>🎯 Filter Tranzor by this key</b> to fill Tranzor's search box and surface the ${total} matching rows.
+            </div>`;
+        }
+
+        // Primary "next key" button is shown when there's more than one key to
+        // cycle through. It always advances to the next unique key in order.
+        const nextKeyBtn = keyGroups.length > 1
+            ? `<button class="tz-bridge-btn primary" id="tz-bridge-next-key" title="Fill Tranzor's search box with the next unique String Key and auto-tick its rows">
+                  🎯 Filter Tranzor by next key${currentKeyIdx >= 0 ? ` (next: ${(currentKeyIdx + 1) % keyGroups.length + 1}/${keyGroups.length})` : ` (1/${keyGroups.length})`}
+              </button>`
             : '';
 
         body.innerHTML = `
@@ -438,18 +494,19 @@
             </div>
             ${langChips ? `<div class="tz-bridge-langs">Languages: ${langChips}</div>` : ''}
             <div class="tz-bridge-toolbar">
-                <button class="tz-bridge-btn ${highlightMode ? 'active primary' : ''}" id="tz-bridge-hl-toggle" title="Mark every selected row on the Tranzor page with a green stripe">
-                    ${highlightMode ? '👀 Highlighting on page' : '⋯ Highlight on page'}
+                ${nextKeyBtn}
+                <button class="tz-bridge-btn ${highlightMode ? 'active primary' : ''}" id="tz-bridge-hl-toggle" title="Mark every matched row on the Tranzor page with a green stripe">
+                    ${highlightMode ? '👀 Highlight on' : '⋯ Highlight off'}
                 </button>
-                <button class="tz-bridge-btn ${tickMode ? 'active primary' : ''}" id="tz-bridge-tick-toggle" title="Also tick Tranzor's own row checkbox so you can hit Batch Retranslate. Closing the panel un-ticks the rows we ticked.">
+                <button class="tz-bridge-btn ${tickMode ? 'active primary' : ''}" id="tz-bridge-tick-toggle" title="Also tick Tranzor's own row checkbox. Closing the panel un-ticks our ticks.">
                     ${tickMode ? '☑ Auto-tick on' : '☐ Auto-tick off'}
                 </button>
-                <button class="tz-bridge-btn" id="tz-bridge-rescan" title="Re-expand language sections and rescan the DOM for matching rows">
+                <button class="tz-bridge-btn" id="tz-bridge-rescan" title="Re-apply the current filter and rescan for matching rows">
                     🔄 Re-scan
                 </button>
             </div>
             ${helpHtml}
-            ${itemsHtml}
+            ${groupsHtml}
             ${pasteFallbackHtml(/*expanded=*/false)}
         `;
         wirePasteFallback();
@@ -483,11 +540,39 @@
                 manualRescan();
             });
         }
+        const nextKeyBtnEl = document.getElementById('tz-bridge-next-key');
+        if (nextKeyBtnEl) {
+            nextKeyBtnEl.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const next = nextUniqueKeyToFilter();
+                if (next) filterTranzorByKey(next);
+            });
+        }
+        // Per-group key-headers: copy key on click; wire the filter-key button.
+        body.querySelectorAll('.tz-bridge-key-group').forEach(grpEl => {
+            const key = grpEl.dataset.key;
+            const keyEl = grpEl.querySelector('.tz-bridge-key-group-head .tz-bridge-key');
+            if (keyEl) {
+                keyEl.addEventListener('click', () => {
+                    navigator.clipboard.writeText(key).catch(() => {});
+                });
+            }
+            const filterBtn = grpEl.querySelector('[data-action="filter-key"]');
+            if (filterBtn) {
+                filterBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    filterTranzorByKey(key);
+                });
+            }
+        });
         body.querySelectorAll('.tz-bridge-item').forEach(itemEl => {
             const key = itemEl.dataset.key;
-            itemEl.querySelector('.tz-bridge-key').addEventListener('click', () => {
-                navigator.clipboard.writeText(key).catch(() => {});
-            });
+            const keyEl = itemEl.querySelector('.tz-bridge-key');
+            if (keyEl) {
+                keyEl.addEventListener('click', () => {
+                    navigator.clipboard.writeText(key).catch(() => {});
+                });
+            }
             itemEl.querySelectorAll('.tz-bridge-btn').forEach(btn => {
                 btn.addEventListener('click', (e) => {
                     e.stopPropagation();
@@ -760,39 +845,60 @@
             .map(([lang, n]) => ({ lang, n }));
     }
 
-    // Tranzor's task page shows one language section at a time (or collapses
-    // them by default). Heuristically locate clickable elements whose text
-    // mentions each envelope language and try to expand the section. Best-
-    // effort: any clicks that don't actually expand a section are harmless —
-    // MutationObserver picks up whatever does render.
-    function tryExpandLanguageSections() {
-        const langs = envelopeLanguages().map(x => x.lang);
-        if (!langs.length) return 0;
-        const candidates = Array.from(document.querySelectorAll(
-            'button, summary, h1, h2, h3, h4, h5, h6, a, [role="button"], [aria-expanded="false"], details > summary'
-        )).filter(el => !isInOurPanel(el));
-        let clicked = 0;
-        langs.forEach(lang => {
-            // Escape the lang for regex (just the hyphen, really)
-            const escaped = lang.replace(/-/g, '[-_]');
-            const re = new RegExp('(^|[^A-Za-z0-9_])' + escaped + '($|[^A-Za-z0-9_])', 'i');
-            const match = candidates.find(el => {
-                const text = (el.textContent || '').slice(0, 300);
-                if (!re.test(text)) return false;
-                if (el.getAttribute('aria-expanded') === 'true') return false;
-                return true;
-            });
-            if (match) {
-                try { match.click(); clicked++; } catch (e) { /* ignore */ }
-            }
+    // Group envelope items by unique String Key. Each Tranzor row is a
+    // (key, language) pair, so a 22-item envelope spanning 11 languages
+    // typically reduces to ~2 unique keys, each driving one filter pass.
+    function uniqueStringKeyGroups() {
+        if (!currentEnvelope || !currentEnvelope.items) return [];
+        const groups = new Map();
+        currentEnvelope.items.forEach(it => {
+            const k = it.string_key;
+            if (!groups.has(k)) groups.set(k, []);
+            groups.get(k).push(it);
         });
-        return clicked;
+        return Array.from(groups, ([key, items]) => ({ key, items }));
+    }
+
+    // Drive Tranzor's own search box. Tranzor's task page is one big
+    // paginated list (~50 rows per page × dozens of pages), so the only way
+    // to make 22 scattered (key, lang) entries land on one screen is to
+    // filter via the platform's own search.
+    function filterTranzorByKey(key) {
+        const input = document.querySelector(CONFIG.SELECTORS.searchInput);
+        if (!input) {
+            flashHeader("Search box not found — can't auto-filter");
+            return false;
+        }
+        input.focus();
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        try { setter && setter.call(input, key); } catch (e) { input.value = key; }
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
+        input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true }));
+        currentFilterKey = key;
+        // Give Tranzor a moment to re-render the filtered list, then re-scan.
+        // MutationObserver will also fire as rows appear; this just speeds up
+        // the visible "ticked" count update.
+        setTimeout(() => { refreshHighlights(); render(); }, 600);
+        return true;
+    }
+
+    function nextUniqueKeyToFilter() {
+        const groups = uniqueStringKeyGroups();
+        if (!groups.length) return null;
+        if (!currentFilterKey) return groups[0].key;
+        const idx = groups.findIndex(g => g.key === currentFilterKey);
+        if (idx < 0) return groups[0].key;
+        return groups[(idx + 1) % groups.length].key;
     }
 
     function manualRescan() {
-        // Try to expand sections again, then re-highlight after a settle delay.
-        tryExpandLanguageSections();
-        setTimeout(() => { refreshHighlights(); render(); }, 400);
+        // Re-run the most useful action: filter Tranzor to the current (or
+        // first) unique key, then re-highlight after the list re-renders.
+        const key = currentFilterKey || (uniqueStringKeyGroups()[0] && uniqueStringKeyGroups()[0].key);
+        if (key) filterTranzorByKey(key);
+        else { refreshHighlights(); render(); }
     }
 
     function findKeyOnPage(key) {
@@ -850,16 +956,20 @@
         if (root && !dismissed) root.classList.remove('collapsed');
         const tog = document.getElementById('tz-bridge-toggle');
         if (tog) tog.textContent = '»';
+        currentFilterKey = null;
         render();
         if (fromPaste) flashHeader('Loaded from clipboard');
-        // Tranzor lazy-renders rows per language section. Try to expand the
-        // sections matching the envelope's languages, then re-scan after the
-        // DOM settles. The MutationObserver also keeps picking up newly-
-        // rendered rows for any sections the user navigates to manually.
-        setTimeout(() => {
-            tryExpandLanguageSections();
-            setTimeout(() => { refreshHighlights(); render(); }, 500);
-        }, 250);
+        // Tranzor's task page is one big paginated list of (key, language)
+        // entries — selected items are scattered across pages. Drive Tranzor's
+        // own search box with the first unique String Key so the user sees
+        // those rows on one screen, ready for Batch Retranslate. Users with
+        // multiple unique keys cycle through them via the "🎯 Filter next" UI.
+        if (isOnEnvelopeTaskPage()) {
+            const groups = uniqueStringKeyGroups();
+            if (groups.length) {
+                setTimeout(() => filterTranzorByKey(groups[0].key), 250);
+            }
+        }
     }
 
     // ---- Polling loop ----

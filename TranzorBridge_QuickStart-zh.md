@@ -9,7 +9,7 @@
 
 | 改进前 | 改进后 |
 |---|---|
-| HTML 报告勾出 8 条 → 打开 Tranzor → 复制 `String Key` → 粘到搜索框 → 修 → 再来 7 遍 | 勾完 → 点 `↗ Send to Tranzor` → 直接跳到任务页，**Tranzor 原生列表里 8 条目标行已经被绿色高亮、平台自带的行复选框也已自动勾上** —— 立刻可以点 Tranzor 的 `Batch Retranslate` 一键批量重译；想逐条修也行，侧栏 `🔍 Find` 滚动 + 闪烁带你过去 |
+| HTML 报告勾出 8 条 → 打开 Tranzor → 复制 `String Key` → 粘到搜索框 → 修 → 再来 7 遍 | 勾完 → 点 `↗ Send to Tranzor` → 跳到任务页后 userscript **自动操作 Tranzor 自己的搜索框** 用每个独立 String Key 逐个过滤 → 各语言的对应行被一屏列出 → 自动高亮 + 自动勾选 → 直接点 Tranzor 的 `Batch Retranslate`。多个独立 key 通过侧栏 `🎯 Filter Tranzor by next key` 按钮逐个推进。 |
 
 ---
 
@@ -92,7 +92,8 @@
    - **`on task 227` 徽章**（绿色）：你已经在正确的任务页，绿色高亮 + 自动勾选已激活。如果徽章是橙色 `go to task 227 →`，点击它跳过去
    - **`👀 Highlighting on page`** 开关：嫌绿色条太显眼可以关掉，再点恢复
    - **`☑ Auto-tick on`** 开关（默认开）：自动把 Tranzor 原生的行 checkbox 勾上，让平台的 `Batch Retranslate` 等批量按钮立刻可用。关闭时只会撤掉**我们勾的那些**，你手动勾的不会被动。已经标记为 `✓ Fixed` 的条目不会被自动勾（已修过的没必要再批量重译）
-   - **`🔄 Re-scan`**：重跑一次"展开语言区段 + 扫描 + 勾选"流程。当你的选择跨多个语言时，Tranzor 通常一次只渲染一个语言区段 —— 看侧栏的"Languages: ja-JP · 4 · es-419 · 4 …"chip 就知道需要过几种语言。同时后台还有 DOM 观察器：你手动展开任何一个语言段，新出现的行会**自动**被勾选
+   - **`🎯 Filter Tranzor by next key`**：核心操作按钮。它把你选中条目里的下一个**独立 String Key** 自动填进 Tranzor 自己的搜索框 → 该 key 在所有语言下的对应行被一屏列出 → 自动勾上。点完后去 Tranzor 点 `Batch Retranslate`，再点这个按钮推进到下一个 key。状态栏显示 `(1/2)` `(2/2)` 等进度
+   - **`🔄 Re-scan`**：重新跑一次"应用当前过滤 + 重新扫 + 重新勾"流程。后台还有 DOM 观察器，Tranzor 渲染新行（翻页等）时也会自动重扫
    - **🔍 Find**：在 Tranzor 自己的列表里滚动到对应行 + 黄色闪烁 2.4 秒。如果当前页找不到（被分页过滤），会退化到填 Tranzor 的搜索框，再退化到剪贴板复制
    - **✓ Fixed**：标记已修；页面上的绿色条会立刻变成灰色，提示"这一条已完成"，剩下的还是绿色
    - **⤵ Skip**：标记跳过（不计入"已修"进度）
@@ -112,7 +113,7 @@
 | 侧栏始终显示 "no bridge" | 端口段被占满（≥10 个实例，或别的程序占了 48217–48226） | 重启 TranzorExporter；持续失败请看控制台是否输出 `BridgePortBusy`。剪贴板与 URL hash 降级通道照常可用 |
 | `🔍 Find` 没反应 | 目标行可能在 Tranzor 的另一页（分页过滤掉了），或者它的 String Key 不是作为可见文本渲染 | 点 key 文本复制到剪贴板，用 Tranzor 自己的搜索/翻页跳过去；如果你不在对应任务页，侧栏会显示橙色 `go to task → ` 链接 |
 | Send 跳出来的页面被 Squid 报 `Name Error: The domain name does not exist` | 你跳到了裸域 `tranzor-platform.int.rclabenv.com` 而不是任务页 | 确认 envelope 里有 `task_id`（单任务导出时永远有）。如果 Task ID 列空着，重新导出一次 |
-| 在正确的任务页上侧栏却显示 `0/22 on page · 0 ticked` + 黄色提示 | Tranzor 一次只渲染一个语言段；你选的条目跨多个语言 | 侧栏会显示语言 chips（`ja-JP · 4 · es-419 · 4 · …`），在 Tranzor 页面上挨个展开这些语言段就好 —— 一旦行渲染出来，userscript 的 DOM 观察器会**自动**把它们勾上；也可以在展开后点 `🔄 Re-scan` 手动刷新 |
+| 在正确的任务页上侧栏却显示 `0/22 on page · 0 ticked` + 黄色提示 | Tranzor 任务页是一张大分页表（如底部 `Page 1 of 69`）—— 选中条目分散在很多页里；ingest 时如果搜索框没找到，自动 filter 没触发 | 侧栏会把你的选择按独立 String Key 分组成卡片。点任意卡片里的 **🎯 Filter Tranzor by this key**（或工具栏顶部的 **🎯 Filter Tranzor by next key**），userscript 会自动填 Tranzor 搜索框，行会被列出来 + 自动勾上。如果按了没反应，可能 Tranzor 搜索框的 selector 变了 —— 查 userscript 里的 `CONFIG.SELECTORS.searchInput` |
 | 点完 Send 后侧栏却是空的 | userscript 还没拿到 token —— 看一下地址栏是不是有 `#tzbridge_token=…` | 如果有，刷新一次页面；如果没有，回报告里再点一次 Send，token 会在下次 Send 时一次性配对 |
 | Send 按钮置灰 | 没勾选任何行，或所有勾选行被当前 filter 隐藏 | 勾选可见行；`Selected: N` 一旦 ≥ 1，按钮就会启用 |
 | 新一次 Send 把之前的清单覆盖了 | 单槽收件箱（设计如此）：每次 Send 替换上一份 fix-list | 修完上一批再发下一批；或者放心 —— `已修/跳过`状态按 envelope ID 独立持久化，覆盖之后仍可恢复 |
