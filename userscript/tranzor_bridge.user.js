@@ -160,6 +160,20 @@
     .tz-bridge-toolbar .tz-bridge-btn {
         font-size: 10px;
     }
+    .tz-bridge-langs {
+        margin: 4px 0 8px 0; display: flex; flex-wrap: wrap; gap: 4px;
+        font-size: 10px; color: #cbd5e1;
+    }
+    .tz-bridge-lang-chip {
+        background: rgba(56, 189, 248, 0.18); color: #38bdf8;
+        padding: 1px 6px; border-radius: 999px; font-family: monospace; font-weight: 600;
+    }
+    .tz-bridge-help {
+        background: rgba(230, 126, 34, 0.12);
+        border-left: 3px solid #E67E22;
+        color: #fdba74; font-size: 11px; line-height: 1.45;
+        padding: 8px 10px; margin: 0 0 10px 0; border-radius: 4px;
+    }
     `;
 
     // ---- Bridge HTTP (via GM_xmlhttpRequest, bypasses PNA) ----
@@ -397,14 +411,32 @@
         }).join('');
 
         const hlStats = lastHighlightStats || { found: 0, ticked: 0 };
-        const onPageNote = (highlightMode && isOnEnvelopeTaskPage())
-            ? ` · ${hlStats.found} on page${tickMode ? ` · ${tickedNodes.size} ticked` : ''}`
+        const onTaskPage = highlightMode && isOnEnvelopeTaskPage();
+        const onPageNote = onTaskPage
+            ? ` · ${hlStats.found}/${total} on page${tickMode ? ` · ${tickedNodes.size} ticked` : ''}`
+            : '';
+
+        // Language distribution chips. The most common cause of "0 on page"
+        // is that selected items span multiple languages and Tranzor's task
+        // page only renders one at a time. Showing this up front saves a
+        // confused user from thinking the feature is broken.
+        const langChips = envelopeLanguages().map(({ lang, n }) =>
+            `<span class="tz-bridge-lang-chip">${escapeHtml(lang)} · ${n}</span>`
+        ).join('');
+        const showHelp = onTaskPage && hlStats.found < total;
+        const helpHtml = showHelp
+            ? `<div class="tz-bridge-help">
+                ${hlStats.found === 0
+                    ? "Tranzor hasn't rendered any of these rows yet — they may be in collapsed language sections or other pagination pages. Click 🔄 Re-scan, or open the relevant language section/page; rows get ticked as they appear."
+                    : `Some rows aren't visible yet (probably in collapsed language sections or other pages). Open the rest and they'll be ticked automatically, or click 🔄 Re-scan.`}
+              </div>`
             : '';
 
         body.innerHTML = `
             <div class="tz-bridge-status">
                 ${ctxLabel} · <span class="tz-bridge-progress">${fixedCount}/${total}</span> fixed${onPageNote}${taskBadge}
             </div>
+            ${langChips ? `<div class="tz-bridge-langs">Languages: ${langChips}</div>` : ''}
             <div class="tz-bridge-toolbar">
                 <button class="tz-bridge-btn ${highlightMode ? 'active primary' : ''}" id="tz-bridge-hl-toggle" title="Mark every selected row on the Tranzor page with a green stripe">
                     ${highlightMode ? '👀 Highlighting on page' : '⋯ Highlight on page'}
@@ -412,7 +444,11 @@
                 <button class="tz-bridge-btn ${tickMode ? 'active primary' : ''}" id="tz-bridge-tick-toggle" title="Also tick Tranzor's own row checkbox so you can hit Batch Retranslate. Closing the panel un-ticks the rows we ticked.">
                     ${tickMode ? '☑ Auto-tick on' : '☐ Auto-tick off'}
                 </button>
+                <button class="tz-bridge-btn" id="tz-bridge-rescan" title="Re-expand language sections and rescan the DOM for matching rows">
+                    🔄 Re-scan
+                </button>
             </div>
+            ${helpHtml}
             ${itemsHtml}
             ${pasteFallbackHtml(/*expanded=*/false)}
         `;
@@ -438,6 +474,13 @@
                     refreshHighlights();
                 }
                 render();
+            });
+        }
+        const rescanBtn = document.getElementById('tz-bridge-rescan');
+        if (rescanBtn) {
+            rescanBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                manualRescan();
             });
         }
         body.querySelectorAll('.tz-bridge-item').forEach(itemEl => {
@@ -659,6 +702,99 @@
         return highlightAllOnPage();
     }
 
+    // ---- DOM observer to catch lazily-rendered rows ----
+    // Tranzor renders rows lazily (per language section / virtual list /
+    // pagination), so a single scan at ingest time often finds 0 matches. We
+    // watch the body for new content and re-scan; new matches get auto-ticked
+    // as they appear, no matter how the user navigates the platform.
+    let mutationObserver = null;
+    let mutationDebounceTimer = null;
+    let lastObserverScanFound = -1;
+
+    function isInOurPanel(node) {
+        let n = node;
+        while (n) {
+            if (n.nodeType === 1) {
+                const id = n.id;
+                if (id === 'tz-bridge-panel' || id === 'tz-bridge-reopen') return true;
+                if (n.classList && (n.classList.contains('tz-bridge-panel') || n.classList.contains('tz-bridge-reopen'))) return true;
+            }
+            n = n.parentNode;
+        }
+        return false;
+    }
+
+    function startMutationObserver() {
+        if (mutationObserver || typeof MutationObserver === 'undefined') return;
+        mutationObserver = new MutationObserver((mutations) => {
+            // Skip mutations that are entirely within our own sidebar / reopen pill,
+            // otherwise our own render() would trigger an infinite re-scan loop.
+            const external = mutations.some(m => !isInOurPanel(m.target));
+            if (!external) return;
+            if (mutationDebounceTimer) clearTimeout(mutationDebounceTimer);
+            mutationDebounceTimer = setTimeout(() => {
+                if (dismissed || !currentEnvelope) return;
+                if (!highlightMode || !isOnEnvelopeTaskPage()) return;
+                const before = lastHighlightStats.found;
+                refreshHighlights();
+                // Only re-render the sidebar (which is expensive) when the
+                // numbers actually changed, to avoid layout thrash.
+                if (lastHighlightStats.found !== before) {
+                    lastObserverScanFound = lastHighlightStats.found;
+                    render();
+                }
+            }, 350);
+        });
+        mutationObserver.observe(document.body, { childList: true, subtree: true });
+    }
+
+    function envelopeLanguages() {
+        if (!currentEnvelope || !currentEnvelope.items) return [];
+        const counts = {};
+        currentEnvelope.items.forEach(it => {
+            const lang = it.language || '(unknown)';
+            counts[lang] = (counts[lang] || 0) + 1;
+        });
+        return Object.entries(counts)
+            .sort((a, b) => b[1] - a[1])
+            .map(([lang, n]) => ({ lang, n }));
+    }
+
+    // Tranzor's task page shows one language section at a time (or collapses
+    // them by default). Heuristically locate clickable elements whose text
+    // mentions each envelope language and try to expand the section. Best-
+    // effort: any clicks that don't actually expand a section are harmless —
+    // MutationObserver picks up whatever does render.
+    function tryExpandLanguageSections() {
+        const langs = envelopeLanguages().map(x => x.lang);
+        if (!langs.length) return 0;
+        const candidates = Array.from(document.querySelectorAll(
+            'button, summary, h1, h2, h3, h4, h5, h6, a, [role="button"], [aria-expanded="false"], details > summary'
+        )).filter(el => !isInOurPanel(el));
+        let clicked = 0;
+        langs.forEach(lang => {
+            // Escape the lang for regex (just the hyphen, really)
+            const escaped = lang.replace(/-/g, '[-_]');
+            const re = new RegExp('(^|[^A-Za-z0-9_])' + escaped + '($|[^A-Za-z0-9_])', 'i');
+            const match = candidates.find(el => {
+                const text = (el.textContent || '').slice(0, 300);
+                if (!re.test(text)) return false;
+                if (el.getAttribute('aria-expanded') === 'true') return false;
+                return true;
+            });
+            if (match) {
+                try { match.click(); clicked++; } catch (e) { /* ignore */ }
+            }
+        });
+        return clicked;
+    }
+
+    function manualRescan() {
+        // Try to expand sections again, then re-highlight after a settle delay.
+        tryExpandLanguageSections();
+        setTimeout(() => { refreshHighlights(); render(); }, 400);
+    }
+
     function findKeyOnPage(key) {
         // Tier A: scroll to the matching row directly in Tranzor's DOM and
         // flash it. Works without knowing any platform-specific selector.
@@ -716,6 +852,14 @@
         if (tog) tog.textContent = '»';
         render();
         if (fromPaste) flashHeader('Loaded from clipboard');
+        // Tranzor lazy-renders rows per language section. Try to expand the
+        // sections matching the envelope's languages, then re-scan after the
+        // DOM settles. The MutationObserver also keeps picking up newly-
+        // rendered rows for any sections the user navigates to manually.
+        setTimeout(() => {
+            tryExpandLanguageSections();
+            setTimeout(() => { refreshHighlights(); render(); }, 500);
+        }, 250);
     }
 
     // ---- Polling loop ----
@@ -795,6 +939,7 @@
             } catch (e) { /* ignore */ }
         }
         startPolling();
+        startMutationObserver();
         // Ctrl+Shift+V → focus paste textarea for clipboard fallback ingestion.
         document.addEventListener('keydown', (e) => {
             if (e.ctrlKey && e.shiftKey && (e.key === 'V' || e.key === 'v')) {
