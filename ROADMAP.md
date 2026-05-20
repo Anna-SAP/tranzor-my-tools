@@ -127,6 +127,7 @@
 | 功能 | 解决的痛点 | 交互形式 | 对主库依赖 | 复杂度 |
 |------|-----------|---------|-----------|--------|
 | **翻译审校工作流** | 发现低分翻译后需要切到 Tranzor 网页端逐条处理，上下文割裂 | GUI 审校面板（源文 / 译文 / 评分 / 评语并排展示，直接编辑） | 需要 API（`PUT /dashboard/comment`、`POST /dashboard/fix-translation`） | High |
+| ✅ **Tranzor Bridge（v0.1，纯客户端）** | 同上痛点的无上游版本：HTML 报告勾选 → 一键回传到 Tranzor Platform 侧栏 fix-list | HTML 工具栏 `↗ Send to Tranzor` 按钮 + Tampermonkey userscript 侧栏 | 独立（本地 127.0.0.1 桥，无需上游配合） | Medium |
 | **批量重译与引导** | 多条低质量翻译需要逐一提交重译请求 | GUI 多选 + 批量操作栏 | 需要 API（`POST /dashboard/translations/retranslate-batch`） | Medium |
 | **术语一致性检查器** | 无法系统性地检测同一术语在不同翻译中的一致性 | GUI 检查报告 + 高亮不一致项 | 独立（基于本地缓存中的翻译数据做文本匹配） | Medium |
 | **翻译搜索与交叉引用** | 想查某个 key 或某段文本在不同项目/MR 中的翻译情况，无处可查 | GUI 搜索面板（支持 opus_id、源文、译文模糊搜索） | 需要 API（`GET /translations/search`） | Low |

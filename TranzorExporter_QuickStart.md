@@ -42,6 +42,23 @@
    - Click `📦 Export TMX` in the toolbar
    - A `.tmx` file (single language) or `.zip` (multiple languages) will download automatically
 
+7. **To send selected rows back to Tranzor Platform** (HTML report → browser tab):
+   - Install the **Tranzor Bridge** userscript once (see below)
+   - Filter + tick the rows you need to fix
+   - Click `↗ Send to Tranzor` in the toolbar — your Tranzor tab will open with a fix-list sidebar; the sidebar's `🔍 Find` button fills the platform's search box for each key in turn
+
+---
+
+## Tranzor Bridge userscript (one-time install)
+
+The Send-to-Tranzor feature uses a small browser userscript to receive the selection on the Tranzor Platform side.
+
+1. Install **Tampermonkey** (Chrome / Edge / Firefox) or **Violentmonkey**.
+2. Open `userscript/tranzor_bridge.user.js` (shipped alongside the exe; also in the GitHub repo) → the userscript manager will prompt to install.
+3. Confirm the `@match http://tranzor-platform.int.rclabenv.com/*` and `@connect 127.0.0.1` permissions.
+
+While `TranzorExporter` is running, a loopback HTTP service on `127.0.0.1` (port 48217 or next free) carries selections from the report to the userscript. If the bridge is unreachable, the report falls back to copying the selection to your clipboard — press `Ctrl+Shift+V` inside the userscript's sidebar to paste it.
+
 ---
 
 ## Language Toggle
