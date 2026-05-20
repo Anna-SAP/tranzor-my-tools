@@ -1,6 +1,6 @@
 # Tranzor Bridge — 快速上手
 
-> **5 分钟指南。** 在 TranzorExporter HTML 报告里勾选要修的行 → 直接带着这份清单到 Tranzor Platform 标签页修复，侧栏一条条跟。
+> **5 分钟指南。** 在 TranzorExporter HTML 报告里勾选要修的行 → 直接落地到 Tranzor 的任务页，**被勾选的行在 Tranzor 自己的列表里已经被绿色高亮**，右侧小侧栏只是逐条导航的控制面板。
 > 不用再"复制 key → 切到平台 → 搜索 → 修复 → 再切回来"地循环了。**对上游零侵入。**
 
 ---
@@ -35,7 +35,7 @@
 ### 第 3 步：验证侧栏挂载成功
 
 1. 连上公司网络 / VPN（和平时用 Tranzor 一样）
-2. 浏览器打开 <http://tranzor-platform.int.rclabenv.com>
+2. 浏览器打开**任意一个 Tranzor 任务页**，例如 `http://tranzor-platform.int.rclabenv.com/static/legacy/tasks/227`（把 `227` 换成你有权限的任意任务 ID）。**千万别开裸域** `http://tranzor-platform.int.rclabenv.com` —— Squid 解析不了，会直接报错
 3. 看右上角 —— 应该出现一条绿色折叠条 **📋 Tranzor Bridge**
 4. 点开它；TranzorExporter 没运行时会显示 `Waiting for selections from TranzorExporter…` —— 这是正常的待机状态
 
@@ -47,8 +47,9 @@
 
 ```
 1. 启动 TranzorExporter  →  2. 导出 HTML 报告  →  3. 筛选 + 勾选要修的行
-                                                          ↓
-                      5. 在 Tranzor 侧栏逐条修复  ←  4. 点 ↗ Send to Tranzor
+                                                                  ↓
+   5. Tranzor 原生列表把所选行染成绿色高亮  ←  4. 点 ↗ Send to Tranzor
+      右侧栏是导航和进度面板
 ```
 
 ### 详细步骤
@@ -103,7 +104,7 @@
 
 | 现象 | 含义 | 处理 |
 |---|---|---|
-| Send 按钮显示 `⚠ Bridge unavailable… Copied to clipboard.` | 桌面应用没开，或挂掉留下 stale port.json | 确认 TranzorExporter 在运行。然后在 Tranzor 侧栏底部的 textarea 里 `Ctrl+Shift+V`，envelope 会从剪贴板载入 |
+| Send 按钮显示 `⚠ Bridge unavailable… Copied to clipboard.` | 桌面应用没开，或挂掉留下 stale port.json | 确认 TranzorExporter 在运行。然后在 Tranzor 侧栏底部展开 **Paste JSON from another report (advanced)** 折叠区，在 textarea 里 `Ctrl+Shift+V`，envelope 会从剪贴板载入 |
 | 侧栏始终显示 "no bridge" | 端口段被占满（≥10 个实例，或别的程序占了 48217–48226） | 重启 TranzorExporter；持续失败请看控制台是否输出 `BridgePortBusy`。剪贴板与 URL hash 降级通道照常可用 |
 | `🔍 Find` 没反应 | 目标行可能在 Tranzor 的另一页（分页过滤掉了），或者它的 String Key 不是作为可见文本渲染 | 点 key 文本复制到剪贴板，用 Tranzor 自己的搜索/翻页跳过去；如果你不在对应任务页，侧栏会显示橙色 `go to task → ` 链接 |
 | Send 跳出来的页面被 Squid 报 `Name Error: The domain name does not exist` | 你跳到了裸域 `tranzor-platform.int.rclabenv.com` 而不是任务页 | 确认 envelope 里有 `task_id`（单任务导出时永远有）。如果 Task ID 列空着，重新导出一次 |
@@ -115,7 +116,7 @@
 
 ## 工作原理（一段话）
 
-桌面应用启动时在 `127.0.0.1:48217`（或往后第一个空闲端口，最多到 48226）拉起一个微型 HTTP 服务，用一段 32 字节随机 token 保护。HTML 报告会把端口和 token 直接嵌进自身的 JS 常量里，所以工具栏 `↗ Send to Tranzor` 按钮可以直接 POST 选中的行给桥。Tampermonkey userscript 跑在 Tranzor 平台标签页上，每 3 秒轮询桥的 `/pull` 接口拿最新 envelope 并渲染侧栏。Token 通过一次性的 URL hash（`#tzbridge_token=…`）传给 userscript，进 Tampermonkey 存储后立刻 `history.replaceState` 抹掉。**一切都在你本机上**：桥只听 loopback、严格 Origin allowlist，除了 `null`/`file://`（HTML 报告）和 Tranzor 平台域名之外任何来源都返回 403。
+桌面应用启动时在 `127.0.0.1:48217`（或往后第一个空闲端口，最多到 48226）拉起一个微型 HTTP 服务，用一段 32 字节随机 token 保护。HTML 报告会把端口和 token 直接嵌进自身的 JS 常量里，所以工具栏 `↗ Send to Tranzor` 按钮可以直接把选中的行 POST 给桥，并跳转到 `/static/legacy/tasks/<task_id>`。Tampermonkey userscript 跑在那个任务页里，每 3 秒轮询桥的 `/pull` 接口拿最新 envelope，然后用 `TreeWalker` 扫 Tranzor 自己的 DOM 文本，把每个 `String Key` 命中的行都加上绿色左条 + 浅绿背景 —— 侧栏只是这层上的瘦控件。Token 通过一次性的 URL hash（`#tzbridge_token=…`）传给 userscript，进 Tampermonkey 存储后立刻 `history.replaceState` 抹掉。**一切都在你本机上**：桥只听 loopback、严格 Origin allowlist，除了 `null`/`file://`（HTML 报告）和 Tranzor 平台域名之外任何来源都返回 403。
 
 ---
 
@@ -130,7 +131,7 @@
 
 ## 相关文档
 
-- `TranzorExporter_QuickStart-zh.md` —— 桌面应用本体的快速上手（若没有中文版，请参考英文版 `TranzorExporter_QuickStart.md`）
+- `TranzorExporter_QuickStart.md` —— 桌面应用本体的快速上手（暂无中文版）
 - `tranzor_bridge.py` —— 桥服务源码（~250 行，纯标准库）
 - `userscript/tranzor_bridge.user.js` —— userscript 源码
-- `ROADMAP.md` 第 130 行 —— v0.2 计划（按 key 精准定位 DOM、`/ack` 进度回传、URL deep-link 探测）
+- `ROADMAP.md` 中 "Tranzor Bridge" 行（标记为 ✅ v0.1）与紧邻的"翻译审校工作流"、"批量重译与引导"行 —— 那些条目需要上游 API 配合，属于 v0.2+ 方向
