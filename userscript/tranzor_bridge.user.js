@@ -49,6 +49,9 @@
     let mounted = false;
     let highlightMode = true;       // default ON when on the matching task page
     let highlightedNodes = new Set(); // currently-marked DOM nodes (so we can clear cleanly)
+    let tickMode = true;            // also tick the platform's own checkbox on each matched row
+    let tickedNodes = new Set();    // rows whose checkbox WE ticked (so close can untick cleanly)
+    let lastHighlightStats = { found: 0, ticked: 0 };
     let dismissed = false;          // user clicked ✕ to hide the panel
     let dismissedEnvelopeId = null; // remember which envelope was dismissed (auto-reopen for new ones)
 
@@ -393,13 +396,21 @@
             `;
         }).join('');
 
+        const hlStats = lastHighlightStats || { found: 0, ticked: 0 };
+        const onPageNote = (highlightMode && isOnEnvelopeTaskPage())
+            ? ` · ${hlStats.found} on page${tickMode ? ` · ${tickedNodes.size} ticked` : ''}`
+            : '';
+
         body.innerHTML = `
             <div class="tz-bridge-status">
-                ${ctxLabel} · <span class="tz-bridge-progress">${fixedCount}/${total}</span> fixed${taskBadge}
+                ${ctxLabel} · <span class="tz-bridge-progress">${fixedCount}/${total}</span> fixed${onPageNote}${taskBadge}
             </div>
             <div class="tz-bridge-toolbar">
                 <button class="tz-bridge-btn ${highlightMode ? 'active primary' : ''}" id="tz-bridge-hl-toggle" title="Mark every selected row on the Tranzor page with a green stripe">
                     ${highlightMode ? '👀 Highlighting on page' : '⋯ Highlight on page'}
+                </button>
+                <button class="tz-bridge-btn ${tickMode ? 'active primary' : ''}" id="tz-bridge-tick-toggle" title="Also tick Tranzor's own row checkbox so you can hit Batch Retranslate. Closing the panel un-ticks the rows we ticked.">
+                    ${tickMode ? '☑ Auto-tick on' : '☐ Auto-tick off'}
                 </button>
             </div>
             ${itemsHtml}
@@ -411,6 +422,21 @@
             toggleBtn.addEventListener('click', () => {
                 highlightMode = !highlightMode;
                 refreshHighlights();
+                render();
+            });
+        }
+        const tickToggleBtn = document.getElementById('tz-bridge-tick-toggle');
+        if (tickToggleBtn) {
+            tickToggleBtn.addEventListener('click', () => {
+                if (tickMode) {
+                    // Turning off: untick the rows we ticked, leave user-ticked alone.
+                    untickOurCheckboxes();
+                    tickMode = false;
+                } else {
+                    tickMode = true;
+                    // Re-applying highlights will tick matching rows.
+                    refreshHighlights();
+                }
                 render();
             });
         }
@@ -545,32 +571,90 @@
         setTimeout(() => el.classList.remove('tz-bridge-flash'), 2500);
     }
 
-    function clearAllMarks() {
+    // Find a checkbox-like control inside the matched row and set it to `want`.
+    // Tries native <input type=checkbox> first (works for plain HTML and most
+    // React/Vue controlled inputs via the standard .click() toggle path), then
+    // falls back to setter+events, then ARIA role=checkbox.
+    function tickPlatformCheckbox(row, want) {
+        const cb = row.querySelector('input[type="checkbox"]:not([disabled])');
+        if (cb) {
+            if (cb.checked === want) return { ok: true, changed: false };
+            cb.click();
+            if (cb.checked === want) return { ok: true, changed: true };
+            // Some custom React inputs ignore programmatic .click(); fall back to
+            // the descriptor-setter trick + dispatching change events.
+            try {
+                const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'checked').set;
+                setter.call(cb, want);
+                cb.dispatchEvent(new Event('input', { bubbles: true }));
+                cb.dispatchEvent(new Event('change', { bubbles: true }));
+                return { ok: true, changed: true };
+            } catch (e) {
+                return { ok: false, changed: false };
+            }
+        }
+        const aria = row.querySelector('[role="checkbox"]:not([aria-disabled="true"])');
+        if (aria) {
+            const current = aria.getAttribute('aria-checked') === 'true';
+            if (current === want) return { ok: true, changed: false };
+            aria.click();
+            return { ok: true, changed: true };
+        }
+        return { ok: false, changed: false };
+    }
+
+    function untickOurCheckboxes() {
+        tickedNodes.forEach(row => {
+            try { tickPlatformCheckbox(row, false); } catch (e) { /* row may be gone */ }
+        });
+        tickedNodes.clear();
+    }
+
+    function clearAllMarks(opts) {
+        const untick = !opts || opts.untick !== false;
         highlightedNodes.forEach(el => {
             el.classList.remove('tz-bridge-mark', 'fixed-mark');
         });
         highlightedNodes.clear();
+        if (untick) untickOurCheckboxes();
+        lastHighlightStats = { found: 0, ticked: 0 };
     }
 
     function highlightAllOnPage() {
-        clearAllMarks();
-        if (!currentEnvelope || !currentEnvelope.items) return 0;
-        let found = 0;
+        // Don't auto-untick here — we're about to re-apply, and the inner
+        // tickPlatformCheckbox is idempotent on already-correct state.
+        clearAllMarks({ untick: false });
+        if (!currentEnvelope || !currentEnvelope.items) {
+            lastHighlightStats = { found: 0, ticked: 0 };
+            return lastHighlightStats;
+        }
+        let found = 0, ticked = 0;
         currentEnvelope.items.forEach(it => {
             const row = findRowContainingText(it.string_key);
             if (!row) return;
             row.classList.add('tz-bridge-mark');
-            if (progress[it.string_key] === 'fixed') row.classList.add('fixed-mark');
+            const isFixed = progress[it.string_key] === 'fixed';
+            if (isFixed) row.classList.add('fixed-mark');
             highlightedNodes.add(row);
             found++;
+            // Auto-tick only un-fixed rows (no point queueing already-done work
+            // for batch retranslate). Track so close can clean up.
+            if (tickMode && !isFixed) {
+                const r = tickPlatformCheckbox(row, true);
+                if (r.ok) {
+                    tickedNodes.add(row);
+                    if (r.changed) ticked++;
+                }
+            }
         });
-        return found;
+        lastHighlightStats = { found, ticked };
+        return lastHighlightStats;
     }
 
     function refreshHighlights() {
         if (!highlightMode || !isOnEnvelopeTaskPage()) {
             clearAllMarks();
-            return 0;
+            return lastHighlightStats;
         }
         return highlightAllOnPage();
     }
