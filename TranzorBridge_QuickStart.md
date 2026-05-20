@@ -9,7 +9,7 @@
 
 | Before | After |
 |---|---|
-| Tick 8 rows in the HTML report → open Tranzor Platform → copy a `String Key` → paste into search → fix → repeat 7 more times | Tick rows → click `↗ Send to Tranzor` → the task page (`/static/legacy/tasks/<task_id>`) opens with the matching rows **already highlighted in Tranzor's own list**, plus a sidebar that lets you `🔍 Find` (scroll + flash) → fix → `✓ Fixed` → progress is saved |
+| Tick 8 rows in the HTML report → open Tranzor Platform → copy a `String Key` → paste into search → fix → repeat 7 more times | Tick rows → click `↗ Send to Tranzor` → the task page opens with the matching rows **already highlighted AND their checkboxes already ticked in Tranzor's own list**, so you can hit Tranzor's `Batch Retranslate` immediately. Sidebar lets you `🔍 Find` (scroll + flash) and walk through fixes individually if needed |
 
 ---
 
@@ -66,14 +66,15 @@ You only do steps 1–3 once. After that, every time TranzorExporter and a Tranz
    - The browser opens **`http://tranzor-platform.int.rclabenv.com/static/legacy/tasks/<task_id>`** — i.e. Tranzor's own per-task page for the items you selected.
    - If the items span multiple tasks, the first task's page opens and the sidebar shows a `go to task N →` link for the others.
 
-5. **The matching rows are already highlighted in Tranzor's own list.** Every selected `String Key` gets a green left stripe + soft green background directly on Tranzor's row — no need to search. The sidebar (right edge) is the control surface:
+5. **The matching rows are already highlighted AND ticked in Tranzor's own list.** Every selected `String Key` gets a green left stripe + soft green background AND Tranzor's native row checkbox is auto-ticked — so the platform's own `Batch Retranslate` button (or any other batch action) is immediately usable. The sidebar (right edge) is the control surface:
 
    ```
    ┌────────────────────────────────────────┐
    │ 📋 Tranzor Bridge  port 48217   ✕  »   │
    ├────────────────────────────────────────┤
-   │ Task 227 · de-DE · 1/8 fixed  on task 227 │
-   │ [👀 Highlighting on page]              │
+   │ Task 227 · de-DE · 1/8 fixed · 8 on    │
+   │ page · 8 ticked  on task 227           │
+   │ [👀 Highlighting on page] [☑ Auto-tick on] │
    │                                        │
    │ ┌──────────────────────────────────┐   │
    │ │ settings.profile.title           │   │
@@ -88,8 +89,9 @@ You only do steps 1–3 once. After that, every time TranzorExporter and a Tranz
    └────────────────────────────────────────┘
    ```
 
-   - **`on task 227` badge** (green): you're on the right task page; on-page highlighting is active. If the badge is orange and reads `go to task 227 →`, click it to navigate.
+   - **`on task 227` badge** (green): you're on the right task page; on-page highlighting + ticking is active. If the badge is orange and reads `go to task 227 →`, click it to navigate.
    - **`👀 Highlighting on page`** toggle: turn the green stripes off if you find them visually noisy.
+   - **`☑ Auto-tick on`** toggle (default ON): also ticks Tranzor's own row checkbox for each matched key, so the platform's native `Batch Retranslate` / other batch buttons are immediately usable. Turning it off un-ticks only the rows we ticked — your own manual ticks stay. Already-`✓ Fixed` items are NOT auto-ticked (no point queueing done work for retranslate).
    - **🔍 Find**: scrolls to the row containing the String Key in Tranzor's own list and flashes it yellow for 2.4 s. (If the row isn't on the current page, falls back to filling Tranzor's search box, then to clipboard.)
    - **✓ Fixed**: marks the row done; the stripe on the page turns grey to show "already done" while you finish the rest.
    - **⤵ Skip**: marks the row as skipped (won't count toward "fixed" progress).
@@ -97,7 +99,7 @@ You only do steps 1–3 once. After that, every time TranzorExporter and a Tranz
    - **`»` toggle**: collapses / expands the sidebar (keeps highlights + progress).
    - **`✕` close**: hides the panel **and** clears all green stripes from Tranzor's rows. A small floating **📋** pill stays at the top-right so you can reopen it any time; sending a brand-new batch from the report also auto-reopens.
 
-6. **Fix the translation in Tranzor's own row** as you normally would (use the platform's existing edit UI). Then click `✓ Fixed` in the sidebar to track progress — the row's stripe immediately turns grey on the page so you can see what's left. Close the tab when done; progress is restored when you reopen.
+6. **Run Tranzor's `Batch Retranslate`** (or any other native batch action) — the checkboxes are already set. For per-row edits, use Tranzor's normal edit UI, then click `✓ Fixed` in the sidebar to track progress; the row's stripe immediately turns grey so you can see what's left. Close the tab when done; progress is restored when you reopen.
 
 ---
 
