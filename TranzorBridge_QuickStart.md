@@ -1,6 +1,6 @@
 # Tranzor Bridge — Quick Start
 
-> **5-minute guide.** Take rows you ticked in a TranzorExporter HTML report → walk through them on the Tranzor Platform tab with a fix-list sidebar.
+> **5-minute guide.** Take rows you ticked in a TranzorExporter HTML report → land directly on Tranzor's task page with **the matching rows already highlighted in Tranzor's own list**, plus a small sidebar to walk through them.
 > No more copy-key-then-search loop. No upstream code changes.
 
 ---
@@ -35,7 +35,7 @@
 ### 3. Verify the sidebar mounts
 
 1. Make sure you're on the corporate network / VPN (same as for using Tranzor Platform itself).
-2. Open <http://tranzor-platform.int.rclabenv.com> in a regular browser tab.
+2. Open **any Tranzor task page** in a regular browser tab, e.g. `http://tranzor-platform.int.rclabenv.com/static/legacy/tasks/227` (replace `227` with a task you have access to). The bare domain is unreachable through Squid — always use a task-specific path.
 3. Look at the top-right of the page — you should see a collapsed green strip labeled **📋 Tranzor Bridge**.
 4. Click it to expand. With no Exporter running, it will say `Waiting for selections from TranzorExporter…` — that's expected.
 
@@ -47,9 +47,9 @@ You only do steps 1–3 once. After that, every time TranzorExporter and a Tranz
 
 ```
 1. Launch TranzorExporter  →  2. Export task to HTML  →  3. Filter & tick rows
-                                                                  ↓
-                              5. Sidebar appears on Tranzor  ←  4. ↗ Send to Tranzor
-                                                                  
+                                                                       ↓
+   5. Tranzor's own list shows green stripes on the rows  ←  4. ↗ Send to Tranzor
+      you picked — sidebar is just the control panel
 ```
 
 ### Step-by-step
@@ -104,7 +104,7 @@ You only do steps 1–3 once. After that, every time TranzorExporter and a Tranz
 
 | Symptom | What's happening | Fix |
 |---|---|---|
-| Send button shows `⚠ Bridge unavailable… Copied to clipboard.` | The desktop app isn't running, or it crashed and `port.json` is stale | Make sure TranzorExporter is open. Then in the Tranzor sidebar, click the paste textarea at the bottom and `Ctrl+Shift+V` — the envelope ingests from clipboard. |
+| Send button shows `⚠ Bridge unavailable… Copied to clipboard.` | The desktop app isn't running, or it crashed and `port.json` is stale | Make sure TranzorExporter is open. Then in the Tranzor sidebar, expand the **Paste JSON from another report (advanced)** section at the bottom and `Ctrl+Shift+V` into the textarea — the envelope ingests from clipboard. |
 | Sidebar says "no bridge" even with TranzorExporter open | Bridge port is taken (10+ instances running, or another app on 48217–48226) | Restart TranzorExporter; if persistent, check the console for `BridgePortBusy`. The fallback transports (clipboard, URL hash) still work. |
 | `🔍 Find` does nothing | The row is on a different page of Tranzor's pagination, or its String Key isn't rendered as visible text | Click the key text to copy it, then use Tranzor's own search/pagination. The sidebar shows the orange `go to task → ` link when you're not on the matching task page. |
 | Sent button opens a URL but Squid says `Name Error: The domain name does not exist` | You navigated to the bare `tranzor-platform.int.rclabenv.com` instead of a task URL | Make sure your envelope has a `task_id` (it always does when you exported from a single Task). Re-export if the Task ID column was empty. |
@@ -116,7 +116,7 @@ You only do steps 1–3 once. After that, every time TranzorExporter and a Tranz
 
 ## How it works (one paragraph)
 
-When the GUI starts, it boots a tiny HTTP server on `127.0.0.1:48217` (or the next free port up to 48226) protected by a 32-byte random token. The HTML report contains the port and token, so its `↗ Send to Tranzor` button can POST the ticked rows to the bridge. The Tampermonkey userscript on the Tranzor Platform page polls the bridge every 3 seconds and renders the fix-list. The token is paired with the userscript via a one-time URL hash (`#tzbridge_token=…`) that's removed from the URL bar as soon as it's stored. Nothing leaves your laptop — the bridge is loopback-only and rejects all origins except `null`/`file://` (your report) and the Tranzor platform itself.
+When the GUI starts, it boots a tiny HTTP server on `127.0.0.1:48217` (or the next free port up to 48226) protected by a 32-byte random token. The HTML report contains the port and token, so its `↗ Send to Tranzor` button can POST the ticked rows to the bridge and navigate to `/static/legacy/tasks/<task_id>`. The Tampermonkey userscript on that page polls the bridge every 3 seconds, ingests the envelope, and walks Tranzor's own DOM with a `TreeWalker` text scan to find every selected `String Key` — each matched row gets the green stripe + soft background. The control sidebar is just a thin layer on top. The token is paired with the userscript via a one-time URL hash (`#tzbridge_token=…`) that's removed from the URL bar as soon as it's stored. Nothing leaves your laptop — the bridge is loopback-only and rejects all origins except `null`/`file://` (your report) and the Tranzor platform itself.
 
 ---
 
@@ -134,4 +134,4 @@ When the GUI starts, it boots a tiny HTTP server on `127.0.0.1:48217` (or the ne
 - `TranzorExporter_QuickStart.md` — main desktop app guide
 - `tranzor_bridge.py` — bridge server source (~250 lines, stdlib only)
 - `userscript/tranzor_bridge.user.js` — userscript source
-- `ROADMAP.md` line 130 — what's coming in v0.2 (per-key DOM targeting, `/ack` round-trip, deep-link probe)
+- `ROADMAP.md` — "Tranzor Bridge" row (currently marked ✅ v0.1) and the adjacent "翻译审校工作流" / "批量重译与引导" rows for upstream-dependent v0.2 ideas
