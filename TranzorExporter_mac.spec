@@ -9,6 +9,7 @@ a = Analysis(
     datas=[
         ('export_changes.py', '.'),
         ('export_translations.py', '.'),
+        ('tranzor_bridge.py', '.'),
         ('export_mr_pipeline.py', '.'),
         ('quality_overview.py', '.'),
         ('gui_tabs.py', '.'),
@@ -22,6 +23,7 @@ a = Analysis(
         ('gitlab_client.py', '.'),
     ],
     hiddenimports=[
+        'tranzor_bridge',
         'export_full_translations',
         'gui_tab_full_translations',
         'gui_tab_human_revisions',

@@ -52,6 +52,18 @@ import export_changes
 import export_translations
 import gui_tabs
 
+# Optional: Tranzor Bridge (loopback HTTP server that hands the HTML report's
+# selections off to a Tampermonkey userscript on the Tranzor Platform tab).
+# Failure to start (e.g. all ports busy) degrades the report to clipboard/hash
+# transport — it must NEVER crash the GUI.
+try:
+    import tranzor_bridge
+except Exception as _bridge_imp_err:  # pragma: no cover
+    tranzor_bridge = None
+    _bridge_import_error = _bridge_imp_err
+else:
+    _bridge_import_error = None
+
 # Optional: Full Translation Export Tab (nested module, must not break GUI if missing)
 try:
     import gui_tab_full_translations as _ft_tab_mod
@@ -573,6 +585,8 @@ class ExportApp:
         # State
         self.running = False
         self.last_output_path = None
+        self.bridge = None
+        self.bridge_error = None
         self.summary_loading = False
         self.summary_tasks = []
         self.summary_total = 0
@@ -585,6 +599,8 @@ class ExportApp:
         self._setup_styles()
         self._build_ui()
         self._refresh_ui_text()
+        self._start_bridge()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         # Center window
         self.root.update_idletasks()
@@ -1521,8 +1537,9 @@ class ExportApp:
             script_dir = os.path.dirname(os.path.abspath(__file__))
             filepath = os.path.join(script_dir, filename)
 
+            bridge_info = self._bridge_info_for_export()
             if export_type == "translations":
-                export_translations.save_file(rows, filepath, label, fmt)
+                export_translations.save_file(rows, filepath, label, fmt, bridge_info=bridge_info)
             else:
                 export_changes.save_file(rows, filepath, label, fmt)
 
@@ -1562,6 +1579,49 @@ class ExportApp:
     def _on_open(self):
         if self.last_output_path and os.path.exists(self.last_output_path):
             open_in_browser(self.last_output_path)
+
+    # ------------------------------------------------------------------
+    # Tranzor Bridge integration
+    # ------------------------------------------------------------------
+    def _start_bridge(self):
+        """Boot the loopback bridge so generated reports can hand selections
+        off to the Tranzor Platform tab. Failures degrade gracefully — the
+        Export TMX flow stays usable, and reports fall back to clipboard /
+        URL-hash transport on the JS side."""
+        if tranzor_bridge is None:
+            self.bridge_error = f"bridge module unavailable: {_bridge_import_error!r}"
+            print(f"[bridge] disabled: {self.bridge_error}")
+            return
+        bridge, err = tranzor_bridge.try_start_bridge()
+        if err:
+            self.bridge = None
+            self.bridge_error = err
+            print(f"[bridge] startup failed ({err}); Send-to-Tranzor will use clipboard fallback")
+            return
+        self.bridge = bridge
+        print(
+            f"[bridge] listening on http://127.0.0.1:{bridge.port}  "
+            f"instance_id={bridge.instance_id}"
+        )
+
+    def _bridge_info_for_export(self):
+        if self.bridge is None:
+            return None
+        try:
+            return self.bridge.html_info()
+        except Exception:
+            return None
+
+    def _on_close(self):
+        try:
+            if self.bridge is not None:
+                self.bridge.stop()
+        except Exception:
+            pass
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
 
 
 # ============================================================

@@ -20,6 +20,7 @@ on:
       - 'gui_tab_term_watchtower.py'
       - 'terminology_watchtower.py'
       - 'tranzor_terminology.py'
+      - 'tranzor_bridge.py'
       - 'gitlab_client.py'
       - 'pyi_rth_tkinter_fix.py'
       - 'pyinstaller_hooks/**'
