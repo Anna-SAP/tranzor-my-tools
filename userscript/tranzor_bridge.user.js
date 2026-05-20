@@ -49,6 +49,8 @@
     let mounted = false;
     let highlightMode = true;       // default ON when on the matching task page
     let highlightedNodes = new Set(); // currently-marked DOM nodes (so we can clear cleanly)
+    let dismissed = false;          // user clicked ✕ to hide the panel
+    let dismissedEnvelopeId = null; // remember which envelope was dismissed (auto-reopen for new ones)
 
     // ---- Style ----
     const STYLE = `
@@ -65,7 +67,24 @@
     }
     .tz-bridge-title { display: flex; align-items: center; gap: 8px; }
     .tz-bridge-instance { font-size: 10px; opacity: 0.75; font-family: monospace; font-weight: 400; }
-    .tz-bridge-toggle { font-size: 14px; line-height: 1; }
+    .tz-bridge-header-actions { display: flex; align-items: center; gap: 4px; }
+    .tz-bridge-close {
+        background: transparent; border: 0; color: #fff; cursor: pointer;
+        font-size: 14px; line-height: 1; padding: 2px 6px; border-radius: 4px;
+        opacity: 0.85; transition: background 0.15s, opacity 0.15s;
+    }
+    .tz-bridge-close:hover { background: rgba(0,0,0,0.18); opacity: 1; }
+    .tz-bridge-toggle { font-size: 14px; line-height: 1; cursor: pointer; padding: 2px 4px; }
+    .tz-bridge-panel.dismissed { display: none; }
+    .tz-bridge-reopen {
+        position: fixed; right: 8px; top: 96px; z-index: 999999;
+        background: #27AE60; color: #fff; border: 0; border-radius: 999px;
+        width: 36px; height: 36px; cursor: pointer; font-size: 16px;
+        box-shadow: -2px 2px 12px rgba(0,0,0,0.3); transition: transform .15s, background .15s;
+        display: none;
+    }
+    .tz-bridge-reopen.visible { display: inline-flex; align-items: center; justify-content: center; }
+    .tz-bridge-reopen:hover { background: #1f8c4f; transform: scale(1.08); }
     .tz-bridge-body {
         padding: 10px 12px; overflow-y: auto; flex: 1; font-size: 12px;
     }
@@ -251,19 +270,64 @@
                     <span>📋 Tranzor Bridge</span>
                     <span class="tz-bridge-instance" id="tz-bridge-instance"></span>
                 </div>
-                <span class="tz-bridge-toggle" id="tz-bridge-toggle">«</span>
+                <div class="tz-bridge-header-actions">
+                    <button class="tz-bridge-close" id="tz-bridge-close" title="Close panel (clears on-page highlights)">✕</button>
+                    <span class="tz-bridge-toggle" id="tz-bridge-toggle" title="Collapse / expand">«</span>
+                </div>
             </div>
             <div class="tz-bridge-body" id="tz-bridge-body">
                 <div class="tz-bridge-empty">Waiting for selections from TranzorExporter…</div>
             </div>
         `;
         document.body.appendChild(root);
-        document.getElementById('tz-bridge-header').addEventListener('click', () => {
+
+        // Floating pill to re-open the panel after dismissal. Hidden by default;
+        // also auto-shown whenever a new envelope arrives while dismissed.
+        const reopen = document.createElement('button');
+        reopen.className = 'tz-bridge-reopen';
+        reopen.id = 'tz-bridge-reopen';
+        reopen.title = 'Reopen Tranzor Bridge';
+        reopen.textContent = '📋';
+        document.body.appendChild(reopen);
+        reopen.addEventListener('click', restorePanel);
+
+        // Header click collapses/expands; ✕ button dismisses entirely.
+        document.getElementById('tz-bridge-header').addEventListener('click', (e) => {
+            if (e.target.closest('#tz-bridge-close')) return; // handled below
             root.classList.toggle('collapsed');
             const tog = document.getElementById('tz-bridge-toggle');
             tog.textContent = root.classList.contains('collapsed') ? '«' : '»';
         });
+        document.getElementById('tz-bridge-close').addEventListener('click', (e) => {
+            e.stopPropagation();
+            dismissPanel();
+        });
         mounted = true;
+    }
+
+    function dismissPanel() {
+        dismissed = true;
+        dismissedEnvelopeId = envelopeId;
+        clearAllMarks();
+        const root = document.getElementById('tz-bridge-panel');
+        if (root) root.classList.add('dismissed');
+        const reopen = document.getElementById('tz-bridge-reopen');
+        if (reopen) reopen.classList.add('visible');
+    }
+
+    function restorePanel() {
+        dismissed = false;
+        dismissedEnvelopeId = null;
+        const root = document.getElementById('tz-bridge-panel');
+        if (root) {
+            root.classList.remove('dismissed');
+            root.classList.remove('collapsed');
+            const tog = document.getElementById('tz-bridge-toggle');
+            if (tog) tog.textContent = '»';
+        }
+        const reopen = document.getElementById('tz-bridge-reopen');
+        if (reopen) reopen.classList.remove('visible');
+        render();
     }
 
     function escapeHtml(s) {
@@ -554,10 +618,16 @@
     function ingestEnvelope(envelope, fromPaste) {
         if (!envelope || !envelope.items) return;
         currentEnvelope = envelope;
-        envelopeId = envelope.envelope_id || 'paste-' + Date.now();
+        const newId = envelope.envelope_id || 'paste-' + Date.now();
+        // A genuinely new envelope (different id) overrides any prior dismissal:
+        // users almost certainly want to see the freshly-sent batch.
+        if (dismissed && newId !== dismissedEnvelopeId) {
+            restorePanel();
+        }
+        envelopeId = newId;
         progress = GM_getValue('progress::' + envelopeId, {}) || {};
         const root = document.getElementById('tz-bridge-panel');
-        if (root) root.classList.remove('collapsed');
+        if (root && !dismissed) root.classList.remove('collapsed');
         const tog = document.getElementById('tz-bridge-toggle');
         if (tog) tog.textContent = '»';
         render();

@@ -70,7 +70,7 @@ You only do steps 1–3 once. After that, every time TranzorExporter and a Tranz
 
    ```
    ┌────────────────────────────────────────┐
-   │ 📋 Tranzor Bridge  port 48217 · 3b3db0 │
+   │ 📋 Tranzor Bridge  port 48217   ✕  »   │
    ├────────────────────────────────────────┤
    │ Task 227 · de-DE · 1/8 fixed  on task 227 │
    │ [👀 Highlighting on page]              │
@@ -94,7 +94,8 @@ You only do steps 1–3 once. After that, every time TranzorExporter and a Tranz
    - **✓ Fixed**: marks the row done; the stripe on the page turns grey to show "already done" while you finish the rest.
    - **⤵ Skip**: marks the row as skipped (won't count toward "fixed" progress).
    - **Click the key text**: copies it to your clipboard.
-   - **Click the header**: collapses / expands the sidebar.
+   - **`»` toggle**: collapses / expands the sidebar (keeps highlights + progress).
+   - **`✕` close**: hides the panel **and** clears all green stripes from Tranzor's rows. A small floating **📋** pill stays at the top-right so you can reopen it any time; sending a brand-new batch from the report also auto-reopens.
 
 6. **Fix the translation in Tranzor's own row** as you normally would (use the platform's existing edit UI). Then click `✓ Fixed` in the sidebar to track progress — the row's stripe immediately turns grey on the page so you can see what's left. Close the tab when done; progress is restored when you reopen.
 
