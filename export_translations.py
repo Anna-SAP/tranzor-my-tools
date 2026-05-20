@@ -999,15 +999,22 @@ async function sendToTranzor() {{
     const envelope = buildEnvelope(rows);
     status.textContent = 'Sending ' + rows.length + ' item(s)…';
 
+    // Route to the task-specific page so the user lands on the actual list,
+    // not the bare domain (which is unreachable through the corporate proxy).
+    // When the envelope spans multiple tasks, fall back to the first item's task.
+    const taskId = (envelope.context && envelope.context.task_id)
+                || (envelope.items[0] && envelope.items[0].task_id);
+    const taskPath = taskId ? ('/static/legacy/tasks/' + encodeURIComponent(taskId)) : '/';
+
     // Transport 1: bridge
     const br = await tryBridge(envelope);
-    let openUrl = TRANZOR_BASE + '/';
+    let openUrl = TRANZOR_BASE + taskPath;
     let toast;
     if (br.ok) {{
         // Pair the userscript with the bridge: pass token via one-time URL hash.
         // The userscript stashes it in GM storage and history.replaceState's it away.
         if (BRIDGE && BRIDGE.token) {{
-            openUrl = TRANZOR_BASE + '/#tzbridge_token=' + encodeURIComponent(BRIDGE.token);
+            openUrl = TRANZOR_BASE + taskPath + '#tzbridge_token=' + encodeURIComponent(BRIDGE.token);
         }}
         toast = '✓ Sent ' + rows.length + ' item(s) via bridge (seq=' + br.seq + '). Switching to Tranzor…';
     }} else {{
@@ -1019,7 +1026,7 @@ async function sendToTranzor() {{
             // Transport 3: URL hash (last resort, truncates if too large)
             const hashResult = tryHash(envelope);
             if (hashResult.ok) {{
-                openUrl = TRANZOR_BASE + '/' + hashResult.hash;
+                openUrl = TRANZOR_BASE + taskPath + hashResult.hash;
                 toast = '⚠ Bridge + clipboard unavailable. Embedding selections in URL hash.';
             }} else {{
                 toast = '✗ All transports failed (bridge=' + br.reason + ', clipboard=' + cb.reason + ', hash=' + hashResult.reason + ')';
