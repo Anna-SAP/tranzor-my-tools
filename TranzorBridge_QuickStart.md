@@ -9,7 +9,7 @@
 
 | Before | After |
 |---|---|
-| Tick 8 rows in the HTML report → open Tranzor Platform → copy a `String Key` → paste into search → fix → repeat 7 more times | Tick rows → click `↗ Send to Tranzor` → sidebar appears on Tranzor with all 8 keys → `🔍 Find` fills the search box → fix → `✓ Fixed` → progress is saved |
+| Tick 8 rows in the HTML report → open Tranzor Platform → copy a `String Key` → paste into search → fix → repeat 7 more times | Tick rows → click `↗ Send to Tranzor` → the task page (`/static/legacy/tasks/<task_id>`) opens with the matching rows **already highlighted in Tranzor's own list**, plus a sidebar that lets you `🔍 Find` (scroll + flash) → fix → `✓ Fixed` → progress is saved |
 
 ---
 
@@ -63,19 +63,21 @@ You only do steps 1–3 once. After that, every time TranzorExporter and a Tranz
 
 4. **Click `↗ Send to Tranzor`** (the new green button next to `📦 Export TMX`).
    - A toast under the button confirms: `✓ Sent N item(s) via bridge (seq=…). Switching to Tranzor…`
-   - Your Tranzor Platform tab opens (or refocuses if already open).
+   - The browser opens **`http://tranzor-platform.int.rclabenv.com/static/legacy/tasks/<task_id>`** — i.e. Tranzor's own per-task page for the items you selected.
+   - If the items span multiple tasks, the first task's page opens and the sidebar shows a `go to task N →` link for the others.
 
-5. **Use the sidebar on Tranzor** (right edge of the page):
+5. **The matching rows are already highlighted in Tranzor's own list.** Every selected `String Key` gets a green left stripe + soft green background directly on Tranzor's row — no need to search. The sidebar (right edge) is the control surface:
 
    ```
    ┌────────────────────────────────────────┐
    │ 📋 Tranzor Bridge  port 48217 · 3b3db0 │
    ├────────────────────────────────────────┤
-   │ Task 216 · zh-TW · 1/8 fixed           │
+   │ Task 227 · de-DE · 1/8 fixed  on task 227 │
+   │ [👀 Highlighting on page]              │
    │                                        │
    │ ┌──────────────────────────────────┐   │
    │ │ settings.profile.title           │   │
-   │ │ zh-TW · LLM Retranslate          │   │
+   │ │ de-DE · LLM Retranslate          │   │
    │ │ [🔍 Find] [✓ Fixed] [⤵ Skip]     │   │
    │ └──────────────────────────────────┘   │
    │ ┌──────────────────────────────────┐   │
@@ -86,13 +88,15 @@ You only do steps 1–3 once. After that, every time TranzorExporter and a Tranz
    └────────────────────────────────────────┘
    ```
 
-   - **🔍 Find**: types the String Key into the Tranzor search box and dispatches Enter. The platform's own filter / list jumps to the matching entry.
-   - **✓ Fixed**: marks the row done in your local progress (strikethrough). Toggle off to un-mark.
-   - **⤵ Skip**: marks the row as skipped (won't count toward "fixed" progress, dims the row).
-   - **Click the key text**: copies it to your clipboard (useful if `Find` didn't hit the right field for some reason).
+   - **`on task 227` badge** (green): you're on the right task page; on-page highlighting is active. If the badge is orange and reads `go to task 227 →`, click it to navigate.
+   - **`👀 Highlighting on page`** toggle: turn the green stripes off if you find them visually noisy.
+   - **🔍 Find**: scrolls to the row containing the String Key in Tranzor's own list and flashes it yellow for 2.4 s. (If the row isn't on the current page, falls back to filling Tranzor's search box, then to clipboard.)
+   - **✓ Fixed**: marks the row done; the stripe on the page turns grey to show "already done" while you finish the rest.
+   - **⤵ Skip**: marks the row as skipped (won't count toward "fixed" progress).
+   - **Click the key text**: copies it to your clipboard.
    - **Click the header**: collapses / expands the sidebar.
 
-6. **Fix the translation on Tranzor** as you normally would, then click `✓ Fixed` in the sidebar to track progress. Repeat for each key. Close the tab when done — progress is restored if you reopen it later.
+6. **Fix the translation in Tranzor's own row** as you normally would (use the platform's existing edit UI). Then click `✓ Fixed` in the sidebar to track progress — the row's stripe immediately turns grey on the page so you can see what's left. Close the tab when done; progress is restored when you reopen.
 
 ---
 
@@ -102,7 +106,8 @@ You only do steps 1–3 once. After that, every time TranzorExporter and a Tranz
 |---|---|---|
 | Send button shows `⚠ Bridge unavailable… Copied to clipboard.` | The desktop app isn't running, or it crashed and `port.json` is stale | Make sure TranzorExporter is open. Then in the Tranzor sidebar, click the paste textarea at the bottom and `Ctrl+Shift+V` — the envelope ingests from clipboard. |
 | Sidebar says "no bridge" even with TranzorExporter open | Bridge port is taken (10+ instances running, or another app on 48217–48226) | Restart TranzorExporter; if persistent, check the console for `BridgePortBusy`. The fallback transports (clipboard, URL hash) still work. |
-| `🔍 Find` does nothing | Tranzor's search input selector doesn't match the default | Click the key text to copy it, then paste into Tranzor's filter manually. (We can teach the userscript a new selector — open an issue.) |
+| `🔍 Find` does nothing | The row is on a different page of Tranzor's pagination, or its String Key isn't rendered as visible text | Click the key text to copy it, then use Tranzor's own search/pagination. The sidebar shows the orange `go to task → ` link when you're not on the matching task page. |
+| Sent button opens a URL but Squid says `Name Error: The domain name does not exist` | You navigated to the bare `tranzor-platform.int.rclabenv.com` instead of a task URL | Make sure your envelope has a `task_id` (it always does when you exported from a single Task). Re-export if the Task ID column was empty. |
 | Sidebar appears empty after I clicked Send | Userscript hasn't received the token yet. Look at the URL bar — does it contain `#tzbridge_token=…`? | If yes, refresh the page once; if no, send again from the report — the token is paired automatically on the next Send. |
 | Send button is disabled (grey) | No rows are ticked, or all ticked rows are hidden by the current filter | Tick visible rows; the button enables as soon as `Selected: N` ≥ 1. |
 | New rows from a fresh Send replaced my previous list | Single-slot inbox by design — each Send overwrites the prior fix-list | Finish a list before sending the next, or use the Mark Fixed/Skip state which persists per envelope ID even after replacement. |

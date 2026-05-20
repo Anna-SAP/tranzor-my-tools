@@ -34,6 +34,11 @@
         },
     };
 
+    // URL pattern of Tranzor's per-task list view. The Send-to-Tranzor button
+    // already navigates here; this regex lets the userscript know whether the
+    // current page corresponds to the envelope's task (→ enable highlighting).
+    const TASK_PATH_RE = /\/static\/legacy\/tasks\/([^/?#]+)/;
+
     // ---- State ----
     let endpoint = null; // { port, token, instance_id, discoveredAt }
     let lastSeq = 0;
@@ -42,6 +47,8 @@
     let envelopeId = null;
     let pollTimer = null;
     let mounted = false;
+    let highlightMode = true;       // default ON when on the matching task page
+    let highlightedNodes = new Set(); // currently-marked DOM nodes (so we can clear cleanly)
 
     // ---- Style ----
     const STYLE = `
@@ -95,6 +102,41 @@
         width: 100%; height: 60px; margin-top: 4px; background: #1e293b; color: #e2e8f0;
         border: 1px solid #334155; border-radius: 4px; padding: 6px; font-family: monospace; font-size: 10px;
         box-sizing: border-box;
+    }
+    .tz-bridge-paste.collapsed > details { color: #64748b; }
+    .tz-bridge-paste summary { cursor: pointer; user-select: none; font-size: 10px; }
+    /* Per-click flash on the Tranzor row that matched the key */
+    .tz-bridge-flash {
+        animation: tzBridgeFlash 2.4s ease-out;
+        position: relative; z-index: 1;
+    }
+    @keyframes tzBridgeFlash {
+        0%   { background-color: rgba(251, 191, 36, 0.85) !important; box-shadow: 0 0 0 4px rgba(251, 191, 36, 0.95); }
+        60%  { background-color: rgba(251, 191, 36, 0.45) !important; box-shadow: 0 0 0 3px rgba(251, 191, 36, 0.7); }
+        100% { background-color: transparent; box-shadow: none; }
+    }
+    /* Persistent soft highlight for every selected row visible on the page */
+    .tz-bridge-mark {
+        background: rgba(39, 174, 96, 0.18) !important;
+        box-shadow: inset 4px 0 0 0 #27AE60 !important;
+        transition: background 0.2s;
+    }
+    .tz-bridge-mark.fixed-mark {
+        background: rgba(100, 116, 139, 0.18) !important;
+        box-shadow: inset 4px 0 0 0 #64748b !important;
+    }
+    .tz-bridge-task-badge {
+        display: inline-flex; align-items: center; gap: 4px;
+        padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 600;
+        font-family: monospace; margin-left: 6px;
+    }
+    .tz-bridge-task-badge.match { background: rgba(39, 174, 96, 0.25); color: #86efac; }
+    .tz-bridge-task-badge.mismatch { background: rgba(230, 126, 34, 0.25); color: #fdba74; cursor: pointer; }
+    .tz-bridge-toolbar {
+        display: flex; gap: 6px; margin-bottom: 8px; flex-wrap: wrap;
+    }
+    .tz-bridge-toolbar .tz-bridge-btn {
+        font-size: 10px;
     }
     `;
 
@@ -243,7 +285,7 @@
                 <div class="tz-bridge-empty">
                     Click <b>↗ Send to Tranzor</b> in your Exporter HTML report to populate this list.
                 </div>
-                ${pasteFallbackHtml()}
+                ${pasteFallbackHtml(/*expanded=*/true)}
             `;
             wirePasteFallback();
             return;
@@ -256,6 +298,18 @@
         if (ctx.task_id) ctxBits.push('Task ' + escapeHtml(ctx.task_id));
         if (ctx.language) ctxBits.push(escapeHtml(ctx.language));
         const ctxLabel = ctxBits.length ? ctxBits.join(' · ') : 'mixed';
+
+        // Task-page match indicator + jump link when on wrong page.
+        const onTask = getCurrentTaskId();
+        const envTask = envelopeTaskId();
+        let taskBadge = '';
+        if (envTask) {
+            if (onTask && String(onTask) === String(envTask)) {
+                taskBadge = `<span class="tz-bridge-task-badge match" title="You're on the right task page">on task ${escapeHtml(envTask)}</span>`;
+            } else {
+                taskBadge = `<a class="tz-bridge-task-badge mismatch" href="/static/legacy/tasks/${encodeURIComponent(envTask)}" title="Open the task page these items belong to">go to task ${escapeHtml(envTask)} →</a>`;
+            }
+        }
 
         const itemsHtml = currentEnvelope.items.map((it, i) => {
             const state = progress[it.string_key] || '';
@@ -277,12 +331,25 @@
 
         body.innerHTML = `
             <div class="tz-bridge-status">
-                ${ctxLabel} · <span class="tz-bridge-progress">${fixedCount}/${total}</span> fixed
+                ${ctxLabel} · <span class="tz-bridge-progress">${fixedCount}/${total}</span> fixed${taskBadge}
+            </div>
+            <div class="tz-bridge-toolbar">
+                <button class="tz-bridge-btn ${highlightMode ? 'active primary' : ''}" id="tz-bridge-hl-toggle" title="Mark every selected row on the Tranzor page with a green stripe">
+                    ${highlightMode ? '👀 Highlighting on page' : '⋯ Highlight on page'}
+                </button>
             </div>
             ${itemsHtml}
-            ${pasteFallbackHtml()}
+            ${pasteFallbackHtml(/*expanded=*/false)}
         `;
         wirePasteFallback();
+        const toggleBtn = document.getElementById('tz-bridge-hl-toggle');
+        if (toggleBtn) {
+            toggleBtn.addEventListener('click', () => {
+                highlightMode = !highlightMode;
+                refreshHighlights();
+                render();
+            });
+        }
         body.querySelectorAll('.tz-bridge-item').forEach(itemEl => {
             const key = itemEl.dataset.key;
             itemEl.querySelector('.tz-bridge-key').addEventListener('click', () => {
@@ -298,13 +365,27 @@
                 });
             });
         });
+        // Refresh the on-page highlights after re-rendering the sidebar.
+        refreshHighlights();
     }
 
-    function pasteFallbackHtml() {
+    function pasteFallbackHtml(expanded) {
+        if (expanded) {
+            return `
+                <div class="tz-bridge-paste">
+                    Bridge not used? Paste the JSON copied by the report here:
+                    <textarea id="tz-bridge-paste" placeholder='{"items":[…]}'></textarea>
+                </div>
+            `;
+        }
+        // When an envelope is already loaded, collapse the paste box so it
+        // doesn't compete visually with the items list.
         return `
             <div class="tz-bridge-paste">
-                Bridge not used? Paste the JSON copied by the report here:
-                <textarea id="tz-bridge-paste" placeholder='{"items":[…]}'></textarea>
+                <details>
+                    <summary>Paste JSON from another report (advanced)</summary>
+                    <textarea id="tz-bridge-paste" placeholder='{"items":[…]}'></textarea>
+                </details>
             </div>
         `;
     }
@@ -332,24 +413,128 @@
         render();
     }
 
+    function getCurrentTaskId() {
+        const m = TASK_PATH_RE.exec(location.pathname);
+        return m ? decodeURIComponent(m[1]) : null;
+    }
+
+    function envelopeTaskId() {
+        if (!currentEnvelope) return null;
+        const ctx = currentEnvelope.context || {};
+        if (ctx.task_id) return String(ctx.task_id);
+        const first = currentEnvelope.items && currentEnvelope.items[0];
+        return first && first.task_id ? String(first.task_id) : null;
+    }
+
+    function isOnEnvelopeTaskPage() {
+        const onTask = getCurrentTaskId();
+        const envTask = envelopeTaskId();
+        return Boolean(onTask && envTask && String(onTask) === String(envTask));
+    }
+
+    // Walk text nodes to find a row container holding the given key. Uses
+    // TreeWalker so it's O(n) and skips nodes inside the bridge sidebar itself.
+    function findRowContainingText(text) {
+        if (!text) return null;
+        const root = document.body;
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+            acceptNode: (node) => {
+                if (!node.nodeValue || node.nodeValue.indexOf(text) === -1) return NodeFilter.FILTER_SKIP;
+                // Skip our own panel
+                let p = node.parentElement;
+                while (p) {
+                    if (p.id === 'tz-bridge-panel') return NodeFilter.FILTER_REJECT;
+                    p = p.parentElement;
+                }
+                return NodeFilter.FILTER_ACCEPT;
+            },
+        });
+        const node = walker.nextNode();
+        if (!node) return null;
+        // Walk up to the smallest reasonable row container.
+        let el = node.parentElement;
+        while (el && el !== document.body) {
+            const tag = el.tagName;
+            if (tag === 'TR' || tag === 'LI') return el;
+            if (el.getAttribute && el.getAttribute('role') === 'row') return el;
+            // Heuristic: a div that has 3+ children laid out as a row is probably one.
+            if (tag === 'DIV' && el.children.length >= 3) {
+                const style = window.getComputedStyle(el);
+                if (style.display.startsWith('flex') || style.display.startsWith('grid')) return el;
+            }
+            el = el.parentElement;
+        }
+        return node.parentElement;
+    }
+
+    function scrollAndFlash(el) {
+        if (!el) return;
+        try {
+            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        } catch (e) {
+            el.scrollIntoView();
+        }
+        el.classList.remove('tz-bridge-flash');
+        // Force reflow so the animation restarts even on repeat clicks.
+        void el.offsetWidth;
+        el.classList.add('tz-bridge-flash');
+        setTimeout(() => el.classList.remove('tz-bridge-flash'), 2500);
+    }
+
+    function clearAllMarks() {
+        highlightedNodes.forEach(el => {
+            el.classList.remove('tz-bridge-mark', 'fixed-mark');
+        });
+        highlightedNodes.clear();
+    }
+
+    function highlightAllOnPage() {
+        clearAllMarks();
+        if (!currentEnvelope || !currentEnvelope.items) return 0;
+        let found = 0;
+        currentEnvelope.items.forEach(it => {
+            const row = findRowContainingText(it.string_key);
+            if (!row) return;
+            row.classList.add('tz-bridge-mark');
+            if (progress[it.string_key] === 'fixed') row.classList.add('fixed-mark');
+            highlightedNodes.add(row);
+            found++;
+        });
+        return found;
+    }
+
+    function refreshHighlights() {
+        if (!highlightMode || !isOnEnvelopeTaskPage()) {
+            clearAllMarks();
+            return 0;
+        }
+        return highlightAllOnPage();
+    }
+
     function findKeyOnPage(key) {
-        // MVP strategy: fill Tranzor's search input with the key and dispatch
-        // input/change/Enter so the platform's own filtering takes over.
-        const input = document.querySelector(CONFIG.SELECTORS.searchInput);
-        if (!input) {
-            navigator.clipboard.writeText(key).catch(() => {});
-            // Try a soft "page find" hint as a fallback.
-            window.find && window.find(key, /*caseSensitive*/false, /*backwards*/false, /*wrapAround*/true);
-            flashHeader('No search box found — key copied to clipboard');
+        // Tier A: scroll to the matching row directly in Tranzor's DOM and
+        // flash it. Works without knowing any platform-specific selector.
+        const row = findRowContainingText(key);
+        if (row) {
+            scrollAndFlash(row);
             return;
         }
-        input.focus();
-        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-        setter && setter.call(input, key);
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-        input.dispatchEvent(new Event('change', { bubbles: true }));
-        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
-        input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true }));
+        // Tier B: fill Tranzor's search input as a soft fallback.
+        const input = document.querySelector(CONFIG.SELECTORS.searchInput);
+        if (input) {
+            input.focus();
+            const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+            setter && setter.call(input, key);
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+            input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
+            input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true }));
+            return;
+        }
+        // Tier C: clipboard + native page-find as a last resort.
+        navigator.clipboard.writeText(key).catch(() => {});
+        window.find && window.find(key, /*caseSensitive*/false, /*backwards*/false, /*wrapAround*/true);
+        flashHeader('Row not on this page — key copied to clipboard');
     }
 
     function flashHeader(msg) {
@@ -380,9 +565,16 @@
     }
 
     // ---- Polling loop ----
+    let lastObservedPath = location.pathname;
     async function tick() {
         try {
             if (document.visibilityState !== 'visible') return;
+            // Re-render if SPA navigation moved us between task pages so the
+            // task badge and on-page highlights track the current URL.
+            if (location.pathname !== lastObservedPath) {
+                lastObservedPath = location.pathname;
+                if (currentEnvelope) render();
+            }
             // Token may arrive at any tick via a freshly opened tab carrying
             // #tzbridge_token=… in the URL hash.
             captureTokenFromHash();

@@ -9,7 +9,7 @@
 
 | 改进前 | 改进后 |
 |---|---|
-| HTML 报告勾出 8 条 → 打开 Tranzor → 复制 `String Key` → 粘到搜索框 → 修 → 再来 7 遍 | 勾完 → 点 `↗ Send to Tranzor` → Tranzor 标签页右侧弹出 8 条侧栏 → `🔍 Find` 自动填搜索框 → 修 → `✓ Fixed` → 进度自动保存 |
+| HTML 报告勾出 8 条 → 打开 Tranzor → 复制 `String Key` → 粘到搜索框 → 修 → 再来 7 遍 | 勾完 → 点 `↗ Send to Tranzor` → 直接跳到 `/static/legacy/tasks/<task_id>` 任务页，**Tranzor 自己的列表里已经把 8 条目标行染成绿色高亮**；右侧栏 `🔍 Find` 滚动 + 闪烁 → 修 → `✓ Fixed` → 进度自动保存 |
 
 ---
 
@@ -62,19 +62,21 @@
 
 4. **点 `↗ Send to Tranzor`**（在 `📦 Export TMX` 旁边的新绿色按钮）
    - 按钮下方提示：`✓ Sent N item(s) via bridge (seq=…). Switching to Tranzor…`
-   - Tranzor Platform 标签页自动打开（或聚焦已打开的那个）
+   - 浏览器打开 **`http://tranzor-platform.int.rclabenv.com/static/legacy/tasks/<task_id>`** —— 也就是 Tranzor 自己的该任务详情页（任务 ID 跟着你导出的报告走）
+   - 如果勾选的条目跨多个任务，会先打开第一个任务的页面，侧栏里以 `go to task N →` 的橙色链接列出其他任务的入口
 
-5. **在 Tranzor 标签页上用侧栏**（页面右侧）：
+5. **被勾选的行已经在 Tranzor 自己的列表里被绿色高亮**。每个 `String Key` 在 Tranzor 原生列表的对应行上加了一道绿色左边条 + 浅绿背景 —— 不用再搜索。右侧栏只是控制面板：
 
    ```
    ┌────────────────────────────────────────┐
    │ 📋 Tranzor Bridge  port 48217 · 3b3db0 │
    ├────────────────────────────────────────┤
-   │ Task 216 · zh-TW · 1/8 fixed           │
+   │ Task 227 · de-DE · 1/8 fixed  on task 227 │
+   │ [👀 Highlighting on page]              │
    │                                        │
    │ ┌──────────────────────────────────┐   │
    │ │ settings.profile.title           │   │
-   │ │ zh-TW · LLM Retranslate          │   │
+   │ │ de-DE · LLM Retranslate          │   │
    │ │ [🔍 Find] [✓ Fixed] [⤵ Skip]     │   │
    │ └──────────────────────────────────┘   │
    │ ┌──────────────────────────────────┐   │
@@ -85,13 +87,15 @@
    └────────────────────────────────────────┘
    ```
 
-   - **🔍 Find**：把 String Key 自动填进 Tranzor 的搜索框并模拟回车，平台自身的过滤/列表会跳到对应条目
-   - **✓ Fixed**：标记这条已修（加删除线 + 变绿）。再点一次取消
-   - **⤵ Skip**：标记跳过（不计入"已修"进度，灰显）
-   - **点 key 文本本身**：复制到剪贴板（如果 Find 没正确命中搜索框，可手动粘贴）
+   - **`on task 227` 徽章**（绿色）：你已经在正确的任务页，绿色高亮已激活。如果徽章是橙色 `go to task 227 →`，点击它跳过去
+   - **`👀 Highlighting on page`** 开关：嫌绿色条太显眼可以关掉，再点恢复
+   - **🔍 Find**：在 Tranzor 自己的列表里滚动到对应行 + 黄色闪烁 2.4 秒。如果当前页找不到（被分页过滤），会退化到填 Tranzor 的搜索框，再退化到剪贴板复制
+   - **✓ Fixed**：标记已修；页面上的绿色条会立刻变成灰色，提示"这一条已完成"，剩下的还是绿色
+   - **⤵ Skip**：标记跳过（不计入"已修"进度）
+   - **点 key 文本本身**：复制到剪贴板
    - **点侧栏头部**：折叠/展开侧栏
 
-6. **在 Tranzor 上正常修复译文**，修完点 `✓ Fixed` 跟踪进度。逐条往下走，关闭标签页之后再打开，进度会被恢复（按 envelope ID 持久化）
+6. **在 Tranzor 自己的行上正常修复译文**（用平台原生的编辑 UI）。修完点 `✓ Fixed` 跟踪进度 —— 那一行的绿色条立刻转灰，你一眼就能看出还剩几条没修。关闭标签页再打开时进度会被恢复（按 envelope ID 持久化）
 
 ---
 
@@ -101,7 +105,8 @@
 |---|---|---|
 | Send 按钮显示 `⚠ Bridge unavailable… Copied to clipboard.` | 桌面应用没开，或挂掉留下 stale port.json | 确认 TranzorExporter 在运行。然后在 Tranzor 侧栏底部的 textarea 里 `Ctrl+Shift+V`，envelope 会从剪贴板载入 |
 | 侧栏始终显示 "no bridge" | 端口段被占满（≥10 个实例，或别的程序占了 48217–48226） | 重启 TranzorExporter；持续失败请看控制台是否输出 `BridgePortBusy`。剪贴板与 URL hash 降级通道照常可用 |
-| `🔍 Find` 没反应 | Tranzor 的搜索框 selector 与默认匹配规则不一致 | 点 key 文本复制到剪贴板，手动粘贴到 Tranzor 的筛选框；如果是稳定问题可开 issue，让 userscript 学习新的 selector |
+| `🔍 Find` 没反应 | 目标行可能在 Tranzor 的另一页（分页过滤掉了），或者它的 String Key 不是作为可见文本渲染 | 点 key 文本复制到剪贴板，用 Tranzor 自己的搜索/翻页跳过去；如果你不在对应任务页，侧栏会显示橙色 `go to task → ` 链接 |
+| Send 跳出来的页面被 Squid 报 `Name Error: The domain name does not exist` | 你跳到了裸域 `tranzor-platform.int.rclabenv.com` 而不是任务页 | 确认 envelope 里有 `task_id`（单任务导出时永远有）。如果 Task ID 列空着，重新导出一次 |
 | 点完 Send 后侧栏却是空的 | userscript 还没拿到 token —— 看一下地址栏是不是有 `#tzbridge_token=…` | 如果有，刷新一次页面；如果没有，回报告里再点一次 Send，token 会在下次 Send 时一次性配对 |
 | Send 按钮置灰 | 没勾选任何行，或所有勾选行被当前 filter 隐藏 | 勾选可见行；`Selected: N` 一旦 ≥ 1，按钮就会启用 |
 | 新一次 Send 把之前的清单覆盖了 | 单槽收件箱（设计如此）：每次 Send 替换上一份 fix-list | 修完上一批再发下一批；或者放心 —— `已修/跳过`状态按 envelope ID 独立持久化，覆盖之后仍可恢复 |
