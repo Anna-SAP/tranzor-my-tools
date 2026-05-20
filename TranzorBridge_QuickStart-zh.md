@@ -92,7 +92,7 @@
    - **`on task 227` 徽章**（绿色）：你已经在正确的任务页，绿色高亮 + 自动勾选已激活。如果徽章是橙色 `go to task 227 →`，点击它跳过去
    - **`👀 Highlighting on page`** 开关：嫌绿色条太显眼可以关掉，再点恢复
    - **`☑ Auto-tick on`** 开关（默认开）：自动把 Tranzor 原生的行 checkbox 勾上，让平台的 `Batch Retranslate` 等批量按钮立刻可用。关闭时只会撤掉**我们勾的那些**，你手动勾的不会被动。已经标记为 `✓ Fixed` 的条目不会被自动勾（已修过的没必要再批量重译）
-   - **`🎯 Filter Tranzor by next key`**：核心操作按钮。它把你选中条目里的下一个**独立 String Key** 自动填进 Tranzor 自己的搜索框 → 该 key 在所有语言下的对应行被一屏列出 → 自动勾上。点完后去 Tranzor 点 `Batch Retranslate`，再点这个按钮推进到下一个 key。状态栏显示 `(1/2)` `(2/2)` 等进度
+   - **`🎯 Filter Tranzor by next key`**：核心操作按钮。它会自动 (1) 把下一个独立 String Key 填进 Tranzor 搜索框 → (2) 点击 Tranzor 的 **"All Languages"** 视图按钮让该 key 在所有语言下的行同屏列出 → (3) 只勾选你的 envelope 里实际包含的那些语言行（不会误勾 en-GB 这种你没选中的语言）。点完后去 Tranzor 点 `Batch Retranslate`，再点这个按钮推进下一个 key。状态栏显示 `(1/2)` `(2/2)` 等进度
    - **`🔄 Re-scan`**：重新跑一次"应用当前过滤 + 重新扫 + 重新勾"流程。后台还有 DOM 观察器，Tranzor 渲染新行（翻页等）时也会自动重扫
    - **🔍 Find**：在 Tranzor 自己的列表里滚动到对应行 + 黄色闪烁 2.4 秒。如果当前页找不到（被分页过滤），会退化到填 Tranzor 的搜索框，再退化到剪贴板复制
    - **✓ Fixed**：标记已修；页面上的绿色条会立刻变成灰色，提示"这一条已完成"，剩下的还是绿色
