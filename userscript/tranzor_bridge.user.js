@@ -677,30 +677,54 @@
     }
 
     function rowAncestorOf(el) {
-        while (el && el !== document.body) {
-            const tag = el.tagName;
-            if (tag === 'TR' || tag === 'LI') return el;
-            if (el.getAttribute && el.getAttribute('role') === 'row') return el;
-            if (tag === 'DIV' && el.children.length >= 3) {
-                const style = window.getComputedStyle(el);
-                if (style.display.startsWith('flex') || style.display.startsWith('grid')) return el;
+        if (!el) return null;
+        // Use closest() for canonical row containers (table rows, list items,
+        // ARIA rows). Avoids surprises from intermediate <span>/<div> wraps.
+        if (el.closest) {
+            const row = el.closest('tr, li, [role="row"]');
+            if (row) return row;
+        }
+        // Fallback for div-based "row" layouts (flex/grid with 3+ children).
+        let p = el;
+        while (p && p !== document.body) {
+            if (p.nodeType === 1 && p.tagName === 'DIV' && p.children && p.children.length >= 3) {
+                const style = window.getComputedStyle(p);
+                if (style.display.startsWith('flex') || style.display.startsWith('grid')) return p;
             }
-            el = el.parentElement;
+            p = p.parentElement;
         }
         return null;
     }
 
-    // Check whether a row element contains the given language code as an
-    // identifiable token (e.g. cell text exactly "en-GB" or text bordered by
-    // non-identifier chars). Avoids false-positives where the language code
-    // appears inside another identifier.
+    // Check whether a row element contains the given language code. Tranzor
+    // renders the language code as the text of a dedicated <td> cell, so we
+    // scan cells individually — row.textContent concatenates cell text WITHOUT
+    // separators, which strips the word-boundary the previous regex relied on
+    // (e.g. "...Implementationfr-CA..." → "fr-CA" preceded by 'n' fails the
+    // [^A-Za-z0-9_] guard, leaving only languages whose adjacent cell text
+    // happens to end in punctuation like ')'.matched).
     function rowContainsLanguageToken(row, lang) {
         if (!lang) return true;
-        // Quick check on row's full textContent — bounded by word edges.
-        const txt = row.textContent || '';
-        // Build a regex like /(^|[^A-Za-z0-9_])en-GB($|[^A-Za-z0-9_])/
-        const escaped = lang.replace(/-/g, '\\-');
-        const re = new RegExp('(^|[^A-Za-z0-9_])' + escaped + '($|[^A-Za-z0-9_])');
+        const cells = row.querySelectorAll('td, th, [role="cell"], [role="gridcell"]');
+        if (cells.length > 0) {
+            const wanted = lang.toLowerCase();
+            for (let i = 0; i < cells.length; i++) {
+                const t = (cells[i].textContent || '').trim();
+                if (!t) continue;
+                if (t === lang || t.toLowerCase() === wanted) return true;
+                // Also accept a cell that contains the lang surrounded by
+                // safe boundaries (rare: lang next to a badge or icon text).
+                const escaped = lang.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                const re = new RegExp('(^|[^A-Za-z0-9_])' + escaped + '($|[^A-Za-z0-9_])', 'i');
+                if (re.test(t)) return true;
+            }
+            return false;
+        }
+        // Non-table layouts: innerText respects rendered line breaks between
+        // child blocks, so adjacent "cell" text won't fuse together.
+        const txt = row.innerText || row.textContent || '';
+        const escaped = lang.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const re = new RegExp('(^|[^A-Za-z0-9_])' + escaped + '($|[^A-Za-z0-9_])', 'i');
         return re.test(txt);
     }
 
