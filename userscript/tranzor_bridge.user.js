@@ -394,7 +394,7 @@
             return;
         }
 
-        const fixedCount = currentEnvelope.items.filter(i => progress[i.string_key] === 'fixed').length;
+        const fixedCount = currentEnvelope.items.filter(i => progress[progressKeyOf(i)] === 'fixed').length;
         const total = currentEnvelope.items.length;
         const ctx = currentEnvelope.context || {};
         const ctxBits = [];
@@ -426,10 +426,11 @@
         const groupsHtml = keyGroups.map((grp, gIdx) => {
             const isCurrent = grp.key === currentFilterKey;
             const groupItemsHtml = grp.items.map(it => {
-                const state = progress[it.string_key] || '';
+                const pKey = progressKeyOf(it);
+                const state = progress[pKey] || '';
                 const cls = state ? ' ' + state : '';
                 return `
-                    <div class="tz-bridge-item${cls}" data-key="${escapeHtml(it.string_key)}">
+                    <div class="tz-bridge-item${cls}" data-key="${escapeHtml(it.string_key)}" data-lang="${escapeHtml(it.language || '')}">
                         <div class="tz-bridge-meta">${escapeHtml(it.language || '')} · ${escapeHtml(it.translation_type || '')}</div>
                         <div class="tz-bridge-row">
                             <button class="tz-bridge-btn primary" data-action="find">🔍 Find</button>
@@ -567,6 +568,9 @@
         });
         body.querySelectorAll('.tz-bridge-item').forEach(itemEl => {
             const key = itemEl.dataset.key;
+            const lang = itemEl.dataset.lang || '';
+            const item = { string_key: key, language: lang };
+            const pKey = progressKeyOf(item);
             const keyEl = itemEl.querySelector('.tz-bridge-key');
             if (keyEl) {
                 keyEl.addEventListener('click', () => {
@@ -577,9 +581,9 @@
                 btn.addEventListener('click', (e) => {
                     e.stopPropagation();
                     const action = btn.dataset.action;
-                    if (action === 'find') findKeyOnPage(key);
-                    else if (action === 'fix') toggleProgress(key, 'fixed');
-                    else if (action === 'skip') toggleProgress(key, 'skipped');
+                    if (action === 'find') findItemOnPage(item);
+                    else if (action === 'fix') toggleProgress(pKey, 'fixed');
+                    else if (action === 'skip') toggleProgress(pKey, 'skipped');
                 });
             });
         });
@@ -669,20 +673,99 @@
         });
         const node = walker.nextNode();
         if (!node) return null;
-        // Walk up to the smallest reasonable row container.
-        let el = node.parentElement;
+        return rowAncestorOf(node.parentElement);
+    }
+
+    function rowAncestorOf(el) {
         while (el && el !== document.body) {
             const tag = el.tagName;
             if (tag === 'TR' || tag === 'LI') return el;
             if (el.getAttribute && el.getAttribute('role') === 'row') return el;
-            // Heuristic: a div that has 3+ children laid out as a row is probably one.
             if (tag === 'DIV' && el.children.length >= 3) {
                 const style = window.getComputedStyle(el);
                 if (style.display.startsWith('flex') || style.display.startsWith('grid')) return el;
             }
             el = el.parentElement;
         }
-        return node.parentElement;
+        return null;
+    }
+
+    // Check whether a row element contains the given language code as an
+    // identifiable token (e.g. cell text exactly "en-GB" or text bordered by
+    // non-identifier chars). Avoids false-positives where the language code
+    // appears inside another identifier.
+    function rowContainsLanguageToken(row, lang) {
+        if (!lang) return true;
+        // Quick check on row's full textContent — bounded by word edges.
+        const txt = row.textContent || '';
+        // Build a regex like /(^|[^A-Za-z0-9_])en-GB($|[^A-Za-z0-9_])/
+        const escaped = lang.replace(/-/g, '\\-');
+        const re = new RegExp('(^|[^A-Za-z0-9_])' + escaped + '($|[^A-Za-z0-9_])');
+        return re.test(txt);
+    }
+
+    // Find a row that contains BOTH the envelope item's string_key AND its
+    // language code. This is the correctness-critical primitive: without the
+    // language check, multi-language selections all collapse onto the first
+    // language row Tranzor happens to render (e.g. en-GB), wrongly matching
+    // 22 items to the same row.
+    function findRowForItem(item) {
+        if (!item || !item.string_key) return null;
+        const key = item.string_key;
+        const root = document.body;
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+            acceptNode: (node) => {
+                if (!node.nodeValue || node.nodeValue.indexOf(key) === -1) return NodeFilter.FILTER_SKIP;
+                let p = node.parentElement;
+                while (p) {
+                    if (p.id === 'tz-bridge-panel') return NodeFilter.FILTER_REJECT;
+                    p = p.parentElement;
+                }
+                return NodeFilter.FILTER_ACCEPT;
+            },
+        });
+        let textNode;
+        const seenRows = new Set();
+        while ((textNode = walker.nextNode())) {
+            const row = rowAncestorOf(textNode.parentElement);
+            if (!row || seenRows.has(row)) continue;
+            seenRows.add(row);
+            if (rowContainsLanguageToken(row, item.language)) {
+                return row;
+            }
+        }
+        return null;
+    }
+
+    // Tranzor's task page exposes a "By Language" / "All Languages" toggle.
+    // The default "By Language" view shows only one language at a time, so a
+    // filtered search may hide rows we want to tick. Click "All Languages"
+    // once after each filter unless it's already active.
+    function ensureAllLanguagesView() {
+        const candidates = Array.from(document.querySelectorAll(
+            'button, [role="button"], [role="tab"], a.btn, [aria-pressed]'
+        )).filter(el => !isInOurPanel(el));
+        const target = candidates.find(b => {
+            const text = (b.textContent || '').trim();
+            return /^all\s+languages$/i.test(text);
+        });
+        if (!target) return false;
+        const isActive =
+            target.getAttribute('aria-pressed') === 'true' ||
+            target.getAttribute('aria-selected') === 'true' ||
+            target.classList.contains('selected') ||
+            target.classList.contains('active') ||
+            target.classList.contains('is-active') ||
+            target.classList.contains('is-selected');
+        if (isActive) return false;
+        try { target.click(); return true; } catch (e) { return false; }
+    }
+
+    // Per-(key, language) identifier so per-item progress tracks both axes.
+    // Otherwise marking the ja-JP version of a key as Fixed would also dim
+    // the es-419 / zh-TW versions, which is wrong for multi-language batches.
+    function progressKeyOf(item) {
+        return (item.string_key || '') + '|' + (item.language || '');
     }
 
     function scrollAndFlash(el) {
@@ -752,16 +835,24 @@
         // Don't auto-untick here — we're about to re-apply, and the inner
         // tickPlatformCheckbox is idempotent on already-correct state.
         clearAllMarks({ untick: false });
+        // Drop tickedNodes entries whose rows are no longer in the DOM (e.g.
+        // Tranzor swapped them out when the search filter changed). Otherwise
+        // the "N ticked" counter inflates and untickOurCheckboxes does
+        // pointless work on detached nodes.
+        Array.from(tickedNodes).forEach(n => {
+            if (!document.contains(n)) tickedNodes.delete(n);
+        });
         if (!currentEnvelope || !currentEnvelope.items) {
             lastHighlightStats = { found: 0, ticked: 0 };
             return lastHighlightStats;
         }
         let found = 0, ticked = 0;
         currentEnvelope.items.forEach(it => {
-            const row = findRowContainingText(it.string_key);
+            const row = findRowForItem(it);
             if (!row) return;
             row.classList.add('tz-bridge-mark');
-            const isFixed = progress[it.string_key] === 'fixed';
+            const pKey = progressKeyOf(it);
+            const isFixed = progress[pKey] === 'fixed';
             if (isFixed) row.classList.add('fixed-mark');
             highlightedNodes.add(row);
             found++;
@@ -877,10 +968,13 @@
         input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
         input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true }));
         currentFilterKey = key;
-        // Give Tranzor a moment to re-render the filtered list, then re-scan.
-        // MutationObserver will also fire as rows appear; this just speeds up
-        // the visible "ticked" count update.
-        setTimeout(() => { refreshHighlights(); render(); }, 600);
+        // After the search updates, Tranzor often still shows only one
+        // language at a time. Click "All Languages" to ensure every language
+        // row of this key renders so we can highlight + tick them all.
+        setTimeout(() => { ensureAllLanguagesView(); }, 250);
+        // Then re-scan after the view re-renders. MutationObserver also fires
+        // as rows appear; this just speeds up the visible "ticked" counter.
+        setTimeout(() => { refreshHighlights(); render(); }, 750);
         return true;
     }
 
@@ -901,30 +995,41 @@
         else { refreshHighlights(); render(); }
     }
 
-    function findKeyOnPage(key) {
-        // Tier A: scroll to the matching row directly in Tranzor's DOM and
-        // flash it. Works without knowing any platform-specific selector.
-        const row = findRowContainingText(key);
+    function findItemOnPage(item) {
+        const key = item && item.string_key;
+        if (!key) return;
+        // Tier A: scroll to the row matching BOTH the key and the language.
+        const row = findRowForItem(item);
         if (row) {
             scrollAndFlash(row);
             return;
         }
-        // Tier B: fill Tranzor's search input as a soft fallback.
+        // Tier B: re-filter Tranzor's search to this key. Once the matching
+        // rows render, MutationObserver picks them up and the user can click
+        // Find again to scroll to this specific language row.
         const input = document.querySelector(CONFIG.SELECTORS.searchInput);
         if (input) {
             input.focus();
             const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-            setter && setter.call(input, key);
+            try { setter && setter.call(input, key); } catch (e) { input.value = key; }
             input.dispatchEvent(new Event('input', { bubbles: true }));
             input.dispatchEvent(new Event('change', { bubbles: true }));
             input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
             input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true }));
+            currentFilterKey = key;
+            setTimeout(() => { ensureAllLanguagesView(); }, 200);
+            setTimeout(() => { refreshHighlights(); render(); }, 700);
             return;
         }
         // Tier C: clipboard + native page-find as a last resort.
         navigator.clipboard.writeText(key).catch(() => {});
         window.find && window.find(key, /*caseSensitive*/false, /*backwards*/false, /*wrapAround*/true);
         flashHeader('Row not on this page — key copied to clipboard');
+    }
+
+    // Back-compat shim — some old call sites used findKeyOnPage(key).
+    function findKeyOnPage(key) {
+        return findItemOnPage({ string_key: key });
     }
 
     function flashHeader(msg) {
