@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tranzor Bridge
 // @namespace    tranzor-my-tools
-// @version      0.4.0
+// @version      0.5.0
 // @description  Receive Exporter selections and walk through them on the Tranzor Platform.
 // @match        http://tranzor-platform.int.rclabenv.com/*
 // @match        https://tranzor-platform.int.rclabenv.com/*
@@ -39,16 +39,21 @@
         },
     };
 
-    // URL patterns for Tranzor's two translation surfaces. The Send-to-Tranzor
-    // button navigates to whichever one matches the envelope; these regexes
-    // let the userscript recognise the current page so highlighting + ticking
-    // only fire when the user is on the right task.
+    // URL patterns for Tranzor's three translation surfaces. The
+    // Send-to-Tranzor button navigates to whichever one matches the
+    // envelope; these regexes let the userscript recognise the current
+    // page so highlighting + ticking only fire when the user is on the
+    // right task.
     //
     //   File Translation: /static/legacy/tasks/<task_id>
     //   MR Pipeline:      /static/?project_id=<urlencoded>&mr_id=<mr_iid>
     //                     (the bare /static/ path; query params carry identity)
+    //   Scan Tasks:       /static/scans/<scan_task_uuid>
+    //                     (the page has Overview + Strings sub-tabs;
+    //                     translation rows live on Strings)
     const TASK_PATH_RE = /\/static\/legacy\/tasks\/([^/?#]+)/;
     const MR_PATH_RE = /^\/static\/?$/;
+    const SCAN_PATH_RE = /^\/static\/scans\/([^/?#]+)/;
 
     // ---- State ----
     let endpoint = null; // { port, token, instance_id, discoveredAt }
@@ -410,8 +415,11 @@
         const ctx = currentEnvelope.context || {};
         const ctxBits = [];
         const envMr = envelopeMrCoords();
+        const envScan = envelopeScanTaskId();
         if (envMr) {
             ctxBits.push('MR ' + escapeHtml(envMr.project_id) + ' #' + escapeHtml(envMr.mr_id));
+        } else if (envScan) {
+            ctxBits.push('Scan ' + escapeHtml(envScan.slice(0, 8)));
         } else if (ctx.task_id) {
             ctxBits.push('Task ' + escapeHtml(ctx.task_id));
         }
@@ -419,8 +427,9 @@
         const ctxLabel = ctxBits.length ? ctxBits.join(' · ') : 'mixed';
 
         // Task-page match indicator + jump link when on the wrong page. The
-        // identity differs between MR Pipeline (project_id + mr_id) and File
-        // Translation (task_id), but the badge UX is the same.
+        // identity differs across the three surfaces (MR Pipeline =
+        // project_id + mr_id; Scan Tasks = scan_task_id; File Translation =
+        // task_id) but the badge UX is the same.
         const targetPath = envelopeTargetPath();
         const onMatchingPage = isOnEnvelopeTaskPage();
         let taskBadge = '';
@@ -429,6 +438,11 @@
             taskBadge = onMatchingPage
                 ? `<span class="tz-bridge-task-badge match" title="You're on the right MR page">on ${label}</span>`
                 : `<a class="tz-bridge-task-badge mismatch" href="${targetPath}" title="Open the MR page these items belong to">go to ${label} →</a>`;
+        } else if (envScan) {
+            const label = 'scan ' + escapeHtml(envScan.slice(0, 8));
+            taskBadge = onMatchingPage
+                ? `<span class="tz-bridge-task-badge match" title="You're on the right scan task page">on ${label}</span>`
+                : `<a class="tz-bridge-task-badge mismatch" href="${targetPath}" title="Open the scan task page these items belong to">go to ${label} →</a>`;
         } else {
             const envTask = envelopeTaskId();
             if (envTask) {
@@ -673,6 +687,11 @@
         return { project_id, mr_id };
     }
 
+    function getCurrentScanTaskId() {
+        const m = SCAN_PATH_RE.exec(location.pathname);
+        return m ? decodeURIComponent(m[1]) : null;
+    }
+
     function envelopeTaskId() {
         if (!currentEnvelope) return null;
         const ctx = currentEnvelope.context || {};
@@ -691,15 +710,28 @@
         return { project_id: String(project_id), mr_id: String(mr_id) };
     }
 
-    // Where the envelope wants the user to be. MR Pipeline path wins over the
-    // legacy task path when both are available — MR Pipeline tasks don't exist
-    // in the legacy namespace, so /static/legacy/tasks/<id> would 404 for them.
+    function envelopeScanTaskId() {
+        if (!currentEnvelope) return null;
+        const ctx = currentEnvelope.context || {};
+        if (ctx.scan_task_id) return String(ctx.scan_task_id);
+        const first = currentEnvelope.items && currentEnvelope.items[0];
+        return first && first.scan_task_id ? String(first.scan_task_id) : null;
+    }
+
+    // Where the envelope wants the user to be. Priority order matches the
+    // exporter's sendToTranzor: MR Pipeline > Scan Tasks > File Translation.
+    // Scan task UUIDs and File Translation task IDs overlap shape-wise, so
+    // routing must come from the explicit scan_task_id field — falling back
+    // to the legacy task path for a scan envelope would 404 with "Failed
+    // to load task detail".
     function envelopeTargetPath() {
         const mr = envelopeMrCoords();
         if (mr) {
             return '/static/?project_id=' + encodeURIComponent(mr.project_id)
                  + '&mr_id=' + encodeURIComponent(mr.mr_id);
         }
+        const scan = envelopeScanTaskId();
+        if (scan) return '/static/scans/' + encodeURIComponent(scan);
         const t = envelopeTaskId();
         if (t) return '/static/legacy/tasks/' + encodeURIComponent(t);
         return null;
@@ -710,6 +742,11 @@
         if (envMr) {
             const onMr = getCurrentMrCoords();
             return Boolean(onMr && onMr.project_id === envMr.project_id && onMr.mr_id === envMr.mr_id);
+        }
+        const envScan = envelopeScanTaskId();
+        if (envScan) {
+            const onScan = getCurrentScanTaskId();
+            return Boolean(onScan && String(onScan) === String(envScan));
         }
         const onTask = getCurrentTaskId();
         const envTask = envelopeTaskId();
@@ -942,6 +979,37 @@
         try { target.click(); return true; } catch (e) { return false; }
     }
 
+    // Scan Task pages (/static/scans/<uuid>) open on the Overview sub-tab
+    // by default. Translation rows live on the Strings sub-tab, so the
+    // bridge has to click "Strings" before searching/ticking can do
+    // anything useful. No-op when already on Strings or when the sub-tab
+    // strip doesn't exist (i.e. on MR / File Translation surfaces).
+    function ensureScanStringsTab() {
+        if (!SCAN_PATH_RE.test(location.pathname)) return false;
+        const candidates = Array.from(document.querySelectorAll(
+            'a, button, [role="tab"], .nav-link, li'
+        )).filter(el => !isInOurPanel(el));
+        const target = candidates.find(el => {
+            const text = (el.textContent || '').trim();
+            return /^strings$/i.test(text);
+        });
+        if (!target) return false;
+        const isActive =
+            target.getAttribute('aria-selected') === 'true' ||
+            target.classList.contains('active') ||
+            target.classList.contains('selected') ||
+            target.classList.contains('is-active') ||
+            target.classList.contains('is-selected') ||
+            (target.parentElement && (
+                target.parentElement.classList.contains('active') ||
+                target.parentElement.classList.contains('selected') ||
+                target.parentElement.classList.contains('is-active') ||
+                target.parentElement.classList.contains('is-selected')
+            ));
+        if (isActive) return false;
+        try { target.click(); return true; } catch (e) { return false; }
+    }
+
     // Per-(key, language) identifier so per-item progress tracks both axes.
     // Otherwise marking the ja-JP version of a key as Fixed would also dim
     // the es-419 / zh-TW versions, which is wrong for multi-language batches.
@@ -1143,6 +1211,13 @@
         // Cap the click-then-recurse loop at 2 attempts in case Tranzor's
         // active-state class lags behind the click event.
         const attempts = _tabAttempts || 0;
+        // Scan Task pages: translation rows + search box only exist on the
+        // Strings sub-tab. If the user is on Overview (or we just landed),
+        // flip to Strings before driving anything else.
+        if (attempts < 2 && ensureScanStringsTab()) {
+            setTimeout(() => filterTranzorByKey(key, attempts + 1), 300);
+            return true;
+        }
         if (currentEnvelope && currentEnvelope.items && attempts < 2) {
             const groupLangs = Array.from(new Set(
                 currentEnvelope.items
@@ -1199,12 +1274,18 @@
     function findItemOnPage(item, _tabAttempts) {
         const key = item && item.string_key;
         if (!key) return;
+        const attempts = _tabAttempts || 0;
+        // Scan Task pages: rows live under the Strings sub-tab. Flip to
+        // Strings first if we're still on Overview (the default).
+        if (attempts < 2 && ensureScanStringsTab()) {
+            setTimeout(() => findItemOnPage(item, attempts + 1), 300);
+            return;
+        }
         // On MR Pipeline pages, the per-language tab strip hides rows from
         // every other language. If this item belongs to a different language
         // than the currently active tab, switch tabs first — then re-enter
         // findItemOnPage after the new tab's rows have rendered. Cap retries
         // so a tab whose active state never updates can't loop us forever.
-        const attempts = _tabAttempts || 0;
         if (item.language && attempts < 2 && ensureLanguageTab(item.language)) {
             setTimeout(() => findItemOnPage(item, attempts + 1), 300);
             return;
@@ -1289,8 +1370,18 @@
                 // (instead of filtering on the default de-DE tab where no
                 // selected row will ever appear).
                 const onMr = Boolean(envelopeMrCoords());
+                const onScan = Boolean(envelopeScanTaskId());
                 if (onMr) {
                     waitForLanguageTabs(2500, () => filterTranzorByKey(groups[0].key));
+                } else if (onScan) {
+                    // Scan Task pages open on Overview — flip to Strings
+                    // before searching, otherwise the translation table
+                    // isn't even in the DOM. Tab click triggers a re-render
+                    // so we wait briefly before driving the search box.
+                    setTimeout(() => {
+                        ensureScanStringsTab();
+                        setTimeout(() => filterTranzorByKey(groups[0].key), 400);
+                    }, 250);
                 } else {
                     setTimeout(() => filterTranzorByKey(groups[0].key), 250);
                 }

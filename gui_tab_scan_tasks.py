@@ -510,6 +510,14 @@ class ScanTasksTab:
             script_dir = os.path.dirname(os.path.abspath(__file__))
             filepath = os.path.join(script_dir, filename)
             label = f"Scan Task {id_tag} — {type_tag} (exported {today})"
+            # Stamp scan_task_id so write_mr_html → buildEnvelope →
+            # sendToTranzor can route to /static/scans/<id> instead of
+            # falling through to the File Translation legacy task URL.
+            mr_api.enrich_translations_with_scan_task(
+                results.get("translations") or [],
+                task_id,
+                task_name=label,
+            )
             mr_api.save_mr_file(results, filepath, label, fmt)
             self.parent.after(0, lambda: self.lbl_scan_status_bar.configure(
                 text=self._t("status_done")))
