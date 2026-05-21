@@ -367,7 +367,7 @@ def write_html(rows, filename, label):
             global_idx += 1
 
         sections_html += f"""
-        <div class="editor-section" style="background: {section_bg}; border-left: 4px solid {header_bg}; border-radius: 8px; padding: 16px; margin-bottom: 24px;">
+        <div class="editor-section" data-editor="{html.escape(editor_name)}" style="background: {section_bg}; border-left: 4px solid {header_bg}; border-radius: 8px; padding: 16px; margin-bottom: 24px;">
             <h2 style="color: {header_bg}; margin-bottom: 12px; font-size: 17px;">
                 👤 {html.escape(editor_name)}
                 <span class="count" style="background: {header_bg};">{len(editor_rows)} edits</span>
@@ -390,7 +390,7 @@ def write_html(rows, filename, label):
     toc_items = ""
     for editor_i, (editor_name, editor_rows) in enumerate(groups.items()):
         color_pair = editor_colors[editor_i % len(editor_colors)]
-        toc_items += f'<span style="display:inline-block; background:{color_pair[0]}; color:#fff; border-radius:16px; padding:4px 14px; margin:4px; font-size:13px;">{html.escape(editor_name)} ({len(editor_rows)})</span>'
+        toc_items += f'<span class="toc-item" data-editor="{html.escape(editor_name)}" style="display:inline-block; background:{color_pair[0]}; color:#fff; border-radius:16px; padding:4px 14px; margin:4px; font-size:13px;">{html.escape(editor_name)} ({len(editor_rows)})</span>'
 
     page = f"""<!DOCTYPE html>
 <html lang="en">
@@ -449,6 +449,7 @@ def write_html(rows, filename, label):
     .cb-cell input[type="checkbox"] {{ width: 15px; height: 15px; cursor: pointer; accent-color: #4472C4; }}
     tr.row-selected {{ background: #e8eef7 !important; }}
     tr.row-hidden {{ display: none !important; }}
+    .is-hidden {{ display: none !important; }}
 
     /* --- Filter Panel --- */
     .filter-panel {{
@@ -883,14 +884,23 @@ function applyFilters() {{
         info.textContent = '';
     }}
 
-    // Sync section header checkboxes for visible rows
-    document.querySelectorAll('.editor-section table').forEach(table => {{
+    // Sync section header checkboxes for visible rows + hide empty sections
+    const hiddenEditors = new Set();
+    document.querySelectorAll('.editor-section').forEach(section => {{
+        const table = section.querySelector('table');
+        if (!table) return;
         const visibleCbs = table.querySelectorAll('tbody tr:not(.row-hidden) input.row-cb');
         const checkedCbs = table.querySelectorAll('tbody tr:not(.row-hidden) input.row-cb:checked');
         const sectionCb = table.querySelector('input.section-cb');
         if (sectionCb) {{
             sectionCb.checked = visibleCbs.length > 0 && visibleCbs.length === checkedCbs.length;
         }}
+        const empty = visibleCbs.length === 0;
+        section.classList.toggle('is-hidden', empty);
+        if (empty && section.dataset.editor) hiddenEditors.add(section.dataset.editor);
+    }});
+    document.querySelectorAll('.toc-item').forEach(t => {{
+        t.classList.toggle('is-hidden', hiddenEditors.has(t.dataset.editor));
     }});
     updateBadge();
 }}
@@ -910,8 +920,9 @@ function clearFilters() {{
         btns[0].classList.add('active'); // reset to AND
     }});
 
-    // Show all rows
+    // Show all rows + sections + TOC items
     document.querySelectorAll('tr.row-hidden').forEach(tr => tr.classList.remove('row-hidden'));
+    document.querySelectorAll('.editor-section.is-hidden, .toc-item.is-hidden').forEach(el => el.classList.remove('is-hidden'));
     document.getElementById('filterInfo').textContent = '';
     updateBadge();
 }}
