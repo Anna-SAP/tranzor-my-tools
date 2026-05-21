@@ -1110,7 +1110,7 @@ def write_mr_html(results_data, filename, label, bridge_info=None):
         lang_count = lang_info.get("count", len(lang_rows))
 
         sections.append(
-            f'<div class="lang-section" style="background:{section_bg};border-left:4px solid {header_bg};border-radius:8px;padding:16px;margin-bottom:24px;">'
+            f'<div class="lang-section" data-lang="{html_mod.escape(lang_name)}" style="background:{section_bg};border-left:4px solid {header_bg};border-radius:8px;padding:16px;margin-bottom:24px;">'
             f'<h2 style="color:{header_bg};margin-bottom:12px;font-size:17px;">'
             f'🌐 {html_mod.escape(lang_name)}'
             f'<span class="count" style="background:{header_bg};">{lang_count} entries</span>'
@@ -1134,7 +1134,8 @@ def write_mr_html(results_data, filename, label, bridge_info=None):
     for lang_i, (lang_name, lang_rows) in enumerate(groups.items()):
         color = lang_colors[lang_i % len(lang_colors)]
         toc_items += (
-            f'<span style="display:inline-block;background:{color[0]};'
+            f'<span class="toc-item" data-lang="{html_mod.escape(lang_name)}" '
+            f'style="display:inline-block;background:{color[0]};'
             f'color:#fff;border-radius:16px;padding:4px 14px;margin:4px;'
             f'font-size:13px;">{html_mod.escape(lang_name)} ({len(lang_rows)})</span>'
         )
@@ -1199,6 +1200,7 @@ def write_mr_html(results_data, filename, label, bridge_info=None):
     .cb-cell input[type="checkbox"] {{ width:15px; height:15px; cursor:pointer; accent-color:#4472C4; }}
     tr.row-selected {{ background:#e8eef7 !important; }}
     tr.row-hidden {{ display:none !important; }}
+    .is-hidden {{ display:none !important; }}
 
     /* Send to Tranzor button (kept in sync with export_translations.py) */
     .btn-send {{ background: #27AE60; color: #fff; }}
@@ -1600,13 +1602,22 @@ function applyFilters() {{
         info.textContent = '';
     }}
 
-    document.querySelectorAll('.lang-section table').forEach(table => {{
+    const hiddenLangs = new Set();
+    document.querySelectorAll('.lang-section').forEach(section => {{
+        const table = section.querySelector('table');
+        if (!table) return;
         const visibleCbs = table.querySelectorAll('tbody tr:not(.row-hidden) input.row-cb');
         const checkedCbs = table.querySelectorAll('tbody tr:not(.row-hidden) input.row-cb:checked');
         const sectionCb = table.querySelector('input.section-cb');
         if (sectionCb) {{
             sectionCb.checked = visibleCbs.length > 0 && visibleCbs.length === checkedCbs.length;
         }}
+        const empty = visibleCbs.length === 0;
+        section.classList.toggle('is-hidden', empty);
+        if (empty && section.dataset.lang) hiddenLangs.add(section.dataset.lang);
+    }});
+    document.querySelectorAll('.toc-item').forEach(t => {{
+        t.classList.toggle('is-hidden', hiddenLangs.has(t.dataset.lang));
     }});
     updateBadge();
 }}
@@ -1625,6 +1636,7 @@ function clearFilters() {{
     }});
 
     document.querySelectorAll('tr.row-hidden').forEach(tr => tr.classList.remove('row-hidden'));
+    document.querySelectorAll('.lang-section.is-hidden, .toc-item.is-hidden').forEach(el => el.classList.remove('is-hidden'));
     document.getElementById('filterInfo').textContent = '';
     updateBadge();
 }}
