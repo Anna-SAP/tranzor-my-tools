@@ -171,7 +171,7 @@ class ScanTasksTab:
         # Export Type selector — mirrors File Translation / MR Pipeline
         self.lbl_scan_export_type = ttk.Label(action, text="", style="Card.TLabel")
         self.lbl_scan_export_type.pack(side="left", padx=(16, 4))
-        self.scan_export_type_var = tk.StringVar(value="changes")
+        self.scan_export_type_var = tk.StringVar(value="translations")
         self.rb_scan_changes = ttk.Radiobutton(
             action, text="", variable=self.scan_export_type_var,
             value="changes", style="Card.TRadiobutton")

@@ -929,7 +929,7 @@ class ExportApp:
         row_type.pack(fill="x", pady=(0, 12))
         self.lbl_export_type = ttk.Label(row_type, text="", style="CardBold.TLabel", width=12)
         self.lbl_export_type.pack(side="left")
-        self.export_type_var = tk.StringVar(value="changes")
+        self.export_type_var = tk.StringVar(value="translations")
         self.rb_changes = ttk.Radiobutton(row_type, text="",
                          variable=self.export_type_var, value="changes",
                          style="Card.TRadiobutton")
