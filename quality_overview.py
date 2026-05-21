@@ -349,8 +349,10 @@ def aggregate_mr_quality(overview_data, cases_data, threshold=DEFAULT_THRESHOLD)
 
     metrics = _compute_metrics(all_items, threshold)
     metrics["total_tasks"] = overview_data.get("total_tasks", 0)
-    metrics["completed"] = overview_data.get("completed", 0)
-    metrics["failed"] = overview_data.get("failed", 0)
+    # /dashboard/overview now returns `completed_tasks` / `failed_tasks`; old
+    # `completed` / `failed` keys kept as fallback for older deployments.
+    metrics["completed"] = overview_data.get("completed_tasks", overview_data.get("completed", 0))
+    metrics["failed"] = overview_data.get("failed_tasks", overview_data.get("failed", 0))
     return metrics
 
 
@@ -821,6 +823,14 @@ def write_quality_html(aggregated, filename, label):
     <h1>Quality Overview</h1>
     <p class="meta">{html_mod.escape(label)}</p>
 
+    <div style="background:#fff8e1; border-left:4px solid #f4b400; border-radius:6px; padding:12px 16px; margin-bottom:20px; font-size:13px; line-height:1.5; color:#5f4b00;">
+        💡 <strong>Methodology note.</strong>
+        The upstream Tranzor scoring pipeline received quality-fix updates in late May 2026
+        (latest-iteration aggregation, terminology fallback, duplicate-evaluation dedup, pre-match score handling).
+        Trend comparisons across that window may show step changes — these reflect the upstream data-quality
+        alignment, not aggregation errors in this tool.
+    </div>
+
     <div class="cards">
         <div class="card">
             <div class="card-value card-accent">{a['total_tasks']}</div>
@@ -905,6 +915,27 @@ def write_quality_excel(aggregated, filename):
     # --- Sheet 1: Summary ---
     ws = wb.active
     ws.title = "Summary"
+
+    # Methodology disclaimer banner (rows 1-2): late-May 2026 upstream
+    # scoring fixes can produce visible step changes when comparing reports
+    # across that window. Keep it prominent so report consumers don't misread
+    # the trend as a tool regression.
+    note_font = Font(italic=True, color="5F4B00", size=11)
+    note_fill = PatternFill(start_color="FFF8E1", end_color="FFF8E1", fill_type="solid")
+    note_cell = ws.cell(
+        row=1, column=1,
+        value=("💡 Methodology note — The upstream Tranzor scoring pipeline received quality-fix "
+               "updates in late May 2026 (latest-iteration aggregation, terminology fallback, "
+               "duplicate-evaluation dedup, pre-match score handling). Trend comparisons across "
+               "that window may show step changes — these reflect upstream data-quality alignment, "
+               "not aggregation errors in this tool."),
+    )
+    note_cell.font = note_font
+    note_cell.fill = note_fill
+    note_cell.alignment = Alignment(wrap_text=True, vertical="center")
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=2)
+    ws.row_dimensions[1].height = 80
+
     summary_data = [
         ("Metric", "Value"),
         ("Total Work Items", a.get("total_tasks", 0)),
@@ -915,10 +946,12 @@ def write_quality_excel(aggregated, filename):
         ("Refined Rate", f'{a.get("refined_rate", 0)}%'),
         ("Human Touch Rate", f'{a.get("human_touch_rate", 0)}%'),
     ]
-    for row_i, (metric, val) in enumerate(summary_data, 1):
+    # Summary table starts on row 3 to leave space for the disclaimer above.
+    for offset, (metric, val) in enumerate(summary_data):
+        row_i = offset + 3
         c1 = ws.cell(row=row_i, column=1, value=metric)
         c2 = ws.cell(row=row_i, column=2, value=val)
-        if row_i == 1:
+        if offset == 0:  # header row of the table
             c1.fill = header_fill
             c1.font = header_font
             c2.fill = header_fill

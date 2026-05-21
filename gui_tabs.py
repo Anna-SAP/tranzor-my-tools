@@ -699,8 +699,10 @@ class MRPipelineTab:
         self.mr_overview_loading = False
         self.lbl_mr_sidebar_status.configure(text="")
         self.mr_stat_labels["total"][1].configure(text=str(data.get("total_tasks", 0)))
-        self.mr_stat_labels["completed"][1].configure(text=str(data.get("completed", 0)))
-        self.mr_stat_labels["failed"][1].configure(text=str(data.get("failed", 0)))
+        # Tranzor renamed `completed` → `completed_tasks` etc. on /dashboard/overview;
+        # keep the old keys as fallback in case an older deployment is reached.
+        self.mr_stat_labels["completed"][1].configure(text=str(data.get("completed_tasks", data.get("completed", 0))))
+        self.mr_stat_labels["failed"][1].configure(text=str(data.get("failed_tasks", data.get("failed", 0))))
         avg = data.get("average_score")
         self.mr_stat_labels["avg_score"][1].configure(text=f"{avg}" if avg else "—")
 

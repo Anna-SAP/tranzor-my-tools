@@ -21,6 +21,7 @@ TM & Context Insight — GUI Tab
 from __future__ import annotations
 
 import os
+import re
 import sys
 import json
 import threading
@@ -96,6 +97,7 @@ STRINGS = {
         "tci_drawer_no_id":         "This translation has no context_id — Context Service was not consulted.",
         "tci_drawer_loading":       "Loading context from Tranzor…",
         "tci_drawer_error":         "Failed to load context: {err}",
+        "tci_drawer_unsupported_id": "This context ID ({cid}) is a UUID / hash, not an integer. The Tranzor proxy route only accepts numeric IDs, so this record can't be fetched directly. (This doesn't affect the rest of the analysis.)",
         "tci_drawer_close":         "Close",
         # status
         "tci_status_ready":         "Ready",
@@ -218,6 +220,7 @@ STRINGS = {
         "tci_drawer_no_id":         "该翻译没有 context_id —— Context Service 未被调用。",
         "tci_drawer_loading":       "正在从 Tranzor 拉取上下文…",
         "tci_drawer_error":         "上下文加载失败：{err}",
+        "tci_drawer_unsupported_id": "该上下文 ID（{cid}）是 UUID 或哈希格式，不是整数。主站代理路由仅支持数字 ID，无法直接拉取该记录。（不影响分析的其余部分。）",
         "tci_drawer_close":         "关闭",
         # status
         "tci_status_ready":         "就绪",
@@ -293,14 +296,30 @@ STRINGS = {
 # Context Service proxy endpoint
 CONTEXT_RECORD_URL = f"{mr_api.TRANZOR_URL}/api/v1/context/record"
 
+# Tranzor's proxy route declares ``record_id: int``; UUIDs / md5 hashes / any
+# non-numeric id will be rejected with HTTP 422 before reaching the service.
+# Short-circuit those locally so the UI can show a friendly explanation and
+# we don't generate noise on Tranzor's side.
+_INT_CTX_ID_RE = re.compile(r"^\d+$")
+
+
+class _UnsupportedContextIdError(ValueError):
+    """Raised when ``context_id`` isn't a pure-integer string and therefore
+    cannot be queried via the int-typed Tranzor proxy route."""
+
 
 def _fetch_context_record(context_id: str, timeout: int = 15) -> dict:
     """Fetch a single context record via Tranzor's existing proxy endpoint.
 
-    Returns the raw JSON dict, or raises on HTTP / network error.
+    Returns the raw JSON dict, or raises on HTTP / network error. Raises
+    :class:`_UnsupportedContextIdError` when ``context_id`` isn't a pure
+    integer (UUID / hash / etc.) — Tranzor's route would 422 anyway, so we
+    bail out before making a useless network call.
     """
     if requests is None:
         raise RuntimeError("requests package not available")
+    if not _INT_CTX_ID_RE.fullmatch(str(context_id)):
+        raise _UnsupportedContextIdError(str(context_id))
     resp = requests.get(f"{CONTEXT_RECORD_URL}/{context_id}", timeout=timeout)
     resp.raise_for_status()
     return resp.json()
@@ -1091,6 +1110,9 @@ class TmContextInsightTab:
                 payload = _fetch_context_record(context_id)
                 pretty = json.dumps(payload, indent=2, ensure_ascii=False)
                 win.after(0, lambda: self._fill_drawer(body, pretty))
+            except _UnsupportedContextIdError:
+                win.after(0, lambda: self._fill_drawer(
+                    body, self._t("tci_drawer_unsupported_id").format(cid=context_id)))
             except Exception as e:
                 err = str(e)[:160]
                 win.after(0, lambda: self._fill_drawer(
