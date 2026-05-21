@@ -518,7 +518,12 @@ class ScanTasksTab:
                 task_id,
                 task_name=label,
             )
-            mr_api.save_mr_file(results, filepath, label, fmt)
+            # Route the local bridge port + token into the report so its
+            # Send-to-Tranzor button reaches the desktop GUI's HTTP bridge
+            # instead of falling back to clipboard (which makes the
+            # userscript sidebar sit on "Waiting for selections…").
+            bridge_info = self.app._bridge_info_for_export() if hasattr(self.app, "_bridge_info_for_export") else None
+            mr_api.save_mr_file(results, filepath, label, fmt, bridge_info=bridge_info)
             self.parent.after(0, lambda: self.lbl_scan_status_bar.configure(
                 text=self._t("status_done")))
         except Exception as e:
