@@ -271,6 +271,29 @@ def enrich_translations_with_task(translations, task):
             tr["task_name"] = tname
 
 
+def enrich_translations_with_scan_task(translations, scan_task_id,
+                                       task_name=""):
+    """Stamp scan_task_id onto each translation dict so downstream HTML
+    reports route Send-to-Tranzor to /static/scans/<id> (the Scan Task
+    surface) instead of /static/legacy/tasks/<id> (File Translation only).
+
+    Also defaults translation_type to "Scan Task" for rows the upstream
+    API didn't label — without this, write_mr_html's "MR Pipeline" fallback
+    would mislabel them in the bridge sidebar.
+
+    Existing per-row fields are not overwritten so per-row overrides win.
+    """
+    if not scan_task_id or not translations:
+        return
+    for tr in translations:
+        if not tr.get("scan_task_id"):
+            tr["scan_task_id"] = scan_task_id
+        if task_name and not tr.get("task_name"):
+            tr["task_name"] = task_name
+        if not tr.get("translation_type"):
+            tr["translation_type"] = "Scan Task"
+
+
 # ---------------------------------------------------------------------------
 # 4b) 聚合所有 completed 任务的翻译结果
 # ---------------------------------------------------------------------------
@@ -987,12 +1010,16 @@ def write_mr_html(results_data, filename, label, bridge_info=None):
                 "score": r.get("final_score"),
                 "error_category": r.get("error_category") or "",
                 "reason": r.get("reason") or "",
-                # Send-to-Tranzor URL routing: MR Pipeline pages live at
-                # /static/?project_id=…&mr_id=…, not /static/legacy/tasks/<id>.
+                # Send-to-Tranzor URL routing keys: presence of project_id +
+                # mr_id picks /static/?project_id=…&mr_id=… (MR Pipeline);
+                # presence of scan_task_id picks /static/scans/<id> (Scan
+                # Tasks); plain task_id falls through to the File Translation
+                # /static/legacy/tasks/<id> route.
                 "task_id": r.get("task_id") or task_id,
                 "task_name": r.get("task_name", ""),
                 "project_id": r.get("project_id", ""),
                 "mr_id": r.get("mr_id", ""),
+                "scan_task_id": r.get("scan_task_id", ""),
                 "translation_type": r.get("translation_type", "MR Pipeline"),
             }
             if is_changes:
@@ -1669,6 +1696,7 @@ function buildEnvelope(checkedRows) {{
         task_name: row.task_name,
         project_id: row.project_id,
         mr_id: row.mr_id,
+        scan_task_id: row.scan_task_id,
         language: row.language,
         source_text: row.source_text,
         translated_text: row.translated_text,
@@ -1677,17 +1705,25 @@ function buildEnvelope(checkedRows) {{
     const taskIds = Array.from(new Set(items.map(i => i.task_id).filter(Boolean)));
     const projIds = Array.from(new Set(items.map(i => i.project_id).filter(Boolean)));
     const mrIds = Array.from(new Set(items.map(i => String(i.mr_id || '')).filter(Boolean)));
+    const scanIds = Array.from(new Set(items.map(i => i.scan_task_id).filter(Boolean)));
     const langs = Array.from(new Set(items.map(i => i.language).filter(Boolean)));
+    // Pick the surface this envelope targets. Used both for routing and for
+    // diagnostic logging — keeps the bridge from guessing.
+    let kind = 'mr_pipeline';
+    if (projIds.length === 1 && mrIds.length === 1) kind = 'mr_pipeline';
+    else if (scanIds.length === 1) kind = 'scan_task';
+    else if (taskIds.length === 1) kind = 'file_translation';
     return {{
         '$schema': 'tranzor-bridge/handoff/v1',
         envelope_id: uuidv4(),
         created_at: new Date().toISOString(),
-        source: {{ tool: 'TranzorExporter', kind: 'mr_pipeline', report_file: REPORT_NAME }},
+        source: {{ tool: 'TranzorExporter', kind: kind, report_file: REPORT_NAME }},
         context: {{
             task_id: taskIds.length === 1 ? taskIds[0] : null,
             task_name: items.length ? items[0].task_name : null,
             project_id: projIds.length === 1 ? projIds[0] : null,
             mr_id: mrIds.length === 1 ? mrIds[0] : null,
+            scan_task_id: scanIds.length === 1 ? scanIds[0] : null,
             language: langs.length === 1 ? langs[0] : null,
         }},
         items: items,
@@ -1752,18 +1788,24 @@ async function sendToTranzor() {{
     const envelope = buildEnvelope(rows);
     status.textContent = 'Sending ' + rows.length + ' item(s)…';
 
-    // MR Pipeline tasks live under /static/?project_id=…&mr_id=…, NOT under
-    // /static/legacy/tasks/<task_id> (that path is File Translation-only).
-    // Fall back to the legacy task page only if MR coords are unavailable.
+    // Tranzor has three translation surfaces, each at its own URL:
+    //   MR Pipeline:      /static/?project_id=…&mr_id=…
+    //   Scan Tasks:       /static/scans/<scan_task_id>
+    //   File Translation: /static/legacy/tasks/<task_id>
+    // Pick the most-specific route the envelope supports; fall through to
+    // the legacy task page only when nothing more specific is available.
     const ctx = envelope.context || {{}};
     const first = envelope.items[0] || {{}};
     const projectId = ctx.project_id || first.project_id;
     const mrId = ctx.mr_id || first.mr_id;
+    const scanTaskId = ctx.scan_task_id || first.scan_task_id;
     const taskId = ctx.task_id || first.task_id;
     let taskPath;
     if (projectId && mrId) {{
         taskPath = '/static/?project_id=' + encodeURIComponent(projectId)
                  + '&mr_id=' + encodeURIComponent(mrId);
+    }} else if (scanTaskId) {{
+        taskPath = '/static/scans/' + encodeURIComponent(scanTaskId);
     }} else if (taskId) {{
         taskPath = '/static/legacy/tasks/' + encodeURIComponent(taskId);
     }} else {{
