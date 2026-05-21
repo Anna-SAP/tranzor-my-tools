@@ -32,6 +32,8 @@
    - `@match http://tranzor-platform.int.rclabenv.com/*`
    - `@connect 127.0.0.1`
 
+> **Auto-updates** are configured via `@updateURL` / `@downloadURL` pointing at the `master` branch on GitHub. Tampermonkey checks once a day by default; future bug-fix releases land without any action from you. Force an immediate check from Tampermonkey Dashboard → Tranzor Bridge → **Check for updates**.
+
 ### 3. Verify the sidebar mounts
 
 1. Make sure you're on the corporate network / VPN (same as for using Tranzor Platform itself).

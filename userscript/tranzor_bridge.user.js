@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tranzor Bridge
 // @namespace    tranzor-my-tools
-// @version      0.1.0
+// @version      0.2.0
 // @description  Receive Exporter selections and walk through them on the Tranzor Platform.
 // @match        http://tranzor-platform.int.rclabenv.com/*
 // @match        https://tranzor-platform.int.rclabenv.com/*
@@ -13,7 +13,12 @@
 // @connect      127.0.0.1
 // @connect      localhost
 // @run-at       document-idle
+// @updateURL    https://raw.githubusercontent.com/Anna-SAP/tranzor-my-tools/master/userscript/tranzor_bridge.user.js
+// @downloadURL  https://raw.githubusercontent.com/Anna-SAP/tranzor-my-tools/master/userscript/tranzor_bridge.user.js
 // ==/UserScript==
+// Maintainer note: any change to this file MUST bump @version above
+// (semver). Tampermonkey/Violentmonkey only fetch an update when the
+// remote version is strictly higher than the installed one.
 
 (function () {
     'use strict';
