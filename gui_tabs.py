@@ -637,6 +637,20 @@ class MRPipelineTab:
             else:
                 if task_id:
                     results = mr_api.fetch_mr_results(task_id)
+                    # fetch_mr_results doesn't include MR coordinates
+                    # (project_id, mr_id) on the translations it returns,
+                    # so the HTML report can't build the right
+                    # /static/?project_id=…&mr_id=… URL on its own. Fetch
+                    # the task detail and stamp them in. Best-effort:
+                    # without this, the report falls back to the (wrong
+                    # for MR) /static/legacy/tasks/<id> route.
+                    try:
+                        detail = mr_api.fetch_mr_task_detail(task_id)
+                        if detail and results.get("translations"):
+                            mr_api.enrich_translations_with_task(
+                                results["translations"], detail)
+                    except Exception:
+                        pass
                     id_tag = task_id[:8]
                 else:
                     results = mr_api.collect_all_mr_results()

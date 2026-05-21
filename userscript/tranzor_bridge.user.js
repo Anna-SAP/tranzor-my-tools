@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tranzor Bridge
 // @namespace    tranzor-my-tools
-// @version      0.2.0
+// @version      0.3.0
 // @description  Receive Exporter selections and walk through them on the Tranzor Platform.
 // @match        http://tranzor-platform.int.rclabenv.com/*
 // @match        https://tranzor-platform.int.rclabenv.com/*
@@ -39,10 +39,16 @@
         },
     };
 
-    // URL pattern of Tranzor's per-task list view. The Send-to-Tranzor button
-    // already navigates here; this regex lets the userscript know whether the
-    // current page corresponds to the envelope's task (→ enable highlighting).
+    // URL patterns for Tranzor's two translation surfaces. The Send-to-Tranzor
+    // button navigates to whichever one matches the envelope; these regexes
+    // let the userscript recognise the current page so highlighting + ticking
+    // only fire when the user is on the right task.
+    //
+    //   File Translation: /static/legacy/tasks/<task_id>
+    //   MR Pipeline:      /static/?project_id=<urlencoded>&mr_id=<mr_iid>
+    //                     (the bare /static/ path; query params carry identity)
     const TASK_PATH_RE = /\/static\/legacy\/tasks\/([^/?#]+)/;
+    const MR_PATH_RE = /^\/static\/?$/;
 
     // ---- State ----
     let endpoint = null; // { port, token, instance_id, discoveredAt }
@@ -403,19 +409,32 @@
         const total = currentEnvelope.items.length;
         const ctx = currentEnvelope.context || {};
         const ctxBits = [];
-        if (ctx.task_id) ctxBits.push('Task ' + escapeHtml(ctx.task_id));
+        const envMr = envelopeMrCoords();
+        if (envMr) {
+            ctxBits.push('MR ' + escapeHtml(envMr.project_id) + ' #' + escapeHtml(envMr.mr_id));
+        } else if (ctx.task_id) {
+            ctxBits.push('Task ' + escapeHtml(ctx.task_id));
+        }
         if (ctx.language) ctxBits.push(escapeHtml(ctx.language));
         const ctxLabel = ctxBits.length ? ctxBits.join(' · ') : 'mixed';
 
-        // Task-page match indicator + jump link when on wrong page.
-        const onTask = getCurrentTaskId();
-        const envTask = envelopeTaskId();
+        // Task-page match indicator + jump link when on the wrong page. The
+        // identity differs between MR Pipeline (project_id + mr_id) and File
+        // Translation (task_id), but the badge UX is the same.
+        const targetPath = envelopeTargetPath();
+        const onMatchingPage = isOnEnvelopeTaskPage();
         let taskBadge = '';
-        if (envTask) {
-            if (onTask && String(onTask) === String(envTask)) {
-                taskBadge = `<span class="tz-bridge-task-badge match" title="You're on the right task page">on task ${escapeHtml(envTask)}</span>`;
-            } else {
-                taskBadge = `<a class="tz-bridge-task-badge mismatch" href="/static/legacy/tasks/${encodeURIComponent(envTask)}" title="Open the task page these items belong to">go to task ${escapeHtml(envTask)} →</a>`;
+        if (envMr) {
+            const label = 'MR ' + escapeHtml(envMr.project_id) + ' #' + escapeHtml(envMr.mr_id);
+            taskBadge = onMatchingPage
+                ? `<span class="tz-bridge-task-badge match" title="You're on the right MR page">on ${label}</span>`
+                : `<a class="tz-bridge-task-badge mismatch" href="${targetPath}" title="Open the MR page these items belong to">go to ${label} →</a>`;
+        } else {
+            const envTask = envelopeTaskId();
+            if (envTask) {
+                taskBadge = onMatchingPage
+                    ? `<span class="tz-bridge-task-badge match" title="You're on the right task page">on task ${escapeHtml(envTask)}</span>`
+                    : `<a class="tz-bridge-task-badge mismatch" href="${targetPath || ('/static/legacy/tasks/' + encodeURIComponent(envTask))}" title="Open the task page these items belong to">go to task ${escapeHtml(envTask)} →</a>`;
             }
         }
 
@@ -645,6 +664,15 @@
         return m ? decodeURIComponent(m[1]) : null;
     }
 
+    function getCurrentMrCoords() {
+        if (!MR_PATH_RE.test(location.pathname)) return null;
+        const params = new URLSearchParams(location.search);
+        const project_id = params.get('project_id');
+        const mr_id = params.get('mr_id');
+        if (!project_id || !mr_id) return null;
+        return { project_id, mr_id };
+    }
+
     function envelopeTaskId() {
         if (!currentEnvelope) return null;
         const ctx = currentEnvelope.context || {};
@@ -653,7 +681,36 @@
         return first && first.task_id ? String(first.task_id) : null;
     }
 
+    function envelopeMrCoords() {
+        if (!currentEnvelope) return null;
+        const ctx = currentEnvelope.context || {};
+        const first = (currentEnvelope.items && currentEnvelope.items[0]) || {};
+        const project_id = ctx.project_id || first.project_id;
+        const mr_id = ctx.mr_id || first.mr_id;
+        if (!project_id || !mr_id) return null;
+        return { project_id: String(project_id), mr_id: String(mr_id) };
+    }
+
+    // Where the envelope wants the user to be. MR Pipeline path wins over the
+    // legacy task path when both are available — MR Pipeline tasks don't exist
+    // in the legacy namespace, so /static/legacy/tasks/<id> would 404 for them.
+    function envelopeTargetPath() {
+        const mr = envelopeMrCoords();
+        if (mr) {
+            return '/static/?project_id=' + encodeURIComponent(mr.project_id)
+                 + '&mr_id=' + encodeURIComponent(mr.mr_id);
+        }
+        const t = envelopeTaskId();
+        if (t) return '/static/legacy/tasks/' + encodeURIComponent(t);
+        return null;
+    }
+
     function isOnEnvelopeTaskPage() {
+        const envMr = envelopeMrCoords();
+        if (envMr) {
+            const onMr = getCurrentMrCoords();
+            return Boolean(onMr && onMr.project_id === envMr.project_id && onMr.mr_id === envMr.mr_id);
+        }
         const onTask = getCurrentTaskId();
         const envTask = envelopeTaskId();
         return Boolean(onTask && envTask && String(onTask) === String(envTask));
