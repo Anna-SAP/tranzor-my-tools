@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tranzor Bridge
 // @namespace    tranzor-my-tools
-// @version      0.3.0
+// @version      0.4.0
 // @description  Receive Exporter selections and walk through them on the Tranzor Platform.
 // @match        http://tranzor-platform.int.rclabenv.com/*
 // @match        https://tranzor-platform.int.rclabenv.com/*
@@ -823,6 +823,101 @@
         return null;
     }
 
+    // MR Pipeline pages show one language at a time via a top tab strip
+    // (de-DE · en-AU · … · zh-TW). Tranzor lands on the first tab (de-DE) by
+    // default, so a multi-language envelope (e.g. zh-TW + zh-HK) sees zero
+    // matching rows until the user clicks a tab. This regex matches tab
+    // labels like "de-DE", "zh-TW (5)", "es-419 (12)" — a lowercase IETF
+    // language subtag, a required region/script subtag of 2–4 chars, and an
+    // optional row-count badge. Two-letter region "DE" / three-digit "419"
+    // / four-letter script "Hant" all fit; arbitrary long suffixes don't,
+    // which keeps "fr-CAFoo"-style false positives out.
+    const LANG_TAB_RE = /^([a-z]{2,3}-[A-Za-z0-9]{2,4})\s*(?:\(\s*\d+\s*\))?\s*$/;
+    // Defence in depth against bare words that survive the regex anyway.
+    const LANG_TAB_MIN_LEN = 5; // shortest real code is "fr-FR" (5 chars)
+
+    function isElementActiveTab(el) {
+        if (!el) return false;
+        if (
+            el.getAttribute('aria-selected') === 'true' ||
+            el.getAttribute('aria-pressed') === 'true' ||
+            el.classList.contains('active') ||
+            el.classList.contains('selected') ||
+            el.classList.contains('is-active') ||
+            el.classList.contains('is-selected')
+        ) return true;
+        // Some tab UIs mark the active item on the parent <li> only.
+        const p = el.parentElement;
+        if (p && (
+            p.classList.contains('active') ||
+            p.classList.contains('selected') ||
+            p.classList.contains('is-active') ||
+            p.classList.contains('is-selected')
+        )) return true;
+        return false;
+    }
+
+    function findLanguageTabs() {
+        // Selector order = preference. Click-handler-bearing elements
+        // ([role="tab"], <a>, <button>) come before container <li>, so when
+        // multiple ancestors share the same textContent we keep the one
+        // most likely to fire the tab-switch handler.
+        const tabSelectors = [
+            '[role="tab"]',
+            'button',
+            'a',
+            '.nav-link',
+            'li',
+            '.tab',
+            '.nav-item',
+        ];
+        const byLang = new Map();
+        const visited = new Set();
+        tabSelectors.forEach(sel => {
+            document.querySelectorAll(sel).forEach(el => {
+                if (visited.has(el)) return;
+                visited.add(el);
+                if (isInOurPanel(el)) return;
+                const text = (el.textContent || '').trim();
+                if (text.length < LANG_TAB_MIN_LEN) return;
+                const m = LANG_TAB_RE.exec(text);
+                if (!m) return;
+                const lang = m[1];
+                if (byLang.has(lang)) return; // earlier (more specific) wins
+                byLang.set(lang, { lang, el, isActive: isElementActiveTab(el) });
+            });
+        });
+        return Array.from(byLang.values());
+    }
+
+    // Click the language tab matching `lang`. Returns true if a click was
+    // dispatched (i.e. we actually changed tabs). No-op if already active,
+    // or if no tab strip is on the page (File Translation surface).
+    function ensureLanguageTab(lang) {
+        if (!lang) return false;
+        const tabs = findLanguageTabs();
+        if (!tabs.length) return false;
+        const target = tabs.find(t => t.lang === lang);
+        if (!target) return false;
+        if (target.isActive) return false;
+        try { target.el.click(); return true; } catch (e) { return false; }
+    }
+
+    // Choose the best language tab to switch to for a given set of languages.
+    // Prefer the currently-active tab if it's in the set (no-op switch is
+    // free), otherwise pick the first language in the set. Returns the chosen
+    // language code, or null if no tab strip exists.
+    function pickLanguageTab(langs) {
+        if (!langs || !langs.length) return null;
+        const tabs = findLanguageTabs();
+        if (!tabs.length) return null;
+        const active = tabs.find(t => t.isActive);
+        if (active && langs.includes(active.lang)) return active.lang;
+        // First envelope language that actually has a tab on this page.
+        const present = langs.find(l => tabs.some(t => t.lang === l));
+        return present || null;
+    }
+
     // Tranzor's task page exposes a "By Language" / "All Languages" toggle.
     // The default "By Language" view shows only one language at a time, so a
     // filtered search may hide rows we want to tick. Click "All Languages"
@@ -1040,7 +1135,27 @@
     // paginated list (~50 rows per page × dozens of pages), so the only way
     // to make 22 scattered (key, lang) entries land on one screen is to
     // filter via the platform's own search.
-    function filterTranzorByKey(key) {
+    function filterTranzorByKey(key, _tabAttempts) {
+        // MR Pipeline: if the active language tab isn't represented in this
+        // key's group, switch to a language that IS — otherwise the filter
+        // would surface zero rows even though the data exists, just on a
+        // different tab. Defer the actual filter until the tab re-renders.
+        // Cap the click-then-recurse loop at 2 attempts in case Tranzor's
+        // active-state class lags behind the click event.
+        const attempts = _tabAttempts || 0;
+        if (currentEnvelope && currentEnvelope.items && attempts < 2) {
+            const groupLangs = Array.from(new Set(
+                currentEnvelope.items
+                    .filter(it => it.string_key === key)
+                    .map(it => it.language)
+                    .filter(Boolean)
+            ));
+            const chosen = pickLanguageTab(groupLangs);
+            if (chosen && ensureLanguageTab(chosen)) {
+                setTimeout(() => filterTranzorByKey(key, attempts + 1), 300);
+                return true;
+            }
+        }
         const input = document.querySelector(CONFIG.SELECTORS.searchInput);
         if (!input) {
             flashHeader("Search box not found — can't auto-filter");
@@ -1081,9 +1196,19 @@
         else { refreshHighlights(); render(); }
     }
 
-    function findItemOnPage(item) {
+    function findItemOnPage(item, _tabAttempts) {
         const key = item && item.string_key;
         if (!key) return;
+        // On MR Pipeline pages, the per-language tab strip hides rows from
+        // every other language. If this item belongs to a different language
+        // than the currently active tab, switch tabs first — then re-enter
+        // findItemOnPage after the new tab's rows have rendered. Cap retries
+        // so a tab whose active state never updates can't loop us forever.
+        const attempts = _tabAttempts || 0;
+        if (item.language && attempts < 2 && ensureLanguageTab(item.language)) {
+            setTimeout(() => findItemOnPage(item, attempts + 1), 300);
+            return;
+        }
         // Tier A: scroll to the row matching BOTH the key and the language.
         const row = findRowForItem(item);
         if (row) {
@@ -1158,9 +1283,36 @@
         if (isOnEnvelopeTaskPage()) {
             const groups = uniqueStringKeyGroups();
             if (groups.length) {
-                setTimeout(() => filterTranzorByKey(groups[0].key), 250);
+                // On MR Pipeline pages, the language tab strip may not have
+                // rendered yet — wait briefly for it so filterTranzorByKey
+                // can switch to a tab that matches our envelope's languages
+                // (instead of filtering on the default de-DE tab where no
+                // selected row will ever appear).
+                const onMr = Boolean(envelopeMrCoords());
+                if (onMr) {
+                    waitForLanguageTabs(2500, () => filterTranzorByKey(groups[0].key));
+                } else {
+                    setTimeout(() => filterTranzorByKey(groups[0].key), 250);
+                }
             }
         }
+    }
+
+    // Poll for the MR Pipeline language tab strip to render, then run `cb`.
+    // Falls through after `maxMs` even if no tabs appeared (cb still runs so
+    // the rest of the ingest flow isn't blocked on a missing DOM).
+    function waitForLanguageTabs(maxMs, cb) {
+        const deadline = Date.now() + Math.max(0, maxMs || 0);
+        const check = () => {
+            if (findLanguageTabs().length > 0 || Date.now() >= deadline) {
+                cb();
+                return;
+            }
+            setTimeout(check, 150);
+        };
+        // First check after a small delay so we don't fight the SPA's
+        // initial paint loop.
+        setTimeout(check, 150);
     }
 
     // ---- Polling loop ----
