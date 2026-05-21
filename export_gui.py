@@ -1538,10 +1538,12 @@ class ExportApp:
             filepath = os.path.join(script_dir, filename)
 
             bridge_info = self._bridge_info_for_export()
+            # open_after=False — _on_done handles the auto-open so we don't
+            # spawn two browser tabs for the same report.
             if export_type == "translations":
-                export_translations.save_file(rows, filepath, label, fmt, bridge_info=bridge_info)
+                export_translations.save_file(rows, filepath, label, fmt, bridge_info=bridge_info, open_after=False)
             else:
-                export_changes.save_file(rows, filepath, label, fmt)
+                export_changes.save_file(rows, filepath, label, fmt, open_after=False)
 
             self.root.after(0, self._on_done, filepath, True)
 

@@ -1052,8 +1052,14 @@ def write_excel(rows, filename):
 # ---------------------------------------------------------------------------
 # 9) 保存文件（含文件被占用时自动重命名）
 # ---------------------------------------------------------------------------
-def save_file(rows, filename, label, fmt):
-    """保存文件，文件被占用时自动加序号"""
+def save_file(rows, filename, label, fmt, open_after=True):
+    """保存文件，文件被占用时自动加序号。
+
+    open_after: when True (default) and the output is HTML, open the result
+        in the user's default browser. The GUI sets this to False because
+        its _on_done callback already handles auto-open — avoids the
+        duplicate-tab bug.
+    """
     base, ext = os.path.splitext(filename)
     save_path = filename
     for attempt in range(100):
@@ -1063,8 +1069,8 @@ def save_file(rows, filename, label, fmt):
             else:
                 write_excel(rows, save_path)
             print(f"已导出: {save_path}")
-            # HTML 自动在浏览器中打开
-            if fmt == "html":
+            # HTML 自动在浏览器中打开（仅 CLI 默认行为；GUI 由 _on_done 接管）
+            if fmt == "html" and open_after:
                 from export_gui import open_in_browser
                 open_in_browser(save_path)
             return

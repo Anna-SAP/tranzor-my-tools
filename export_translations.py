@@ -1187,12 +1187,16 @@ def _write_index_html(filepath, label, lang_files, total_count):
         f.write(page)
 
 
-def save_file(rows, filename, label, fmt, bridge_info=None):
+def save_file(rows, filename, label, fmt, bridge_info=None, open_after=True):
     """保存文件，文件被占用时自动加序号；大数据 HTML 自动按语言分页
 
     bridge_info: optional dict from BridgeServer.html_info(); threaded into
         every generated HTML page so the Send-to-Tranzor button can reach
         the local bridge.
+    open_after: when True (default) and the output is HTML, open the result
+        in the user's default browser. The GUI sets this to False because
+        its _on_done callback already handles auto-open — avoids the
+        duplicate-tab bug.
     """
     from collections import OrderedDict
 
@@ -1236,8 +1240,9 @@ def save_file(rows, filename, label, fmt, bridge_info=None):
             try:
                 _write_index_html(index_path, label, lang_files, len(rows))
                 print(f"\n📑 Index page: {os.path.basename(index_path)}")
-                from export_gui import open_in_browser
-                open_in_browser(index_path)
+                if open_after:
+                    from export_gui import open_in_browser
+                    open_in_browser(index_path)
                 return
             except PermissionError:
                 index_path = f"{base}_{attempt+1}{ext}"
@@ -1252,7 +1257,7 @@ def save_file(rows, filename, label, fmt, bridge_info=None):
                 else:
                     write_excel(rows, save_path)
                 print(f"已导出: {save_path}")
-                if fmt == "html":
+                if fmt == "html" and open_after:
                     from export_gui import open_in_browser
                     open_in_browser(save_path)
                 return
