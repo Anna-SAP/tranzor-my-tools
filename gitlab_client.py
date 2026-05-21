@@ -68,16 +68,22 @@ class GitLabClient:
     def _encode(self, s):
         return quote(s, safe="")
 
-    def list_branches(self, project_id, search=None):
+    def list_branches(self, project_id, search=None, max_pages=50):
+        """List branches, paginating until exhausted (capped at ``max_pages``).
+
+        Previously hard-coded to the first 3 pages (300 branches), which silently
+        truncated long-lived ``tranzor-fix`` histories. Now walks until an empty
+        / partial page is returned, with ``max_pages`` (default 50 → 5000) as a
+        runaway safety cap.
+        """
         key = (project_id, search or "")
         if key in self._branches_cache:
             return self._branches_cache[key]
 
         url = (f"{self.base_url}/api/v4/projects/"
                f"{self._encode(project_id)}/repository/branches")
-        # 分页：tranzor-fix 分支可能很多；拉前 3 页足够覆盖最近 300 条
         results = []
-        for page in range(1, 4):
+        for page in range(1, max_pages + 1):
             params = {"per_page": 100, "page": page}
             if search:
                 params["search"] = search
@@ -158,20 +164,17 @@ class GitLabAccessError(Exception):
             f"(HTTP {status_code}). Likely the PAT user lacks membership.")
 
 
-def find_fix_commit_sha(client, project_id, fixed_at_iso,
-                       window_minutes=60):
-    """找到时间最接近 ``fixed_at`` 的 ``tranzor-fix/*`` 分支 HEAD commit SHA。
+def _candidate_branches_within_window(client, project_id, fixed_at_iso,
+                                      window_minutes):
+    """Return branches whose name timestamp is within ``window_minutes`` of
+    ``fixed_at_iso``, sorted by absolute time-delta ascending.
 
-    分支名尾部的 ``YYYYMMDDHHMMSS`` 与 ``fixed_at`` 之差在 window_minutes
-    以内且最小的那条；没有匹配返回 None。
-
-    Raises:
-        GitLabAccessError: PAT 对该项目无读权限（401/403/404）。
-            调用方应捕获并对整个项目放弃恢复尝试、给出清晰提示。
+    Common helper for both the legacy time-only matcher and the new key-aware
+    matcher. Raises :class:`GitLabAccessError` on 401/403/404 from listing.
     """
     fixed_at = _parse_fixed_at(fixed_at_iso)
     if not fixed_at:
-        return None
+        return []
     try:
         branches = client.list_branches(project_id, search="tranzor-fix")
     except requests.HTTPError as e:
@@ -181,21 +184,83 @@ def find_fix_commit_sha(client, project_id, fixed_at_iso,
                                     url=getattr(e.response, "url", None)) from e
         raise
 
-    best = None
-    best_delta = timedelta(minutes=window_minutes)
+    window = timedelta(minutes=window_minutes)
+    candidates = []
     for b in branches:
-        name = b.get("name", "")
-        ts = parse_branch_timestamp(name)
+        ts = parse_branch_timestamp(b.get("name", ""))
         if not ts:
             continue
         delta = abs(ts - fixed_at)
-        if delta <= best_delta:
-            best_delta = delta
-            best = b
-    if best:
-        commit = best.get("commit") or {}
-        return commit.get("id")
-    return None
+        if delta <= window:
+            candidates.append((delta, b))
+    candidates.sort(key=lambda x: x[0])
+    return [b for _delta, b in candidates]
+
+
+def find_fix_commit_sha(client, project_id, fixed_at_iso,
+                       window_minutes=60):
+    """Legacy time-only matcher — returns the closest-by-time ``tranzor-fix``
+    branch HEAD SHA within ``window_minutes``.
+
+    .. deprecated::
+        In batch-fix scenarios many cases share near-identical ``fixed_at``,
+        and time-min alone can pick a sibling fix's commit → silent wrong-fill
+        downstream. Prefer :func:`find_fix_commit_for_key`, which iterates
+        candidates ordered by time-delta and verifies that the chosen diff
+        actually edits the target ``(opus_id, target_language)``.
+
+    Raises:
+        GitLabAccessError: PAT lacks read access on the project (401/403/404).
+    """
+    candidates = _candidate_branches_within_window(
+        client, project_id, fixed_at_iso, window_minutes)
+    if not candidates:
+        return None
+    commit = candidates[0].get("commit") or {}
+    return commit.get("id")
+
+
+def find_fix_commit_for_key(client, project_id, fixed_at_iso,
+                            opus_id, target_language, window_minutes=60):
+    """Find the ``tranzor-fix`` commit that actually edits
+    ``(opus_id, target_language)``.
+
+    Walks all candidate branches whose name timestamp is within
+    ``window_minutes`` of ``fixed_at_iso``, ordered by absolute time-delta
+    ascending. For each candidate, fetches its diff and runs
+    :func:`extract_diff_values`. Returns the first candidate whose diff
+    actually contains the target key for the target language.
+
+    This guards against the batch-fix silent-fill scenario: when many cases
+    share near-identical ``fixed_at`` (e.g. repeated-string mass fixes),
+    matching purely by time-delta can pick a sibling fix's commit, and the
+    downstream diff parser would either return ``(None, None)`` (silent skip)
+    or — worse — pick up an unrelated occurrence of the key.
+
+    Returns:
+        (sha, pre, post): commit SHA + diff '-' / '+' values when a candidate's
+        diff contains the key. ``(None, None, None)`` if no candidate matched
+        (no branches in window, or none of their diffs touched the key).
+
+    Raises:
+        GitLabAccessError: PAT lacks read access on the project (401/403/404).
+    """
+    candidates = _candidate_branches_within_window(
+        client, project_id, fixed_at_iso, window_minutes)
+    for b in candidates:
+        sha = (b.get("commit") or {}).get("id")
+        if not sha:
+            continue
+        try:
+            diff = client.get_commit_diff(project_id, sha)
+        except Exception:
+            # Diff fetch failure on one candidate shouldn't abort the search —
+            # later candidates may still match.
+            continue
+        pre, post = extract_diff_values(diff, opus_id, target_language)
+        if pre is not None or post is not None:
+            return sha, pre, post
+    return None, None, None
 
 
 # ---------------------------------------------------------------------------

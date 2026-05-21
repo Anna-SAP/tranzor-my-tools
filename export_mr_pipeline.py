@@ -506,17 +506,23 @@ def detect_mr_changes(task_id, progress_callback=None):
         if lead_fix_cases:
             log(f"  正在从 GitLab 恢复 {len(lead_fix_cases)} 条 lead-fix 的原译文...")
 
-            # 按 fixed_at 分组：同一次 BATCH_FIX 只需查一次 commit
-            sha_cache = {}  # fixed_at -> commit_sha
+            # gitlab_client._branches_cache + _commit_diff_cache 已经把
+            # list_branches / get_commit_diff 在 client 层做了去重，所以这里
+            # 不再需要 per-fixed_at 的 sha_cache —— find_fix_commit_for_key
+            # 每次只会针对 (fixed_at, opus_id, target_language) 走一遍候选。
             access_denied = False
+            recovered = 0
+            uncertain = 0  # candidates existed but none contained this key — likely batch-fix silent miss
 
-            def _resolve_sha(fixed_at):
-                nonlocal access_denied
-                if fixed_at in sha_cache:
-                    return sha_cache[fixed_at]
+            for key, case in lead_fix_cases:
+                if access_denied:
+                    break
+                fixed_at = case.get("fixed_at")
+                opus_id = case.get("opus_id", "")
+                target_language = case.get("target_language", "")
                 try:
-                    sha = gitlab_client.find_fix_commit_sha(
-                        gl, project_id, fixed_at)
+                    sha, pre, post = gitlab_client.find_fix_commit_for_key(
+                        gl, project_id, fixed_at, opus_id, target_language)
                 except gitlab_client.GitLabAccessError as ex:
                     # 权限缺失 —— 整个项目都无法恢复，不要继续刷屏
                     access_denied = True
@@ -525,34 +531,28 @@ def detect_mr_changes(task_id, progress_callback=None):
                     log(f"     解决：申请 Reporter 权限 "
                         f"{gl.base_url}/{project_id}/-/project_members")
                     log(f"     此 MR 的 pre-fix 原译文将无法恢复。")
-                    sha = None
-                except Exception as ex:
-                    log(f"  ⚠ 查询 tranzor-fix 分支失败: {ex}")
-                    sha = None
-                sha_cache[fixed_at] = sha
-                return sha
-
-            recovered = 0
-            for key, case in lead_fix_cases:
-                if access_denied:
                     break
-                fixed_at = case.get("fixed_at")
-                sha = _resolve_sha(fixed_at)
-                if not sha:
-                    continue
-                try:
-                    diff = gl.get_commit_diff(project_id, sha)
                 except Exception as ex:
-                    log(f"  ⚠ 拉取 commit {sha[:8]} diff 失败: {ex}")
+                    log(f"  ⚠ 查询 tranzor-fix 分支失败 ({opus_id} / {target_language}): {ex}")
                     continue
-                pre, post = gitlab_client.extract_diff_values(
-                    diff, case.get("opus_id", ""),
-                    case.get("target_language", ""))
-                if pre is not None:
-                    gitlab_recovery[key] = (pre, post or "")
+
+                if sha is not None and (pre is not None or post is not None):
+                    gitlab_recovery[key] = (pre or "", post or "")
                     recovered += 1
+                else:
+                    # No candidate within the time window had a diff that
+                    # touched this key+lang. Don't silently fill from a
+                    # neighbouring (wrong-key) branch — leave gitlab_recovery
+                    # empty so downstream falls back to edit_logs /
+                    # iteration_history. Log once per case for visibility.
+                    uncertain += 1
+
             if not access_denied:
-                log(f"  ✓ GitLab 恢复 {recovered} / {len(lead_fix_cases)} 条 pre-fix 原译文")
+                msg = f"  ✓ GitLab 恢复 {recovered} / {len(lead_fix_cases)} 条 pre-fix 原译文"
+                if uncertain:
+                    msg += (f"（{uncertain} 条在时间窗内未找到包含该 key 的 diff，"
+                            f"留给 edit_logs / iteration_history 兜底）")
+                log(msg)
 
     changes = []
     seen_keys = set()  # (opus_id, target_language) — 避免两路检测重复
