@@ -32,6 +32,8 @@
    - `@match http://tranzor-platform.int.rclabenv.com/*`
    - `@connect 127.0.0.1`
 
+> **自动更新**已通过 `@updateURL` / `@downloadURL` 指到 GitHub `master` 分支配置好。Tampermonkey 默认每天检查一次；后续 bug 修复版本会**自动到位**，你不需要再做任何事。想立刻拉新版可去 Tampermonkey 仪表盘 → Tranzor Bridge → **检查更新**。
+
 ### 第 3 步：验证侧栏挂载成功
 
 1. 连上公司网络 / VPN（和平时用 Tranzor 一样）
