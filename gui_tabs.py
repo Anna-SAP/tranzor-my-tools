@@ -143,7 +143,7 @@ class MRPipelineTab:
         # Export Type selector (mirrors File Translation panel)
         self.lbl_mr_export_type = ttk.Label(action, text="", style="Card.TLabel")
         self.lbl_mr_export_type.pack(side="left", padx=(16, 4))
-        self.mr_export_type_var = tk.StringVar(value="changes")
+        self.mr_export_type_var = tk.StringVar(value="translations")
         self.rb_mr_changes = ttk.Radiobutton(
             action, text="", variable=self.mr_export_type_var, value="changes",
             style="Card.TRadiobutton")
