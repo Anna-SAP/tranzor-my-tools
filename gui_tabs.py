@@ -649,7 +649,10 @@ class MRPipelineTab:
             script_dir = os.path.dirname(os.path.abspath(__file__))
             filepath = os.path.join(script_dir, filename)
             label = f"MR Pipeline {id_tag} — {type_tag} (exported {today})"
-            mr_api.save_mr_file(results, filepath, label, fmt)
+            # Route the local bridge port + token into the report so its
+            # Send-to-Tranzor button can reach the desktop GUI's HTTP bridge.
+            bridge_info = self.app._bridge_info_for_export() if hasattr(self.app, "_bridge_info_for_export") else None
+            mr_api.save_mr_file(results, filepath, label, fmt, bridge_info=bridge_info)
             self.parent.after(0, lambda: self.lbl_mr_status_bar.configure(text=self._t("status_done")))
         except Exception as e:
             self.parent.after(0, lambda: self.lbl_mr_status_bar.configure(text=f"❌ {str(e)[:50]}"))
