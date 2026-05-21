@@ -538,6 +538,41 @@ def write_html(rows, filename, label):
     .btn-clear {{ background: #334155; color: #cbd5e1; }}
     .btn-clear:hover {{ background: #475569; }}
     .filter-info {{ font-size: 12px; color: #94a3b8; }}
+
+    /* Multi-select dropdown (lang filter) */
+    .ms-wrap {{ position:relative; }}
+    .ms-btn {{
+        background:#0f172a; border:1px solid #334155; border-radius:6px;
+        color:#e2e8f0; padding:6px 10px; font-size:13px; min-width:160px;
+        outline:none; cursor:pointer; display:flex; align-items:center;
+        gap:8px; justify-content:space-between; font-family:inherit;
+    }}
+    .ms-btn:hover {{ border-color:#475569; }}
+    .ms-btn.open {{ border-color:#4472C4; }}
+    .ms-caret {{ color:#94a3b8; font-size:10px; }}
+    .ms-menu {{
+        position:absolute; top:calc(100% + 4px); left:0;
+        background:#0f172a; border:1px solid #334155; border-radius:6px;
+        box-shadow:0 10px 24px rgba(0,0,0,0.45);
+        min-width:200px; max-height:340px; overflow:hidden; z-index:50;
+        display:flex; flex-direction:column;
+    }}
+    .ms-menu[hidden] {{ display:none; }}
+    .ms-actions {{
+        display:flex; gap:14px; padding:8px 12px;
+        border-bottom:1px solid #334155; background:#1e293b;
+    }}
+    .ms-link {{ color:#38bdf8; font-size:12px; text-decoration:none; cursor:pointer; }}
+    .ms-link:hover {{ color:#7dd3fc; text-decoration:underline; }}
+    .ms-list {{ overflow-y:auto; padding:6px 0; max-height:280px; }}
+    .ms-menu .ms-item {{
+        display:flex; align-items:center; gap:8px;
+        padding:5px 12px; font-size:13px; color:#e2e8f0; cursor:pointer;
+        user-select:none;
+        text-transform:none; font-weight:400; letter-spacing:normal;
+    }}
+    .ms-menu .ms-item:hover {{ background:#1e293b; }}
+    .ms-menu .ms-item input {{ cursor:pointer; margin:0; }}
 </style>
 </head>
 <body>
@@ -576,7 +611,19 @@ def write_html(rows, filename, label):
         </div>
         <div class="fp-simple">
             <label>Lang</label>
-            <select id="fLang"><option value="">All</option></select>
+            <div class="ms-wrap" id="fLangWrap">
+                <button type="button" class="ms-btn" id="fLangBtn">
+                    <span class="ms-label" id="fLangLabel">All</span>
+                    <span class="ms-caret">▾</span>
+                </button>
+                <div class="ms-menu" id="fLangMenu" hidden>
+                    <div class="ms-actions">
+                        <a href="#" class="ms-link" id="fLangSelectAll">Select all</a>
+                        <a href="#" class="ms-link" id="fLangClearSel">Clear</a>
+                    </div>
+                    <div class="ms-list" id="fLangList"></div>
+                </div>
+            </div>
         </div>
         <div class="fp-actions">
             <button class="btn btn-apply" onclick="applyFilters()">▶ Apply</button>
@@ -600,15 +647,63 @@ const ROWS = {rows_json};
 const ALL_LANGS = {langs_json};
 let allSelected = false;
 
-// Populate lang dropdown
-(function() {{
-    const sel = document.getElementById('fLang');
+// Populate lang multi-select
+(function setupLangFilter() {{
+    const list = document.getElementById('fLangList');
     ALL_LANGS.forEach(l => {{
-        const opt = document.createElement('option');
-        opt.value = l; opt.textContent = l;
-        sel.appendChild(opt);
+        const lbl = document.createElement('label');
+        lbl.className = 'ms-item';
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.value = l;
+        cb.addEventListener('change', updateLangLabel);
+        lbl.appendChild(cb);
+        const span = document.createElement('span');
+        span.textContent = l;
+        lbl.appendChild(span);
+        list.appendChild(lbl);
+    }});
+    document.getElementById('fLangBtn').addEventListener('click', toggleLangMenu);
+    document.getElementById('fLangSelectAll').addEventListener('click', e => {{
+        e.preventDefault(); setAllLangs(true);
+    }});
+    document.getElementById('fLangClearSel').addEventListener('click', e => {{
+        e.preventDefault(); setAllLangs(false);
+    }});
+    document.addEventListener('click', e => {{
+        if (!document.getElementById('fLangWrap').contains(e.target)) closeLangMenu();
     }});
 }})();
+function getSelectedLangs() {{
+    return Array.from(document.querySelectorAll('#fLangList input:checked')).map(cb => cb.value);
+}}
+function setAllLangs(checked) {{
+    document.querySelectorAll('#fLangList input').forEach(cb => cb.checked = checked);
+    updateLangLabel();
+}}
+function updateLangLabel() {{
+    const selected = getSelectedLangs();
+    const total = ALL_LANGS.length;
+    const lbl = document.getElementById('fLangLabel');
+    if (selected.length === 0 || selected.length === total) lbl.textContent = 'All';
+    else if (selected.length === 1) lbl.textContent = selected[0];
+    else lbl.textContent = selected.length + ' languages';
+}}
+function toggleLangMenu(e) {{
+    e.stopPropagation();
+    const menu = document.getElementById('fLangMenu');
+    const btn = document.getElementById('fLangBtn');
+    if (menu.hasAttribute('hidden')) {{
+        menu.removeAttribute('hidden');
+        btn.classList.add('open');
+    }} else {{
+        closeLangMenu();
+    }}
+}}
+function closeLangMenu() {{
+    document.getElementById('fLangMenu').setAttribute('hidden', '');
+    document.getElementById('fLangBtn').classList.remove('open');
+}}
 
 // ============================================================
 // TextFilter card rendering
@@ -719,7 +814,7 @@ function applyFilters() {{
     const fTime = document.getElementById('fTime').value.trim();
     const fTaskId = document.getElementById('fTaskId').value.trim();
     const fTask = document.getElementById('fTask').value.trim();
-    const fLang = document.getElementById('fLang').value;
+    const fLang = getSelectedLangs();
 
     // Collect TextFilter states
     const tfCards = document.querySelectorAll('.tf-card');
@@ -756,8 +851,8 @@ function applyFilters() {{
         }}
 
         // Lang filter
-        if (fLang && pass) {{
-            if (row.language !== fLang) pass = false;
+        if (fLang.length > 0 && pass) {{
+            if (!fLang.includes(row.language)) pass = false;
         }}
 
         // TextFilter fields
@@ -804,7 +899,7 @@ function clearFilters() {{
     document.getElementById('fTime').value = '';
     document.getElementById('fTaskId').value = '';
     document.getElementById('fTask').value = '';
-    document.getElementById('fLang').value = '';
+    setAllLangs(false);
 
     document.querySelectorAll('.tf-card').forEach(card => {{
         card.querySelector('[data-role="pos"]').value = '';
