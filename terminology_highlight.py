@@ -67,6 +67,25 @@ mark.term-hl.dnt {{
 }}
 """
 
+def _parse_dnt(value: Any) -> bool:
+    """Robustly interpret the API's DNT flag.
+
+    The Tranzor terminology API has been observed returning DNT as:
+    bool ``True``/``False``, int 0/1, or string ``"true"``/``"false"`` /
+    ``"yes"``/``"no"``. A naive ``bool(value)`` mishandles the strings
+    (``bool("false") == True``), so this normaliser is the single point
+    of truth for "is this term DNT?".
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        v = value.strip().lower()
+        return v in ("true", "yes", "y", "1")
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Module state (process-wide caches, lazy-initialised, thread-safe).
 # ---------------------------------------------------------------------------
@@ -132,8 +151,11 @@ def highlight_translation(escaped_text: str, locale: Optional[str]) -> str:
     meta_map = _locale_meta.get(norm) or {}
     def repl(m: re.Match) -> str:
         meta = meta_map.get(m.group(0).lower(), {})
-        cls = HL_CLASS_DNT if meta.get("dnt") else HL_CLASS
-        return f'<mark class="{cls}">{m.group(0)}</mark>'
+        is_dnt = bool(meta.get("dnt"))
+        cls = HL_CLASS_DNT if is_dnt else HL_CLASS
+        return (f'<mark class="{cls}" '
+                f'data-dnt="{"true" if is_dnt else "false"}">'
+                f'{m.group(0)}</mark>')
     return pat.sub(repl, escaped_text)
 
 
@@ -177,20 +199,28 @@ def prefetch_for_rows(
             new_details = {}
         with _lock:
             _detail_cache.update(new_details)
-            # Sync DNT from DETAIL back into the source-side meta map.
-            # The LIST endpoint sometimes reports dnt=False for terms
-            # that DETAIL reports as DNT: Yes (observed for
-            # "SpinSci Patient Notify" et al). Detail is authoritative
-            # — without this sync, source-side highlighting picks the
-            # regular amber class instead of the DNT pink one for those
-            # terms even though prefetch already has the right answer.
-            for _tid, detail in new_details.items():
-                d_name = (detail.get("name") or "").strip()
-                if not d_name:
+
+    # Always sync DNT from DETAIL back into the source-side meta map for
+    # *every* hit term that has a detail cached — not just the ones we
+    # just fetched. Earlier calls may have populated _detail_cache; this
+    # ensures the source-side regex picks up the authoritative dnt flag
+    # on every render. Sync by ID (not name) so a slight name mismatch
+    # between LIST and DETAIL responses doesn't silently skip the sync.
+    if _detail_cache:
+        with _lock:
+            id_to_meta = {
+                m.get("id"): m
+                for m in _name_to_meta.values()
+                if m.get("id") is not None
+            }
+            for tid in hit_ids:
+                detail = _detail_cache.get(tid)
+                if not detail:
                     continue
-                meta = _name_to_meta.get(d_name.lower())
-                if meta is not None:
-                    meta["dnt"] = bool(detail.get("dnt"))
+                meta = id_to_meta.get(tid)
+                if meta is None:
+                    continue
+                meta["dnt"] = _parse_dnt(detail.get("dnt"))
 
     # 3. Determine locales we still need a regex for.
     locales_needed = set()
@@ -211,8 +241,16 @@ def prefetch_for_rows(
 
 def _source_repl(m: re.Match) -> str:
     meta = _name_to_meta.get(m.group(0).lower(), {})
-    cls = HL_CLASS_DNT if meta.get("dnt") else HL_CLASS
-    return f'<mark class="{cls}">{m.group(0)}</mark>'
+    is_dnt = bool(meta.get("dnt"))
+    cls = HL_CLASS_DNT if is_dnt else HL_CLASS
+    # data-* attributes make View Source self-documenting: a user can
+    # confirm which class was picked (and whether DNT was detected)
+    # without having to re-instrument the build.
+    tid = meta.get("id")
+    tid_attr = f' data-term-id="{tid}"' if tid is not None else ""
+    return (f'<mark class="{cls}"{tid_attr} '
+            f'data-dnt="{"true" if is_dnt else "false"}">'
+            f'{m.group(0)}</mark>')
 
 
 def _ensure_list_loaded(force_refresh: bool = False) -> Optional[re.Pattern]:
@@ -242,7 +280,7 @@ def _ensure_list_loaded(force_refresh: bool = False) -> Optional[re.Pattern]:
             name_to_meta[key] = {
                 "name": name,
                 "id": t.get("id"),
-                "dnt": bool(t.get("dnt")),
+                "dnt": _parse_dnt(t.get("dnt")),
             }
         _name_to_meta = name_to_meta
         _source_re = _build_alternation_regex(
@@ -260,7 +298,7 @@ def _build_locale_regex(locale: str) -> None:
     items: Dict[str, Dict[str, Any]] = {}
     for _tid, detail in _detail_cache.items():
         src_name = (detail.get("name") or "").strip()
-        is_dnt = bool(detail.get("dnt"))
+        is_dnt = _parse_dnt(detail.get("dnt"))
         translated_for_locale = ""
         for tr in detail.get("translations") or []:
             if normalize_locale(tr.get("language_code") or "") == locale:
