@@ -19,6 +19,8 @@ import sys
 import webbrowser
 from datetime import date
 
+import terminology_highlight as th
+
 try:
     import requests
 except ImportError:
@@ -250,6 +252,10 @@ def write_html(rows, filename, label, bridge_info=None):
     import json
     from collections import OrderedDict
 
+    # Pre-build terminology highlight regexes for every locale present.
+    th.prefetch_for_rows(rows, source_field="source_text",
+                         lang_field="language")
+
     # 按语言分组
     groups = OrderedDict()
     for r in rows:
@@ -308,8 +314,8 @@ def write_html(rows, filename, label, bridge_info=None):
                 f'<td class="task">{html.escape(r["task_name"])}</td>'
                 f'<td class="lang">{html.escape(r["language"])}</td>'
                 f'<td class="key">{html.escape(r["string_key"])}</td>'
-                f'<td class="source">{html.escape(r["source_text"])}</td>'
-                f'<td class="translated">{html.escape(r["translated_text"])}</td>'
+                f'<td class="source">{th.highlight_source(html.escape(r["source_text"]))}</td>'
+                f'<td class="translated">{th.highlight_translation(html.escape(r["translated_text"]), r["language"])}</td>'
                 f'<td class="type">{html.escape(r["translation_type"])}</td>'
                 f'</tr>'
             )
@@ -343,6 +349,7 @@ def write_html(rows, filename, label, bridge_info=None):
 <meta charset="UTF-8">
 <title>Tranzor Translations - {html.escape(label)}</title>
 <style>
+    {th.HIGHLIGHT_CSS}
     * {{ margin: 0; padding: 0; box-sizing: border-box; }}
     body {{ font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif; background: #f5f6fa; padding: 24px; padding-top: 72px; color: #333; }}
     h1 {{ font-size: 20px; margin-bottom: 4px; }}

@@ -18,6 +18,8 @@ import webbrowser
 from collections import OrderedDict
 from datetime import date
 
+import terminology_highlight as th
+
 
 def _tokenize(text):
     """Split text into diff-friendly tokens.
@@ -981,6 +983,14 @@ def write_mr_html(results_data, filename, label, bridge_info=None):
     summary = results_data.get("summary", {})
     task_id = results_data.get("task_id", "")
 
+    # Pre-build the terminology highlight regexes for every locale that
+    # appears in this batch. Cheap: scans source text for hits first,
+    # then fetches detail only for those term IDs (degrades silently on
+    # API errors — the source-side regex is the only must-have).
+    th.prefetch_for_rows(translations,
+                         source_field="source_text",
+                         lang_field="target_language")
+
     # Detect if this is a "changes" export (translations have prev_translated_text)
     is_changes = any(t.get("prev_translated_text") is not None for t in translations)
 
@@ -1092,9 +1102,9 @@ def write_mr_html(results_data, filename, label, bridge_info=None):
                 f'<td class="num">{global_idx + 1}</td>'
                 f'<td class="key">{html_mod.escape(r.get("opus_id", ""))}</td>'
                 f'<td class="lang">{html_mod.escape(lang_name)}</td>'
-                f'<td class="source">{html_mod.escape(r.get("source_text", ""))}</td>'
+                f'<td class="source">{th.highlight_source(html_mod.escape(r.get("source_text", "")))}</td>'
                 f'{diff_cols}'
-                f'<td class="translated">{html_mod.escape(r.get("translated_text", ""))}</td>'
+                f'<td class="translated">{th.highlight_translation(html_mod.escape(r.get("translated_text", "")), lang_name)}</td>'
                 f'<td class="score"{score_class}>{score_str}</td>'
                 f'<td class="err-cat">{html_mod.escape(err_cat)}</td>'
                 f'<td class="reason">{html_mod.escape(reason)}</td>'
@@ -1148,6 +1158,7 @@ def write_mr_html(results_data, filename, label, bridge_info=None):
 <meta charset="UTF-8">
 <title>MR Pipeline Translations - {html_mod.escape(label)}</title>
 <style>
+    {th.HIGHLIGHT_CSS}
     * {{ margin:0; padding:0; box-sizing:border-box; }}
     body {{ font-family:-apple-system,"Segoe UI",Roboto,Arial,sans-serif; background:#f5f6fa; padding:24px; padding-top:72px; color:#333; }}
     h1 {{ font-size:20px; margin-bottom:4px; }}

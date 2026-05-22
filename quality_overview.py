@@ -13,6 +13,8 @@ import webbrowser
 from collections import OrderedDict
 from datetime import date, datetime
 
+import terminology_highlight as th
+
 # ---------------------------------------------------------------------------
 # 跨平台字体适配
 # ---------------------------------------------------------------------------
@@ -713,6 +715,13 @@ def write_quality_html(aggregated, filename, label):
     a = aggregated
     threshold = a.get("threshold", DEFAULT_THRESHOLD)
 
+    # Pre-build terminology highlight regexes for every locale in the
+    # low-items table — the only place this report renders source /
+    # translated text.
+    th.prefetch_for_rows(a.get("low_items") or [],
+                         source_field="source_text",
+                         lang_field="target_language")
+
     # Error distribution as chart bars (inline CSS)
     err_bars = ""
     err_total = sum(a["error_distribution"].values())
@@ -777,8 +786,8 @@ def write_quality_html(aggregated, filename, label):
             f'<td>{html_mod.escape(scope_name)}</td>'
             f'<td class="key">{html_mod.escape(it.get("opus_id", ""))}</td>'
             f'<td>{html_mod.escape(it.get("target_language", ""))}</td>'
-            f'<td>{html_mod.escape(it.get("source_text", "")[:120])}</td>'
-            f'<td>{html_mod.escape(it.get("translated_text", "")[:120])}</td>'
+            f'<td>{th.highlight_source(html_mod.escape(it.get("source_text", "")[:120]))}</td>'
+            f'<td>{th.highlight_translation(html_mod.escape(it.get("translated_text", "")[:120]), it.get("target_language", ""))}</td>'
             f'<td{score_style}>{score}</td>'
             f'<td>{html_mod.escape(it.get("error_category") or "—")}</td>'
             f'<td>{html_mod.escape(it.get("reason") or "")}</td>'
@@ -791,6 +800,7 @@ def write_quality_html(aggregated, filename, label):
 <meta charset="UTF-8">
 <title>Quality Overview - {html_mod.escape(label)}</title>
 <style>
+    {th.HIGHLIGHT_CSS}
     * {{ margin:0; padding:0; box-sizing:border-box; }}
     body {{ font-family:-apple-system,"Segoe UI",Roboto,Arial,sans-serif; background:#f5f6fa; padding:24px; color:#333; }}
     h1 {{ font-size:20px; margin-bottom:4px; }}
