@@ -177,6 +177,20 @@ def prefetch_for_rows(
             new_details = {}
         with _lock:
             _detail_cache.update(new_details)
+            # Sync DNT from DETAIL back into the source-side meta map.
+            # The LIST endpoint sometimes reports dnt=False for terms
+            # that DETAIL reports as DNT: Yes (observed for
+            # "SpinSci Patient Notify" et al). Detail is authoritative
+            # — without this sync, source-side highlighting picks the
+            # regular amber class instead of the DNT pink one for those
+            # terms even though prefetch already has the right answer.
+            for _tid, detail in new_details.items():
+                d_name = (detail.get("name") or "").strip()
+                if not d_name:
+                    continue
+                meta = _name_to_meta.get(d_name.lower())
+                if meta is not None:
+                    meta["dnt"] = bool(detail.get("dnt"))
 
     # 3. Determine locales we still need a regex for.
     locales_needed = set()
