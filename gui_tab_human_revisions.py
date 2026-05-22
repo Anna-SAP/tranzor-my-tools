@@ -19,6 +19,7 @@ from tkinter import ttk, filedialog
 from datetime import date, timedelta
 
 import export_mr_pipeline as mr_api
+import terminology_highlight as th
 
 # ---------------------------------------------------------------------------
 # Cross-platform font
@@ -566,6 +567,10 @@ def _render_html_report(items, params):
     from collections import defaultdict
     from datetime import datetime
 
+    # Pre-build terminology highlight regexes for every locale present.
+    th.prefetch_for_rows(items, source_field="source_text",
+                         lang_field="target_language")
+
     # Group items by channel, then by language
     by_channel = defaultdict(lambda: defaultdict(list))
     for item in items:
@@ -599,9 +604,9 @@ def _render_html_report(items, params):
         <th width="33%">Machine Translation</th>
         <th width="33%">Human Revision</th>
       </tr></thead><tbody><tr>
-        <td class="source">{_esc(it.get('source_text',''))}</td>
-        <td class="machine">{_esc(it.get('machine_translation',''))}</td>
-        <td class="human">{_esc(it.get('human_revision',''))}</td>
+        <td class="source">{th.highlight_source(_esc(it.get('source_text','')))}</td>
+        <td class="machine">{th.highlight_translation(_esc(it.get('machine_translation','')), it.get('target_language',''))}</td>
+        <td class="human">{th.highlight_translation(_esc(it.get('human_revision','')), it.get('target_language',''))}</td>
       </tr></tbody></table>
       <footer class="card-meta">
         {badge}
@@ -625,6 +630,7 @@ def _render_html_report(items, params):
 <html lang="en"><head><meta charset="UTF-8">
 <title>Human Revisions Report</title>
 <style>
+{th.HIGHLIGHT_CSS}
 *{{box-sizing:border-box;margin:0;padding:0}}
 body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,
 sans-serif;max-width:1200px;margin:0 auto;padding:24px;color:#1e293b;

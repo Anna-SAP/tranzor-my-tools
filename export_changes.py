@@ -22,6 +22,8 @@ import sys
 import webbrowser
 from datetime import date
 
+import terminology_highlight as th
+
 
 def _tokenize(text):
     """Split text into diff-friendly tokens.
@@ -301,6 +303,10 @@ def write_html(rows, filename, label):
     import json
     from collections import OrderedDict
 
+    # Pre-build terminology highlight regexes for every locale present.
+    th.prefetch_for_rows(rows, source_field="source_text",
+                         lang_field="language")
+
     # 按 Editor 分组，保持出现顺序
     groups = OrderedDict()
     for r in rows:
@@ -358,9 +364,9 @@ def write_html(rows, filename, label):
                 <td class="task">{html.escape(r['task_name'])}</td>
                 <td class="lang">{html.escape(r['language'])}</td>
                 <td class="key">{html.escape(r['string_key'])}</td>
-                <td>{html.escape(r['source_text'])}</td>
-                <td class="before">{html.escape(r['before'])}</td>
-                <td class="after">{html.escape(r['after'])}</td>
+                <td>{th.highlight_source(html.escape(r['source_text']))}</td>
+                <td class="before">{th.highlight_translation(html.escape(r['before']), r['language'])}</td>
+                <td class="after">{th.highlight_translation(html.escape(r['after']), r['language'])}</td>
                 <td class="diff">{diff}</td>
                 <td>{html.escape(r['notes'] or '')}</td>
             </tr>"""
@@ -398,6 +404,7 @@ def write_html(rows, filename, label):
 <meta charset="UTF-8">
 <title>Tranzor Changes - {html.escape(label)}</title>
 <style>
+    {th.HIGHLIGHT_CSS}
     * {{ margin: 0; padding: 0; box-sizing: border-box; }}
     body {{ font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif; background: #f5f6fa; padding: 24px; padding-top: 72px; color: #333; }}
     h1 {{ font-size: 20px; margin-bottom: 4px; }}
