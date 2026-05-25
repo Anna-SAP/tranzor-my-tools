@@ -109,6 +109,26 @@ STRINGS = {
         "opus_src_mr":              "MR",
         "opus_src_scan":            "Scan",
         "opus_src_file":            "File",
+        # Breakdown search
+        "opus_breakdown_search_ph": "🔍 Filter by project / alias…",
+        "opus_breakdown_search_clear": "✕",
+        "opus_breakdown_filter_hint": "{shown}/{total} rows shown",
+        # OpusDetailDialog new fields
+        "opus_dlg_opus_path":       "Source file path (debug-friendly plaintext of path hash)",
+        "opus_dlg_opus_path_missing": "— (not synced; re-run Full re-sync to populate)",
+        "opus_dlg_opus_translations": "Translations ({n} languages)",
+        "opus_dlg_opus_trans_col_lang": "Language",
+        "opus_dlg_opus_trans_col_text": "Translated text",
+        "opus_dlg_opus_trans_empty": "(empty — not yet synced or no translation present)",
+        # Recently-added 7d window
+        "opus_recent_title_n":      "📋 Recently added in 7 days ({n}) · double-click row",
+        # Send-to-Tranzor: actionable warnings when userscript not live
+        "opus_dlg_send_no_userscript": (
+            "⚠ Pushed to bridge, but no Tranzor browser tab picked it up. "
+            "Make sure Tranzor is open in your browser and the Tampermonkey "
+            "userscript is installed."),
+        "opus_dlg_send_setup_wizard": "Run setup wizard…",
+        "opus_dlg_send_pending": "⏳ Pushed · waiting for Tranzor browser tab to pull…",
         # Anomaly line below the cards
         "opus_anomaly_normal":      (
             "📊 30-day avg ~{avg}/day · today +{today} · "
@@ -203,6 +223,26 @@ STRINGS = {
         "opus_src_mr":              "MR",
         "opus_src_scan":            "Scan",
         "opus_src_file":            "File",
+        # Breakdown 搜索
+        "opus_breakdown_search_ph": "🔍 按项目 / Alias 过滤…",
+        "opus_breakdown_search_clear": "✕",
+        "opus_breakdown_filter_hint": "显示 {shown}/{total} 行",
+        # OpusDetailDialog 新字段
+        "opus_dlg_opus_path":       "源文件路径（path hash 的明文，debug 必看）",
+        "opus_dlg_opus_path_missing": "— （未同步；点「全量重建」补齐）",
+        "opus_dlg_opus_translations": "译文预览（{n} 种语言）",
+        "opus_dlg_opus_trans_col_lang": "语言",
+        "opus_dlg_opus_trans_col_text": "译文",
+        "opus_dlg_opus_trans_empty": "（无 — 尚未同步或本无译文）",
+        # 最近新增 7d 窗口
+        "opus_recent_title_n":      "📋 近 7 天新增（{n} 条） · 双击查看详情",
+        # Send-to-Tranzor: userscript 不活时的可操作提示
+        "opus_dlg_send_no_userscript": (
+            "⚠ 已推到本地 Bridge，但没有 Tranzor 浏览器 tab 来拉取。\n"
+            "请确认：① Tranzor Platform 已在浏览器打开；② Tampermonkey "
+            "userscript 已安装并启用。"),
+        "opus_dlg_send_setup_wizard": "启动配置向导…",
+        "opus_dlg_send_pending": "⏳ 已推送 · 等待 Tranzor 浏览器 tab 拉取…",
         # 异常侦测
         "opus_anomaly_normal":      (
             "📊 30 天日均 ~{avg}/天 · 今日 +{today} · "
@@ -415,6 +455,34 @@ class OpusIdMonitorTab:
         # Left: Per-project breakdown
         self.lbl_breakdown = ttk.Label(left, text="", style="CardBold.TLabel")
         self.lbl_breakdown.pack(anchor="w", pady=(0, 4))
+
+        # 搜索栏 —— 输入即过滤，按项目名 / alias 子串忽略大小写匹配。
+        # 项目多了之后必备：18+ 个项目时全屏滚动很烦躁。
+        search_row = ttk.Frame(left, style="App.TFrame")
+        search_row.pack(fill="x", pady=(0, 4))
+        self.bd_search_var = tk.StringVar()
+        self.ent_bd_search = tk.Entry(
+            search_row, textvariable=self.bd_search_var,
+            font=(FONT_FAMILY, 10),
+            bg="#0a0a1a", fg="#fff", insertbackground="#fff",
+            relief="flat")
+        self.ent_bd_search.pack(side="left", fill="x", expand=True, ipady=4)
+        self.bd_search_var.trace_add(
+            "write", lambda *_: self._render_breakdown())
+        # 占位文字 + 清空按钮
+        self.btn_bd_search_clear = tk.Button(
+            search_row, text="✕", command=lambda: self.bd_search_var.set(""),
+            font=(FONT_FAMILY, 10), relief="flat",
+            bg="#0f3460", fg="#ccc", padx=8, pady=0,
+            activebackground="#1a3a6a", activeforeground="#fff",
+            cursor="hand2")
+        self.btn_bd_search_clear.pack(side="left", padx=(4, 0))
+        self.lbl_bd_filter_hint = ttk.Label(
+            search_row, text="", style="Status.TLabel")
+        self.lbl_bd_filter_hint.pack(side="left", padx=(8, 0))
+        # 自己实现 placeholder：StringVar 空时显示灰色提示
+        self._bd_search_placeholder = ""
+
         bd_frame = ttk.Frame(left, style="App.TFrame")
         bd_frame.pack(fill="both", expand=True)
         cols = ("project", "alias", "opus", "files", "langs", "last_added")
@@ -456,15 +524,17 @@ class OpusIdMonitorTab:
         # 监听 resize 后重画，柱状图自适应宽度
         self.canvas_trend.bind("<Configure>", lambda _e: self._draw_trend())
 
-        # Right bottom: Recent additions
+        # Right bottom: Recent additions —— 7 天窗口、可滚动
         self.lbl_recent = ttk.Label(right, text="", style="CardBold.TLabel")
         self.lbl_recent.pack(anchor="w", pady=(0, 4))
         rc_frame = ttk.Frame(right, style="App.TFrame")
         rc_frame.pack(fill="both", expand=True)
         rcols = ("time", "project", "alias", "opus")
+        # 把 height 从 10 调到 20，并 fill="both" expand=True 让它撑满
+        # 右侧剩余空间。滚动条已存在，用户能拖到任何一条。
         self.tree_recent = ttk.Treeview(
             rc_frame, columns=rcols, show="headings",
-            style="Summary.Treeview", selectmode="browse", height=10)
+            style="Summary.Treeview", selectmode="browse", height=20)
         rwidths = {"time": 75, "project": 95, "alias": 50, "opus": 180}
         for c in rcols:
             anchor = "w" if c in ("project", "opus") else "center"
@@ -542,7 +612,8 @@ class OpusIdMonitorTab:
             summary = om.get_summary()
             breakdown = om.get_per_project_breakdown()
             trend = om.get_daily_trend(days=30)
-            recent = om.get_recent_additions(limit=50)
+            # 7 天滚动窗口：用户要求"展示一周内的全部新增内容"
+            recent = om.get_recent_additions(days=7, hard_limit=1000)
             anomaly = om.get_anomaly_stats()
         except Exception as e:
             self.lbl_status.configure(
@@ -588,13 +659,27 @@ class OpusIdMonitorTab:
             "langs": "lang_count",
             "last_added": "last_added",
         }.get(col, "opus_count")
+        # 1) 先应用搜索过滤
+        q = (self.bd_search_var.get() or "").strip().lower()
+        if q:
+            filtered = [r for r in self._breakdown_data
+                        if q in (r.get("project_id") or "").lower()
+                           or q in (r.get("alias") or "").lower()]
+        else:
+            filtered = list(self._breakdown_data)
+        # 2) 再排序
         rows = sorted(
-            self._breakdown_data,
+            filtered,
             key=lambda r: (r.get(key) or 0) if key != "project_id"
                             and key != "alias" and key != "last_added"
                           else (r.get(key) or ""),
             reverse=desc,
         )
+        # 3) 状态提示
+        if hasattr(self, "lbl_bd_filter_hint"):
+            self.lbl_bd_filter_hint.configure(
+                text=self._t("opus_breakdown_filter_hint").format(
+                    shown=len(rows), total=len(self._breakdown_data)))
         self.tree_breakdown.delete(*self.tree_breakdown.get_children())
         # 记下 iid → (project_id, source_kind)，双击展开时用得到。
         # 不再依赖列里渲染的"project_id (MR)"字符串去逆向解析（脆且歧义）。
@@ -629,6 +714,9 @@ class OpusIdMonitorTab:
         self._recent_data = recent
         self._recent_row_keys.clear()
         t = self._t
+        # 标题动态显示当前条数（"近 7 天新增（234 条）"）
+        self.lbl_recent.configure(
+            text=t("opus_recent_title_n").format(n=len(recent)))
         for r in recent:
             opus = r.get("opus_id", "")
             # 中段太长不易看，做软截断；双击仍能拿到完整 opus_id
@@ -1064,9 +1152,14 @@ class OpusDetailDialog(tk.Toplevel):
         full_id_box.pack(fill="x", pady=(0, 8))
 
         # 4-段分解 + 元数据
+        # path_hash 后紧跟"真实路径"一行——这是 debug "为啥 ID 变了" 的核心证据。
+        # 老缓存里没有这字段时，给用户一个明确的"未同步"提示。
+        path = detail.get("source_file_path", "")
+        path_display = path if path else t("opus_dlg_opus_path_missing")
         meta = [
             (t("opus_dlg_opus_alias"),     detail.get("alias", "")),
             (t("opus_dlg_opus_pathhash"),  detail.get("path_hash", "")),
+            (t("opus_dlg_opus_path"),      path_display),
             (t("opus_dlg_opus_logkey"),    detail.get("logical_key", "")),
             (t("opus_dlg_opus_project"),
                 _project_label(detail.get("project_id", ""),
@@ -1082,21 +1175,25 @@ class OpusDetailDialog(tk.Toplevel):
         ]
         meta_frame = ttk.Frame(outer, style="App.TFrame")
         meta_frame.pack(fill="x", pady=(0, 8))
+        # path_hash 和 source_file_path 都用等宽体，方便和原始数据对照看
+        _mono_keys = ("logkey", "path", "alias", "logical")
         for row_i, (label, value) in enumerate(meta):
             tk.Label(
                 meta_frame, text=label + ":",
                 bg="#16213e", fg="#9aa0b0",
                 font=(FONT_FAMILY, 9), anchor="e",
-                width=36,
+                width=46,  # 加宽容纳 "源文件路径..." 这类长 label
             ).grid(row=row_i, column=0, sticky="e", padx=(0, 8), pady=1)
+            is_mono = any(k in label.lower() for k in _mono_keys)
             tk.Label(
                 meta_frame, text=value or "—",
-                bg="#16213e", fg="#fff",
-                font=(FONT_MONO if "logkey" in label.lower()
-                      or "path" in label.lower()
-                      or "alias" in label.lower()
-                      else FONT_FAMILY, 9),
+                bg="#16213e",
+                fg="#fff" if value and value != t("opus_dlg_opus_path_missing")
+                          else "#9aa0b0",  # 未同步行用灰色
+                font=(FONT_MONO if is_mono else FONT_FAMILY, 9),
                 anchor="w",
+                wraplength=520,
+                justify="left",
             ).grid(row=row_i, column=1, sticky="w", pady=1)
 
         # 源文本（可能很长）—— 单独一行可滚动 Text
@@ -1112,20 +1209,36 @@ class OpusDetailDialog(tk.Toplevel):
         src_box.configure(state="disabled")
         src_box.pack(fill="x", pady=(0, 8))
 
-        # 目标语言列表
+        # 译文预览表 —— 每个目标语言一行，左侧 lang code、右侧译文。
+        # 这是用户能在监控面板里直接看翻译的地方，省去跳转 Tranzor 的麻烦。
         langs = detail.get("target_languages") or []
         ttk.Label(
             outer,
-            text=t("opus_dlg_opus_langs").format(n=len(langs)),
+            text=t("opus_dlg_opus_translations").format(n=len(langs)),
             style="CardBold.TLabel").pack(anchor="w", pady=(0, 4))
-        langs_box = tk.Text(
-            outer, height=4, wrap="word",
-            bg="#0a0a1a", fg="#ccc", relief="flat",
-            font=(FONT_MONO, 10), padx=8, pady=6)
-        langs_box.insert("1.0", ", ".join(
-            l.get("target_language", "") for l in langs))
-        langs_box.configure(state="disabled")
-        langs_box.pack(fill="x", pady=(0, 8))
+        trans_frame = ttk.Frame(outer, style="App.TFrame")
+        trans_frame.pack(fill="both", expand=True, pady=(0, 8))
+        tcols = ("lang", "text")
+        trans_tree = ttk.Treeview(
+            trans_frame, columns=tcols, show="headings",
+            style="Summary.Treeview", selectmode="browse", height=8)
+        trans_tree.column("lang", width=80, anchor="center")
+        trans_tree.column("text", width=620, anchor="w")
+        trans_tree.heading("lang", text=t("opus_dlg_opus_trans_col_lang"))
+        trans_tree.heading("text", text=t("opus_dlg_opus_trans_col_text"))
+        tsb = ttk.Scrollbar(trans_frame, orient="vertical",
+                             command=trans_tree.yview)
+        trans_tree.configure(yscrollcommand=tsb.set)
+        trans_tree.pack(side="left", fill="both", expand=True)
+        tsb.pack(side="right", fill="y")
+        empty_marker = t("opus_dlg_opus_trans_empty")
+        for L in langs:
+            text = L.get("translated_text") or empty_marker
+            # 单行 treeview 不能换行，过长截一下；双击源文本框已能看全
+            if len(text) > 200:
+                text = text[:200] + "…"
+            trans_tree.insert("", "end", values=(
+                L.get("target_language", ""), text))
 
         # 操作按钮区：左下 status 反馈条 · 右下 Send / Close
         btn_row = ttk.Frame(outer, style="App.TFrame")
@@ -1257,9 +1370,97 @@ class OpusDetailDialog(tk.Toplevel):
             return
         try:
             bridge.push(envelope)
-            self._send_status.configure(
-                text=t("opus_dlg_send_ok"), fg="#2ecc71")
         except Exception as e:
             self._send_status.configure(
                 text=t("opus_dlg_send_failed").format(error=str(e)[:60]),
+                fg="#ff6b6b")
+            return
+
+        # 关键修复：仅"推到本地 Bridge 成功"不代表用户能在浏览器看到。
+        # userscript 是轮询拉取的；如果 Tranzor 浏览器 tab 没开或脚本没装，
+        # envelope 在 inbox 里待到下次被覆盖也没人看，旧版本却给用户报
+        # "✓ 已发送" — 这就是本次问题的根因。改成查 status_snapshot 的
+        # ``userscript_live``：
+        #   - True  → 真活着，1-2s 内一定会被拉走，报成功
+        #   - False → 没活的；既要明确告知，又要给一键启动 setup wizard 的
+        #             出口，让用户能立刻自救
+        try:
+            snap = bridge.status_snapshot()
+        except Exception:
+            snap = {"userscript_live": False}
+
+        if snap.get("userscript_live"):
+            self._send_status.configure(
+                text=t("opus_dlg_send_ok"), fg="#2ecc71")
+            return
+
+        # Pending 状态：可能 userscript 刚装好还没首次 pull，给它 ~6s
+        # 时间，到点再查一次，避免对正常用户假告警。
+        self._send_status.configure(
+            text=t("opus_dlg_send_pending"), fg="#f1c40f")
+        self.after(6000, self._recheck_userscript_after_send)
+
+    def _recheck_userscript_after_send(self):
+        """推送后 6s 复查 userscript_live。仍未活就给可操作的兜底提示。"""
+        t = self.app._t
+        bridge = getattr(self.app, "bridge", None)
+        if bridge is None:
+            return
+        try:
+            snap = bridge.status_snapshot()
+        except Exception:
+            return
+        if snap.get("userscript_live"):
+            # 6s 内回血了，再次给 OK 反馈
+            self._send_status.configure(
+                text=t("opus_dlg_send_ok"), fg="#2ecc71")
+            return
+
+        # 仍然没活 —— 出兜底提示 + 一键启动 setup wizard
+        self._send_status.configure(
+            text=t("opus_dlg_send_no_userscript"), fg="#f1c40f")
+        # 已经放过 wizard 按钮就别再放一个
+        if getattr(self, "_wizard_btn", None) is not None:
+            return
+        try:
+            from export_gui import _bridge_wizard
+        except Exception:
+            _bridge_wizard = None
+        if _bridge_wizard is None:
+            return
+        # 把 wizard 按钮放到 status 条所在的同一行
+        parent = self._send_status.master
+        self._wizard_btn = self.app._create_button(
+            parent, text=t("opus_dlg_send_setup_wizard"),
+            command=self._open_setup_wizard,
+            style_name="SecondarySmall",
+            font=(FONT_FAMILY, 9),
+            bg="#0f3460", fg="#ccc", padx=10, pady=2)
+        # 注意：tk 子组件不能 pack 到完全填满的 Label 旁边；先 forget
+        # status 再依次 pack 让它们共享水平空间。
+        self._send_status.pack_forget()
+        self._send_status.pack(side="left", fill="x", expand=True)
+        self._wizard_btn.pack(side="left", padx=(8, 0))
+
+    def _open_setup_wizard(self):
+        """让 bridge_setup_wizard 弹出来。复用 app 上现成的方法，避免重复
+        实现"判断要不要打开 / 配什么 instance_id"的逻辑。"""
+        app = self.app
+        # app 在初始化时已经把 wizard 挂到自身上；不同分支 API 名不同，
+        # 兼容下：先看 app.open_bridge_setup_wizard，再看模块 force_open
+        wizard_fn = getattr(app, "open_bridge_setup_wizard", None)
+        if callable(wizard_fn):
+            try:
+                wizard_fn(reason="opus_monitor_send")
+                return
+            except Exception:
+                pass
+        try:
+            from export_gui import _bridge_wizard
+            if _bridge_wizard and hasattr(_bridge_wizard, "force_open"):
+                _bridge_wizard.force_open(app)
+        except Exception as e:
+            self._send_status.configure(
+                text=self.app._t("opus_dlg_send_failed").format(
+                    error=str(e)[:60]),
                 fg="#ff6b6b")
