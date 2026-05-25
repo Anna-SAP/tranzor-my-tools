@@ -41,6 +41,35 @@ def open_in_browser(filepath):
         url = pathlib.Path(abspath).as_uri()
         webbrowser.open(url)
 
+
+def reveal_in_folder(filepath):
+    """Open the OS file manager with ``filepath`` highlighted in its folder.
+
+    Used after non-HTML exports (Excel / JSON) where the file doesn't render
+    in the browser the way HTML reports do — without this the user has no
+    visual cue where the file landed and has to dig around the install dir.
+
+    Falls back to opening the containing folder on Linux (xdg-open has no
+    "select this file" flag). All failures are swallowed and logged so a
+    broken file manager never crashes the export flow.
+    """
+    abspath = os.path.abspath(filepath)
+    folder = os.path.dirname(abspath)
+    try:
+        if IS_MAC:
+            # -R reveals the file in Finder (folder opens with file selected)
+            subprocess.Popen(["open", "-R", abspath])
+        elif platform.system() == "Windows":
+            # Explorer's /select, opens a new window with the file highlighted.
+            # Both "/select,<path>" and "/select, <path>" are accepted, so the
+            # list form is safe even though argv joining inserts a space.
+            subprocess.Popen(["explorer", "/select,", abspath])
+        else:
+            # Linux: best-effort — just open the containing folder.
+            subprocess.Popen(["xdg-open", folder])
+    except Exception as e:
+        print(f"[reveal] failed for {abspath!r}: {e!r}")
+
 try:
     import requests
 except ImportError:
@@ -151,6 +180,7 @@ STRINGS = {
         "status_loading":     "Loading",
         "status_exporting":   "Exporting…",
         "status_done":        "✓ Export complete",
+        "status_saved":       "✓ Saved: {filename}",
         "status_no_data":     "Done (no data or error)",
         "log_header":         "Log Output",
         "footer":             "Tranzor Platform · Internal Tool · v2.0",
@@ -275,6 +305,7 @@ STRINGS = {
         "status_loading":     "加载中",
         "status_exporting":   "正在导出…",
         "status_done":        "✓ 导出完成",
+        "status_saved":       "✓ 已保存：{filename}",
         "status_no_data":     "完成（无数据或出错）",
         "log_header":         "运行日志",
         "footer":             "Tranzor Platform · Internal Tool · v2.0",
@@ -1566,12 +1597,18 @@ class ExportApp:
             bridge_info = self._bridge_info_for_export()
             # open_after=False — _on_done handles the auto-open so we don't
             # spawn two browser tabs for the same report.
+            # Capture the actual saved path so the UI reflects PermissionError
+            # renames (e.g. "..._1.json") instead of pointing at the stale
+            # filename the GUI originally requested.
             if export_type == "translations":
-                export_translations.save_file(rows, filepath, label, fmt, bridge_info=bridge_info, open_after=False)
+                saved = export_translations.save_file(
+                    rows, filepath, label, fmt,
+                    bridge_info=bridge_info, open_after=False)
             else:
-                export_changes.save_file(rows, filepath, label, fmt, open_after=False)
+                saved = export_changes.save_file(
+                    rows, filepath, label, fmt, open_after=False)
 
-            self.root.after(0, self._on_done, filepath, True)
+            self.root.after(0, self._on_done, saved or filepath, True)
 
         except Exception as e:
             err_msg = STRINGS[lang]["export_failed"].format(error=e)
@@ -1597,10 +1634,20 @@ class ExportApp:
             else:
                 self.btn_open.configure(state="normal", fg="#fff",
                                          bg=self.SUCCESS)
-            self.status_label.configure(text=self._t("status_done"))
-            # Auto-open HTML reports in browser
-            if filepath.lower().endswith(".html"):
+            # Show the actual filename so the user immediately sees where the
+            # export went (the old "✓ Export complete" gave no hint at all).
+            basename = os.path.basename(filepath)
+            self.status_label.configure(
+                text=self._t("status_saved").format(filename=basename))
+            lower = filepath.lower()
+            if lower.endswith(".html"):
+                # HTML self-renders in a browser tab — that's enough wayfinding.
                 open_in_browser(filepath)
+            else:
+                # JSON / Excel don't render visibly: pop the containing folder
+                # so the user can grab the file (drag into chat, attach to
+                # email, etc.) without hunting through the install dir.
+                reveal_in_folder(filepath)
         else:
             self.status_label.configure(text=self._t("status_no_data"))
 
