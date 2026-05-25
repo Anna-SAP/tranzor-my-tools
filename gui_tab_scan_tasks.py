@@ -18,7 +18,7 @@ from datetime import date, datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import export_mr_pipeline as mr_api
-from export_gui import FONT_FAMILY, IS_MAC, reveal_in_folder
+from export_gui import FONT_FAMILY, IS_MAC, reveal_in_folder, sanitize_for_filename
 
 
 STRINGS = {
@@ -488,6 +488,11 @@ class ScanTasksTab:
         task_id = tags[0] if tags else None
         if not task_id:
             return
+        # tree cols: (idx, task_name, project, base_ref, head_ref, status,
+        # output_mode, created) — pull task_name straight from the visible
+        # row so the export filename matches what the user just clicked on.
+        values = self.scan_tree.item(sel[0], "values")
+        task_name = str(values[1] or "") if values and len(values) > 1 else ""
         fmt = self.scan_fmt_var.get()
         export_type = self.scan_export_type_var.get()
         if IS_MAC:
@@ -496,9 +501,10 @@ class ScanTasksTab:
             self.btn_scan_export.configure(state="disabled")
         self.lbl_scan_status_bar.configure(text=self._t("status_exporting"))
         threading.Thread(target=self._run_export,
-                         args=(task_id, fmt, export_type), daemon=True).start()
+                         args=(task_id, fmt, export_type, task_name),
+                         daemon=True).start()
 
-    def _run_export(self, task_id, fmt, export_type="changes"):
+    def _run_export(self, task_id, fmt, export_type="changes", task_name=""):
         try:
             if export_type == "changes":
                 changes = mr_api.detect_scan_changes(task_id)
@@ -512,7 +518,16 @@ class ScanTasksTab:
             id_tag = task_id[:8]
             ext = {"xlsx": ".xlsx", "json": ".json"}.get(fmt, ".html")
             today = date.today().isoformat()
-            filename = f"scan_task_{id_tag}_{type_tag}_{today}{ext}"
+            # Embed task_name (e.g. "iva 260520" → "iva_260520") before the
+            # uuid prefix so the filename is human-identifiable at a glance;
+            # the uuid prefix stays as a uniqueness guarantee for duplicate
+            # task names on the same day.
+            name_tag = sanitize_for_filename(task_name)
+            parts = ["scan_task"]
+            if name_tag:
+                parts.append(name_tag)
+            parts.extend([id_tag, type_tag, today])
+            filename = "_".join(parts) + ext
             script_dir = os.path.dirname(os.path.abspath(__file__))
             filepath = os.path.join(script_dir, filename)
             label = f"Scan Task {id_tag} — {type_tag} (exported {today})"
