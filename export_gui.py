@@ -6,6 +6,7 @@ Supports English / Chinese interface language toggle.
 """
 
 import os
+import re
 import sys
 import io
 import platform
@@ -40,6 +41,32 @@ def open_in_browser(filepath):
         import pathlib
         url = pathlib.Path(abspath).as_uri()
         webbrowser.open(url)
+
+
+def sanitize_for_filename(name, max_len=40):
+    """Coerce a free-form identifier (task name, MR title, …) into a chunk
+    that is safe to embed in a filename across Windows / macOS / Linux.
+
+    - Drops characters Windows rejects (<>:"/\\|?*) and control chars.
+    - Collapses internal whitespace and runs of separators so the result
+      reads cleanly when concatenated with `_` joiners.
+    - Trims to ``max_len`` so a 200-char MR title can't blow past the
+      Windows MAX_PATH cliff.
+    - Returns "" if nothing useful survives — callers should treat that
+      as "skip this segment" rather than concatenating an empty token.
+    """
+    if not name:
+        return ""
+    s = str(name).strip()
+    # Strip filesystem-illegal characters and ASCII control bytes.
+    s = re.sub(r'[<>:"/\\|?*\x00-\x1F]', "-", s)
+    # Whitespace → single _ so "iva 260520" becomes "iva_260520".
+    s = re.sub(r"\s+", "_", s)
+    # Collapse runs of dashes/underscores/dots that the cleanup steps left.
+    s = re.sub(r"[-_.]{2,}", "-", s)
+    # Trim leading/trailing punctuation that would make the join look odd.
+    s = s.strip("-_.")
+    return s[:max_len]
 
 
 def reveal_in_folder(filepath):

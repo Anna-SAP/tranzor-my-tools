@@ -12,7 +12,7 @@ from datetime import date, datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import export_mr_pipeline as mr_api
 import quality_overview as qa
-from export_gui import FONT_FAMILY, IS_MAC, reveal_in_folder
+from export_gui import FONT_FAMILY, IS_MAC, reveal_in_folder, sanitize_for_filename
 
 
 # ============================================================
@@ -616,9 +616,16 @@ class MRPipelineTab:
 
     def _on_export(self):
         sel = self.mr_tree.selection()
+        mr_iid = ""
         if sel:
             tags = self.mr_tree.item(sel[0], "tags")
             task_id = tags[0] if tags else None
+            # tree cols: (idx, project, mr, release, status, avg_score, created, duration)
+            # — pull MR# from the visible row so we can stamp it onto the
+            #   filename without an extra HTTP round-trip.
+            values = self.mr_tree.item(sel[0], "values")
+            if values and len(values) > 2:
+                mr_iid = str(values[2] or "")
         else:
             task_id = None  # Export all tasks
         fmt = self.mr_fmt_var.get()
@@ -628,9 +635,11 @@ class MRPipelineTab:
         else:
             self.btn_mr_export.configure(state="disabled")
         self.lbl_mr_status_bar.configure(text=self._t("status_exporting"))
-        threading.Thread(target=self._run_export, args=(task_id, fmt, export_type), daemon=True).start()
+        threading.Thread(target=self._run_export,
+                         args=(task_id, fmt, export_type, mr_iid),
+                         daemon=True).start()
 
-    def _run_export(self, task_id, fmt, export_type="changes"):
+    def _run_export(self, task_id, fmt, export_type="changes", mr_iid=""):
         try:
             if export_type == "changes":
                 if not task_id:
@@ -665,7 +674,15 @@ class MRPipelineTab:
 
             ext = {"xlsx": ".xlsx", "json": ".json"}.get(fmt, ".html")
             today = date.today().isoformat()
-            filename = f"mr_pipeline_{id_tag}_{type_tag}_{today}{ext}"
+            # Embed MR# (e.g. "MR40273") before the task uuid prefix so the
+            # filename is human-identifiable at a glance; the uuid prefix
+            # stays as a uniqueness guarantee for repeated MR translations.
+            mr_tag = sanitize_for_filename(f"MR{mr_iid}") if mr_iid else ""
+            parts = ["mr_pipeline"]
+            if mr_tag:
+                parts.append(mr_tag)
+            parts.extend([id_tag, type_tag, today])
+            filename = "_".join(parts) + ext
             script_dir = os.path.dirname(os.path.abspath(__file__))
             filepath = os.path.join(script_dir, filename)
             label = f"MR Pipeline {id_tag} — {type_tag} (exported {today})"
