@@ -177,6 +177,18 @@ except Exception as _tci_e:  # pragma: no cover
 else:
     _tci_import_error = None
 
+# Optional: OPUS ID Monitor tab — local SQLite-backed inventory of every
+# opus_id Tranzor has produced, with incremental sync from MR + Scan APIs.
+# Lets the user see "total / new today / per-project breakdown" without
+# digging through individual MR exports.
+try:
+    import gui_tab_opus_id_monitor as _opus_tab_mod
+except Exception as _opus_e:  # pragma: no cover
+    _opus_tab_mod = None
+    _opus_import_error = _opus_e
+else:
+    _opus_import_error = None
+
 # ---------------------------------------------------------------------------
 # Tranzor API config (reuse from export_changes)
 # ---------------------------------------------------------------------------
@@ -476,6 +488,14 @@ if _tw_tab_mod is not None:
 if _tci_tab_mod is not None:
     try:
         for _lang_code, _extra in _tci_tab_mod.STRINGS.items():
+            STRINGS.setdefault(_lang_code, {}).update(_extra)
+    except Exception:
+        pass
+
+# Merge in strings from the optional OPUS ID Monitor tab.
+if _opus_tab_mod is not None:
+    try:
+        for _lang_code, _extra in _opus_tab_mod.STRINGS.items():
             STRINGS.setdefault(_lang_code, {}).update(_extra)
     except Exception:
         pass
@@ -961,6 +981,21 @@ class ExportApp:
                 print(f"[TM & Context Insight tab] init failed: {_e}")
                 self.tci_tab = None
 
+        # --- Tab 9: OPUS ID Monitor (optional, pure additive) ---
+        # 本地 SQLite 缓存 Tranzor 出过的所有 opus_id，随时随地看总量 / 新增 /
+        # 按项目分布；首屏纯本地读，不依赖网络。
+        self.opus_tab = None
+        self._opus_tab_index = None
+        if _opus_tab_mod is not None:
+            try:
+                tab_opus = ttk.Frame(self.notebook, style="App.TFrame")
+                self.notebook.add(tab_opus, text="")
+                self.opus_tab = _opus_tab_mod.OpusIdMonitorTab(tab_opus, self)
+                self._opus_tab_index = self.notebook.index(tab_opus)
+            except Exception as _e:
+                print(f"[OPUS ID Monitor tab] init failed: {_e}")
+                self.opus_tab = None
+
         # ═══════════════════════════════════════════
         # TAB 1 CONTENTS (File Translation — preserved)
         # ═══════════════════════════════════════════
@@ -1276,6 +1311,12 @@ class ExportApp:
             try:
                 self.notebook.tab(self._tci_tab_index, text=self._t("tab_tm_context_insight"))
                 self.tci_tab.refresh_text()
+            except Exception:
+                pass
+        if self.opus_tab is not None and self._opus_tab_index is not None:
+            try:
+                self.notebook.tab(self._opus_tab_index, text=self._t("tab_opus_monitor"))
+                self.opus_tab.refresh_text()
             except Exception:
                 pass
 
