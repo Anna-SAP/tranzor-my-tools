@@ -41,6 +41,9 @@ from typing import Iterable
 # 复用现有 Tranzor HTTP 封装，避免与 MR Pipeline tab 重复鉴权 / 重试逻辑。
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import export_mr_pipeline as mr_api
+# Legacy / File Translation API 走 export_translations 里的现有 helper；
+# 它对应的是 /api/v1/legacy/tasks 那一条链路。
+import export_translations as legacy_api
 
 
 # ---------------------------------------------------------------------------
@@ -246,6 +249,7 @@ def _drain_results_into_db(
     log_stage: str,
     cancel_event: threading.Event | None,
     stats: dict,
+    default_project_fn=None,
 ) -> None:
     """把 ``tasks`` 列表的 results 用线程池并行拉取，按完成顺序串行落库。
 
@@ -304,12 +308,19 @@ def _drain_results_into_db(
                 continue
 
             translations = (results or {}).get("translations") or []
+            # legacy 路径用 task_name 顶 project_id；MR/Scan 用真实 project_id。
+            proj = task.get("project_id", "")
+            if not proj and default_project_fn:
+                try:
+                    proj = default_project_fn(task) or ""
+                except Exception:
+                    proj = ""
             inserted = _bulk_upsert(
                 conn,
                 translations,
                 source_kind=source_kind,
                 default_task_id=task_id,
-                default_project_id=task.get("project_id", ""),
+                default_project_id=proj,
                 default_release=task.get("release", ""),
                 default_mr_iid=task.get("merge_request_iid"),
                 task_created_at=task.get("created_at") or "",
@@ -464,6 +475,95 @@ def _sync_scan_tasks(
 
 
 # ---------------------------------------------------------------------------
+# 同步：File Translation（legacy task）
+# ---------------------------------------------------------------------------
+def _sync_legacy_tasks(
+    conn,
+    *,
+    since_iso: str | None,
+    progress_callback=None,
+    cancel_event: threading.Event | None = None,
+) -> dict:
+    """同步 File Translation（legacy）任务的 translations。
+
+    与 MR/Scan 不同：
+      - Legacy API 走 /api/v1/legacy/tasks，shape 是 ``{tasks: [...]}``，
+        每个 task 没有 ``project_id`` 概念（用户上传文件，一个任务对应一份文件）；
+      - 我们把 ``task_name`` 当作 ``project_id`` 落库，让 breakdown 仍能
+        按"哪份上传"聚合，颗粒度对得上用户的心智模型。
+      - entries 直接带 opus_id / target_language / source_text，
+        和 MR/Scan 同一套 ``_bulk_upsert`` 完全复用。
+    """
+    log = progress_callback or (lambda *a, **kw: None)
+    stats = {"tasks_seen": 0, "rows_inserted": 0}
+
+    log("legacy_list", 0, 0)
+    try:
+        # Legacy API 不接收 since 过滤，只能拿全量后我们这边按 created_at 裁。
+        all_legacy = legacy_api.fetch_tasks()
+    except Exception as e:
+        log("legacy_list_error", 0, 0, error=str(e))
+        return stats
+
+    # 按 created_at 裁剪（增量模式下）。Legacy task 字段名可能是 created_at
+    # 也可能是其他；保险起见两个都试。
+    filtered = []
+    for t in all_legacy:
+        created = t.get("created_at") or t.get("createdAt") or ""
+        if since_iso and created and created < since_iso:
+            continue
+        filtered.append(t)
+    log("legacy_list", len(filtered), len(all_legacy))
+
+    log("legacy_results", 0, len(filtered))
+
+    # Legacy API 的"results"对应 fetch_all_translations(task_id)。
+    # 注意它**内部已经做了并发分页**，所以我们这层只用 1 个 worker
+    # 防止把后端打挂；上面 MAX_FETCH_WORKERS 是 MR/Scan 的并发度，
+    # legacy 路径在 fetch_all_translations 内部自带 6 个 page worker。
+    def _fetch_legacy(task):
+        task_id = task.get("id") or task.get("task_id") or ""
+        if not task_id:
+            return {"translations": []}
+        try:
+            entries = legacy_api.fetch_all_translations(task_id)
+        except Exception:
+            raise
+        # 转译字段名让 _bulk_upsert 能直接用
+        translations = [{
+            "opus_id": e.get("opus_id") or "",
+            "target_language": e.get("target_language") or "",
+            "source_text": e.get("source_text") or "",
+            "task_id": str(task_id),
+        } for e in entries]
+        return {"translations": translations}
+
+    # legacy fetch 内部已经并发了，外层我们用更小的并发度（2）
+    # 避免和它内部的 6 路并发叠乘，把 Tranzor 拍懵。
+    original_workers = MAX_FETCH_WORKERS
+    try:
+        globals()["MAX_FETCH_WORKERS"] = 2
+        _drain_results_into_db(
+            filtered,
+            fetch_fn=_fetch_legacy,
+            conn=conn,
+            source_kind="file",
+            log=log,
+            log_stage="legacy_results",
+            cancel_event=cancel_event,
+            stats=stats,
+            # Legacy 没有 project_id，把 task_name 顶上去
+            default_project_fn=lambda t: (
+                t.get("task_name") or f"Task {t.get('id', '')}"),
+        )
+    finally:
+        globals()["MAX_FETCH_WORKERS"] = original_workers
+
+    _set_meta(conn, "legacy_total_tasks", str(len(all_legacy)))
+    return stats
+
+
+# ---------------------------------------------------------------------------
 # 公开同步入口
 # ---------------------------------------------------------------------------
 def sync_incremental(
@@ -486,6 +586,10 @@ def sync_incremental(
             conn, since_iso=last_sync,
             progress_callback=progress_callback,
             cancel_event=cancel_event)
+        legacy_stats = _sync_legacy_tasks(
+            conn, since_iso=last_sync,
+            progress_callback=progress_callback,
+            cancel_event=cancel_event)
 
         if not (cancel_event and cancel_event.is_set()):
             _set_meta(conn, "last_sync_at", sync_started)
@@ -496,6 +600,7 @@ def sync_incremental(
             "started_at": sync_started,
             "mr": mr_stats,
             "scan": scan_stats,
+            "legacy": legacy_stats,
         }
 
 
@@ -517,6 +622,10 @@ def sync_full(
             conn, since_iso=None,
             progress_callback=progress_callback,
             cancel_event=cancel_event)
+        legacy_stats = _sync_legacy_tasks(
+            conn, since_iso=None,
+            progress_callback=progress_callback,
+            cancel_event=cancel_event)
         if not (cancel_event and cancel_event.is_set()):
             _set_meta(conn, "last_sync_at", sync_started)
             _set_meta(conn, "last_full_sync_at", sync_started)
@@ -525,6 +634,7 @@ def sync_full(
             "started_at": sync_started,
             "mr": mr_stats,
             "scan": scan_stats,
+            "legacy": legacy_stats,
         }
 
 
@@ -586,13 +696,19 @@ def get_summary(db_path: str | None = None) -> dict:
 
 
 def get_per_project_breakdown(db_path: str | None = None) -> list[dict]:
-    """每个 project_id 的 opus_id 数 / 文件指纹数 / 最近一次新增时间。"""
+    """每个 (project_id, source_kind) 的 opus_id 数 / 文件指纹数 / 最近新增。
+
+    同一 project 在 MR 和 Scan 两侧都出过翻译会被拆成两行 —— 这是 by design：
+    用户能立刻看清楚某个项目"哪条管线在跑、谁多谁少"。UI 端会把它渲染成
+    "web/web (MR)" 这样带源头标签的可读形态。
+    """
     init_db(db_path)
     with _connect(db_path) as conn:
         cur = conn.execute(
             """
             SELECT
                 project_id,
+                source_kind,
                 COALESCE(MAX(alias), '') AS alias,
                 COUNT(DISTINCT opus_id)                  AS opus_count,
                 COUNT(DISTINCT alias || ':' || path_hash) AS path_count,
@@ -601,11 +717,132 @@ def get_per_project_breakdown(db_path: str | None = None) -> list[dict]:
                 COUNT(*)                                 AS row_count
             FROM opus_index
             WHERE project_id != ''
-            GROUP BY project_id
+            GROUP BY project_id, source_kind
             ORDER BY opus_count DESC
             """
         )
         return [dict(r) for r in cur.fetchall()]
+
+
+def get_project_detail(
+    project_id: str,
+    source_kind: str | None = None,
+    *,
+    files_limit: int = 50,
+    samples_per_file: int = 5,
+    db_path: str | None = None,
+) -> dict:
+    """点击 "Breakdown by project" 某一行后展示的钻取数据。
+
+    Returns:
+        {
+          "project_id": str,
+          "source_kind": str,
+          "summary": {opus_count, path_count, lang_count, row_count,
+                      first_seen, last_added},
+          "files": [{path_hash, opus_count, lang_count, last_added,
+                     samples: [{opus_id, logical_key}, ...]}, ...]
+        }
+    """
+    init_db(db_path)
+    with _connect(db_path) as conn:
+        where = ["project_id = ?"]
+        params: list = [project_id]
+        if source_kind:
+            where.append("source_kind = ?")
+            params.append(source_kind)
+        where_sql = " AND ".join(where)
+
+        # Project-level summary
+        cur = conn.execute(
+            f"""
+            SELECT
+                COUNT(DISTINCT opus_id)                  AS opus_count,
+                COUNT(DISTINCT alias || ':' || path_hash) AS path_count,
+                COUNT(DISTINCT target_language)          AS lang_count,
+                COUNT(*)                                 AS row_count,
+                MIN(first_seen)                          AS first_seen,
+                MAX(first_seen)                          AS last_added
+            FROM opus_index WHERE {where_sql}
+            """, params)
+        summary = dict(cur.fetchone() or {})
+
+        # Per-file (path_hash) breakdown
+        cur = conn.execute(
+            f"""
+            SELECT
+                alias, path_hash,
+                COUNT(DISTINCT opus_id)         AS opus_count,
+                COUNT(DISTINCT target_language) AS lang_count,
+                MAX(first_seen)                 AS last_added
+            FROM opus_index
+            WHERE {where_sql} AND path_hash != ''
+            GROUP BY alias, path_hash
+            ORDER BY opus_count DESC
+            LIMIT ?
+            """, params + [files_limit])
+        files = [dict(r) for r in cur.fetchall()]
+
+        # 给每个 file 配几条样本 opus_id，方便用户立刻看出"这文件里都是啥"
+        for f in files:
+            cur = conn.execute(
+                """
+                SELECT DISTINCT opus_id, logical_key, source_text
+                FROM opus_index
+                WHERE project_id = ? AND alias = ? AND path_hash = ?
+                ORDER BY first_seen DESC
+                LIMIT ?
+                """, (project_id, f["alias"], f["path_hash"], samples_per_file))
+            f["samples"] = [dict(r) for r in cur.fetchall()]
+
+        return {
+            "project_id": project_id,
+            "source_kind": source_kind or "",
+            "summary": summary,
+            "files": files,
+        }
+
+
+def get_opus_detail(opus_id: str, db_path: str | None = None) -> dict:
+    """点击 "Recently added" 某一行后展示的 opus_id 详情。"""
+    init_db(db_path)
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            """
+            SELECT
+                opus_id, alias, path_hash, logical_key,
+                project_id, source_kind, release, mr_iid,
+                target_language, source_text, task_id,
+                task_created_at, first_seen
+            FROM opus_index
+            WHERE opus_id = ?
+            ORDER BY target_language
+            """, (opus_id,))
+        rows = [dict(r) for r in cur.fetchall()]
+        if not rows:
+            return {"opus_id": opus_id, "found": False, "rows": []}
+        # 顶层共用字段（取第一行就行 —— 同一 opus_id 的元数据相同）
+        head = rows[0]
+        return {
+            "opus_id": opus_id,
+            "found": True,
+            "alias": head["alias"],
+            "path_hash": head["path_hash"],
+            "logical_key": head["logical_key"],
+            "project_id": head["project_id"],
+            "source_kind": head["source_kind"],
+            "release": head["release"],
+            "mr_iid": head["mr_iid"],
+            "task_id": head["task_id"],
+            "task_created_at": head["task_created_at"],
+            "first_seen": head["first_seen"],
+            "source_text": head["source_text"],
+            "target_languages": [
+                {"target_language": r["target_language"],
+                 "first_seen": r["first_seen"]}
+                for r in rows
+            ],
+        }
 
 
 def get_daily_trend(days: int = 30, db_path: str | None = None) -> list[dict]:
@@ -696,4 +933,6 @@ __all__ = [
     "get_per_project_breakdown",
     "get_daily_trend",
     "get_recent_additions",
+    "get_project_detail",
+    "get_opus_detail",
 ]
