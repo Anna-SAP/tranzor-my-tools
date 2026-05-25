@@ -191,6 +191,20 @@ STRINGS = {
         "opus_path_lookup_col_opus":   "OPUS IDs",
         "opus_path_lookup_col_langs":  "Langs",
         "opus_path_lookup_col_path":   "Known source path",
+        # v5: backfill button + missing-path cell hint
+        "opus_backfill_btn":        "📥 Backfill paths",
+        "opus_backfill_btn_tip":    (
+            "Cross-source path-backfill: Tranzor's MR / Legacy APIs do NOT\n"
+            "expose source_file_path — only the Scan API does. But path_hash\n"
+            "is md5(path), which is source-independent. So this tool copies\n"
+            "Scan-side path knowledge to MR / Legacy rows that share the\n"
+            "same path_hash.\n\n"
+            "Runs automatically at the end of every sync; manual button is\n"
+            "for instantly applying it to existing caches without re-syncing."),
+        "opus_backfill_done":       "✓ Backfill done · {filled} hashes filled · {rows} rows updated",
+        "opus_backfill_running":    "⏳ Backfilling paths…",
+        "opus_path_cell_empty":     "—",
+        "opus_path_cell_unknown":   "— (no Scan saw this file)",
     },
     "zh": {
         "tab_opus_monitor":         "🧬 OPUS ID 监控",
@@ -349,6 +363,19 @@ STRINGS = {
         "opus_path_lookup_col_opus":   "OPUS ID",
         "opus_path_lookup_col_langs":  "语言",
         "opus_path_lookup_col_path":   "已知源路径",
+        # v5: 跨源回填按钮 + 路径缺失提示文案
+        "opus_backfill_btn":        "📥 回填路径",
+        "opus_backfill_btn_tip":    (
+            "跨源回填源文件路径：Tranzor 的 MR / Legacy API 不暴露\n"
+            "source_file_path，只有 Scan API 暴露。但 path_hash = md5(path)\n"
+            "本身和『哪条管线产出』无关 —— 把 Scan 侧已知的『hash→path』\n"
+            "映射，复制到所有同 path_hash 的 MR / Legacy 行上。\n\n"
+            "每次同步结束自动跑一次；手动按钮用于在不重新同步的情况下\n"
+            "立刻对已有缓存执行一次回填。"),
+        "opus_backfill_done":       "✓ 回填完成 · 填充 {filled} 个 hash · 更新 {rows} 行",
+        "opus_backfill_running":    "⏳ 正在回填路径…",
+        "opus_path_cell_empty":     "—",
+        "opus_path_cell_unknown":   "—（没有 Scan 任务见过这个文件）",
     },
 }
 
@@ -516,6 +543,17 @@ class OpusIdMonitorTab:
         self.btn_path_lookup.pack(side="right", padx=(0, 8))
         from export_gui import Tooltip as _Tooltip
         self._tip_path_lookup = _Tooltip(self.btn_path_lookup, text="")
+
+        # 跨源回填按钮：把 Scan 已知 path 同步到所有同 path_hash 的
+        # MR/Legacy 行；同步时已自动跑，这是给"懒得重同步只想立刻补齐"
+        # 的用户一条快速通路。
+        self.btn_backfill = self.app._create_button(
+            topbar, text="", command=self._on_backfill,
+            style_name="SecondarySmall",
+            font=(FONT_FAMILY, 10),
+            bg="#0f3460", fg="#ccc", padx=14, pady=4)
+        self.btn_backfill.pack(side="right", padx=(0, 8))
+        self._tip_backfill = _Tooltip(self.btn_backfill, text="")
 
         # ── Summary cards row ──
         cards_row = ttk.Frame(content, style="App.TFrame")
@@ -700,6 +738,8 @@ class OpusIdMonitorTab:
         self._tip_sync_cancel.set_text(t("opus_sync_cancel_tip"))
         self.btn_path_lookup.configure(text=t("opus_path_lookup_btn"))
         self._tip_path_lookup.set_text(t("opus_path_lookup_btn_tip"))
+        self.btn_backfill.configure(text=t("opus_backfill_btn"))
+        self._tip_backfill.set_text(t("opus_backfill_btn_tip"))
         self.lbl_breakdown.configure(text=t("opus_breakdown_title"))
         self.lbl_trend.configure(text=t("opus_trend_title"))
         self.lbl_recent.configure(text=t("opus_recent_title"))
@@ -1068,6 +1108,27 @@ class OpusIdMonitorTab:
         里的"路径未知"行触发；prefill 用来预填一个 32 位 hash。"""
         PathHashLookupDialog(self.parent, self.app, prefill=prefill)
 
+    def _on_backfill(self):
+        """手动触发跨源路径回填 —— 不阻塞 UI（虽然典型耗时 <1s）。"""
+        t = self._t
+        self.lbl_status.configure(text=t("opus_backfill_running"))
+
+        def _run():
+            try:
+                stats = om.backfill_missing_paths()
+                msg = t("opus_backfill_done").format(
+                    filled=stats.get("distinct_path_hashes_filled", 0),
+                    rows=stats.get("rows_updated", 0))
+                self.parent.after(0, lambda: self.lbl_status.configure(text=msg))
+                # 回填完了刷新一下面板，让用户立刻看到效果
+                self.parent.after(150, self._refresh_from_cache)
+            except Exception as e:
+                err = str(e)[:80]
+                self.parent.after(0, lambda: self.lbl_status.configure(
+                    text=t("opus_status_failed").format(error=err)))
+
+        threading.Thread(target=_run, daemon=True).start()
+
     def _set_sync_buttons(self, *, running: bool):
         new_state = ["disabled"] if running else ["!disabled"]
         cancel_state = ["!disabled"] if running else ["disabled"]
@@ -1235,6 +1296,7 @@ class ProjectDetailDialog(tk.Toplevel):
 
         # iid → (alias, path_hash) 让双击能精确钻取（不依赖列文本解析）
         self._file_row_keys: dict[str, tuple[str, str]] = {}
+        n_empty_paths = 0
         for f in files:
             # 把样本拼成一串短文本，列内能看到 3-5 个
             samples = f.get("samples") or []
@@ -1242,7 +1304,10 @@ class ProjectDetailDialog(tk.Toplevel):
                 (s.get("logical_key") or "")[:14] for s in samples[:5]
             ]
             sample_text = ", ".join(k for k in sample_keys if k)
-            path = f.get("source_file_path") or "—"
+            raw_path = f.get("source_file_path") or ""
+            path = raw_path if raw_path else "—"
+            if not raw_path:
+                n_empty_paths += 1
             alias = f.get("alias", "")
             path_hash = f.get("path_hash", "")
             iid = tree.insert("", "end", values=(
@@ -1257,6 +1322,26 @@ class ProjectDetailDialog(tk.Toplevel):
 
         # 双击文件行 → 弹 FileDetailDialog（该文件下所有 opus_id 一览）
         tree.bind("<Double-1>", self._on_file_dbl)
+
+        # 路径列有空值时，给用户一行明确解释 —— 直接告诉他这不是 bug
+        # 而是上游 API 的客观限制，并指引到「回填路径」按钮。
+        if n_empty_paths > 0:
+            tk.Label(
+                outer,
+                text=(
+                    f"ℹ️  {n_empty_paths}/{len(files)} files show '—' for path "
+                    f"— Tranzor's MR/Legacy APIs don't expose source_file_path. "
+                    f"Click '📥 Backfill paths' if you've synced a Scan task "
+                    f"covering the same files."
+                    if self.app.lang == "en" else
+                    f"ℹ️  {n_empty_paths}/{len(files)} 个文件的路径显示为 '—' "
+                    f"—— 因为 Tranzor 的 MR/Legacy API 不返回 source_file_path。"
+                    f"如有 Scan 任务覆盖同一文件，点顶部「📥 回填路径」即可补齐。"
+                ),
+                bg="#16213e", fg="#9aa0b0",
+                font=(FONT_FAMILY, 9), wraplength=820,
+                justify="left", anchor="w",
+            ).pack(fill="x", pady=(6, 0))
 
         # Close button row
         btn_row = ttk.Frame(outer, style="App.TFrame")
@@ -1918,12 +2003,42 @@ class PathHashLookupDialog(tk.Toplevel):
             self.lbl_status.configure(text=t("opus_path_lookup_no_match"))
             return
 
+        n_empty = 0
+        any_known_path = ""
         for m in matches:
+            raw_path = m.get("source_file_path") or ""
+            if not raw_path:
+                n_empty += 1
+            elif not any_known_path:
+                any_known_path = raw_path
             self._tree.insert("", "end", values=(
                 m.get("project_id", ""),
                 m.get("alias", ""),
                 _source_label(m.get("source_kind", ""), t),
                 f"{m.get('opus_count', 0):,}",
                 m.get("lang_count", 0),
-                m.get("source_file_path") or "—",
+                raw_path or "—",
             ))
+
+        # 友好提示：如果有 MR/Legacy 行的 path 为空但同 hash 的另一行（通常 Scan）
+        # 有 path，说明 backfill 还没跑（或新数据进来还没回填）。明确告知。
+        if n_empty > 0 and any_known_path:
+            self.lbl_status.configure(
+                fg="#f1c40f",
+                text=(
+                    f"⚠ {n_empty} rows show '—'; click '📥 Backfill paths' "
+                    f"to copy the known path ({any_known_path[:60]}...) into them."
+                    if self.app.lang == "en" else
+                    f"⚠ 有 {n_empty} 行显示 '—'；点顶部「📥 回填路径」"
+                    f"即可把已知路径 ({any_known_path[:60]}...) 复制到这些行。"
+                ))
+        elif n_empty > 0:
+            self.lbl_status.configure(
+                fg="#9aa0b0",
+                text=(
+                    f"ℹ {n_empty} rows show '—' — no Scan task has covered "
+                    f"this file yet, so Tranzor hasn't surfaced its path."
+                    if self.app.lang == "en" else
+                    f"ℹ {n_empty} 行显示 '—' —— 还没有 Scan 任务覆盖该文件，"
+                    f"Tranzor 尚未提供它的路径。"
+                ))

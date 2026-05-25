@@ -617,14 +617,26 @@ def sync_incremental(
         if not (cancel_event and cancel_event.is_set()):
             _set_meta(conn, "last_sync_at", sync_started)
 
-        return {
-            "mode": "incremental",
-            "since": last_sync,
-            "started_at": sync_started,
-            "mr": mr_stats,
-            "scan": scan_stats,
-            "legacy": legacy_stats,
-        }
+    # 关键：同步落库后再跑 backfill —— Scan 这次新拉到的 path 会立即回填
+    # 到所有同 path_hash 的 MR/Legacy 行；不用等用户手动点按钮。
+    # 必须 ``在 _connect 退出后单独调一次``，因为 backfill 自己也要开连接，
+    # 而 Python 的 sqlite3 不允许同连接被未提交事务挡住。
+    backfill_stats = {}
+    if not (cancel_event and cancel_event.is_set()):
+        try:
+            backfill_stats = backfill_missing_paths(db_path)
+        except Exception as e:
+            backfill_stats = {"error": str(e)}
+
+    return {
+        "mode": "incremental",
+        "since": last_sync,
+        "started_at": sync_started,
+        "mr": mr_stats,
+        "scan": scan_stats,
+        "legacy": legacy_stats,
+        "backfill": backfill_stats,
+    }
 
 
 def sync_full(
@@ -652,13 +664,25 @@ def sync_full(
         if not (cancel_event and cancel_event.is_set()):
             _set_meta(conn, "last_sync_at", sync_started)
             _set_meta(conn, "last_full_sync_at", sync_started)
-        return {
-            "mode": "full",
-            "started_at": sync_started,
-            "mr": mr_stats,
-            "scan": scan_stats,
-            "legacy": legacy_stats,
-        }
+
+    # Same path-backfill step as sync_incremental — full rebuild is exactly
+    # when stale rows from earlier syncs need their source_file_path filled
+    # in from newly-discovered Scan rows.
+    backfill_stats = {}
+    if not (cancel_event and cancel_event.is_set()):
+        try:
+            backfill_stats = backfill_missing_paths(db_path)
+        except Exception as e:
+            backfill_stats = {"error": str(e)}
+
+    return {
+        "mode": "full",
+        "started_at": sync_started,
+        "mr": mr_stats,
+        "scan": scan_stats,
+        "legacy": legacy_stats,
+        "backfill": backfill_stats,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -885,6 +909,89 @@ def get_file_detail(
             "source_kind": source_kind or "",
             "summary": summary,
             "opus_ids": opus_rows,
+        }
+
+
+def backfill_missing_paths(db_path: str | None = None) -> dict:
+    """跨 source_kind 反向回填 source_file_path —— 解决 Tranzor MR/Legacy
+    API 不暴露此字段的根本问题。
+
+    Tranzor 后端只有 ``/missing_translation_scan/.../results`` 在响应里
+    序列化了 ``source_file_path``；``/tasks/{id}/results`` 和 legacy 接口
+    都不返回。但 ``path_hash = md5(sourceRelativePath)`` **与 alias / source
+    无关**——同一份物理文件无论被 MR 翻译还是 Scan 扫描，path_hash 一致。
+
+    所以：
+      - 从 opus_index 收集"已知 path_hash → 真实路径"的映射（基本来源是 Scan 行）
+      - 对所有 source_file_path 为空但 path_hash 匹配的行，UPDATE 填上
+
+    这样 MR/Legacy 行只要"同一个文件被任何 Scan 任务扫过一次"，就能拿到
+    路径。每次同步结束会自动跑一遍，老缓存可通过手动按钮强制 backfill。
+
+    Returns:
+        ``{ known_pairs, rows_updated, distinct_path_hashes_filled }``
+    """
+    init_db(db_path)
+    with _connect(db_path) as conn:
+        # Step 1：build (path_hash -> path) lookup table from rows that
+        # already have a non-empty source_file_path. 同 hash 不同 path 的
+        # 极端情形选最常见的那条（按行数取多数）—— 通常不会有这种情况。
+        cur = conn.execute("""
+            SELECT path_hash, source_file_path, COUNT(*) AS n
+            FROM opus_index
+            WHERE path_hash != '' AND source_file_path != ''
+            GROUP BY path_hash, source_file_path
+        """)
+        pair_votes: dict[str, dict[str, int]] = {}
+        for row in cur.fetchall():
+            ph = row["path_hash"]
+            sp = row["source_file_path"]
+            n = row["n"] or 0
+            pair_votes.setdefault(ph, {})[sp] = n
+        # 同 hash 多 path 取行数最多者；正常应该只有一条
+        path_by_hash: dict[str, str] = {
+            ph: max(votes.items(), key=lambda kv: kv[1])[0]
+            for ph, votes in pair_votes.items()
+        }
+
+        if not path_by_hash:
+            return {"known_pairs": 0, "rows_updated": 0,
+                    "distinct_path_hashes_filled": 0}
+
+        # Step 2：找出所有"path 空但 hash 在已知映射里"的行，批量 UPDATE。
+        # 用 IN 列表批量传入避免 N 次 UPDATE。SQLite 对单语句的 host
+        # parameter 数量有上限（默认 999），所以分批：
+        path_hashes = list(path_by_hash.keys())
+        rows_updated = 0
+        hashes_filled: set[str] = set()
+        BATCH = 500
+        for i in range(0, len(path_hashes), BATCH):
+            chunk = path_hashes[i:i + BATCH]
+            placeholders = ",".join("?" * len(chunk))
+            # 用 CASE WHEN 一句话搞定，比 N 次 UPDATE 快得多
+            case_clauses = " ".join(
+                f"WHEN path_hash = ? THEN ?"
+                for _ in chunk
+            )
+            sql = f"""
+                UPDATE opus_index
+                SET source_file_path = CASE {case_clauses} END
+                WHERE (source_file_path IS NULL OR source_file_path = '')
+                  AND path_hash IN ({placeholders})
+            """
+            # CASE WHEN ? THEN ? — 每个 hash 占两个 placeholder
+            case_args = [v for h in chunk for v in (h, path_by_hash[h])]
+            cur = conn.execute(sql, case_args + chunk)
+            affected = cur.rowcount or 0
+            rows_updated += affected
+            if affected > 0:
+                hashes_filled.update(chunk)
+        conn.commit()
+
+        return {
+            "known_pairs": len(path_by_hash),
+            "rows_updated": rows_updated,
+            "distinct_path_hashes_filled": len(hashes_filled),
         }
 
 
@@ -1197,4 +1304,5 @@ __all__ = [
     "lookup_path_hash",
     "lookup_path_string",
     "md5_path",
+    "backfill_missing_paths",
 ]
