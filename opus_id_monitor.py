@@ -209,11 +209,14 @@ def _bulk_upsert(
     now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
     rows = []
     for t in translations:
-        opus_id = (t.get("opus_id") or "").strip()
-        target_lang = (t.get("target_language") or "").strip()
+        # 同 _drain_results_into_db 的修法：legacy default_task_id 可能是
+        # 整数；先 str() 兜底再 strip。opus_id / target_lang 理论上一定是字符串，
+        # 但 API 偶有畸形数据，统一 str() 一下没坏处。
+        opus_id = str(t.get("opus_id") or "").strip()
+        target_lang = str(t.get("target_language") or "").strip()
         if not opus_id or not target_lang:
             continue
-        task_id = (t.get("task_id") or default_task_id or "").strip()
+        task_id = str(t.get("task_id") or default_task_id or "").strip()
         if not task_id:
             # task_id 是主键的一部分；缺了就丢掉，避免主键冲突毁掉整批
             continue
@@ -319,41 +322,56 @@ def _drain_results_into_db(
                 # cancel 在 worker 入口就被检测到，没必要处理
                 continue
 
-            task_id = (task.get("task_id") or task.get("id") or "").strip()
-            if isinstance(results, Exception):
+            # 整段 per-task 处理包一层防御：一条坏数据（脏字段、SQL 主键冲突、
+            # 不可预期的类型）绝不能让整个 sync 崩。这是 v5 的 "int.strip()"
+            # bug 教训：哪条小路出问题都该只跳过那条，不要拖累整批。
+            try:
+                # ⚠ legacy 任务的 LegacyTask.id 是 ``Integer``
+                # （app/models/legacy_task.py:19），``(None or 42 or "").strip()``
+                # 会变成 ``42.strip()`` → TypeError。务必 str() 后再 strip()。
+                task_id_raw = task.get("task_id") or task.get("id") or ""
+                task_id = str(task_id_raw).strip()
+                if isinstance(results, Exception):
+                    log(f"{log_stage}_error", completed + 1, total,
+                        task_id=task_id, error=str(results))
+                    completed += 1
+                    continue
+
+                translations = (results or {}).get("translations") or []
+                # legacy 路径用 task_name 顶 project_id；MR/Scan 用真实
+                # project_id。
+                proj = task.get("project_id", "")
+                if not proj and default_project_fn:
+                    try:
+                        proj = default_project_fn(task) or ""
+                    except Exception:
+                        proj = ""
+                inserted = _bulk_upsert(
+                    conn,
+                    translations,
+                    source_kind=source_kind,
+                    default_task_id=task_id,
+                    default_project_id=proj,
+                    default_release=task.get("release", ""),
+                    default_mr_iid=task.get("merge_request_iid"),
+                    task_created_at=task.get("created_at") or "",
+                )
+                stats["tasks_seen"] += 1
+                stats["rows_inserted"] += inserted
+                completed += 1
+                # 每个任务结束 commit 一次：哪怕同步中途崩，已处理的也安全
+                # 落库；更重要的是 —— 主 GUI 的定时刷新走的是新连接，
+                # 必须及时 commit 才能读到。
+                conn.commit()
+                log(log_stage, completed, total,
+                    task_id=task_id, inserted=inserted,
+                    rows_total=stats["rows_inserted"])
+            except Exception as per_task_err:
+                # 兜底：单条任务任何意外都只 log + skip，不让整个 sync 死。
                 log(f"{log_stage}_error", completed + 1, total,
-                    task_id=task_id, error=str(results))
+                    error=f"per-task-fail: {per_task_err!r}")
                 completed += 1
                 continue
-
-            translations = (results or {}).get("translations") or []
-            # legacy 路径用 task_name 顶 project_id；MR/Scan 用真实 project_id。
-            proj = task.get("project_id", "")
-            if not proj and default_project_fn:
-                try:
-                    proj = default_project_fn(task) or ""
-                except Exception:
-                    proj = ""
-            inserted = _bulk_upsert(
-                conn,
-                translations,
-                source_kind=source_kind,
-                default_task_id=task_id,
-                default_project_id=proj,
-                default_release=task.get("release", ""),
-                default_mr_iid=task.get("merge_request_iid"),
-                task_created_at=task.get("created_at") or "",
-            )
-            stats["tasks_seen"] += 1
-            stats["rows_inserted"] += inserted
-            completed += 1
-            # 每个任务结束 commit 一次：哪怕同步中途崩，已处理的也安全落库；
-            # 更重要的是 —— 主 GUI 的定时刷新走的是新连接，
-            # 必须及时 commit 才能读到。
-            conn.commit()
-            log(log_stage, completed, total,
-                task_id=task_id, inserted=inserted,
-                rows_total=stats["rows_inserted"])
     finally:
         # 取消还没开跑的 future（Python 3.9+ 行为）；in-flight 的让它跑完
         # 但不再处理它的返回——避免阻塞 UI 上的"取消"按钮。
