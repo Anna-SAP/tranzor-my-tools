@@ -12,7 +12,7 @@ from datetime import date, datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import export_mr_pipeline as mr_api
 import quality_overview as qa
-from export_gui import FONT_FAMILY, IS_MAC
+from export_gui import FONT_FAMILY, IS_MAC, reveal_in_folder
 
 
 # ============================================================
@@ -672,8 +672,18 @@ class MRPipelineTab:
             # Route the local bridge port + token into the report so its
             # Send-to-Tranzor button can reach the desktop GUI's HTTP bridge.
             bridge_info = self.app._bridge_info_for_export() if hasattr(self.app, "_bridge_info_for_export") else None
-            mr_api.save_mr_file(results, filepath, label, fmt, bridge_info=bridge_info)
-            self.parent.after(0, lambda: self.lbl_mr_status_bar.configure(text=self._t("status_done")))
+            # Capture the actual saved path so we can both display its basename
+            # and reveal it in the OS file manager — otherwise the user sees
+            # only "Export complete" with no clue where the JSON / Excel went.
+            saved = mr_api.save_mr_file(
+                results, filepath, label, fmt, bridge_info=bridge_info) or filepath
+            basename = os.path.basename(saved)
+            self.parent.after(0, lambda b=basename: self.lbl_mr_status_bar.configure(
+                text=self._t("status_saved").format(filename=b)))
+            # Non-HTML exports don't auto-open a browser tab, so the user has
+            # no visual confirmation of the destination. Pop the file manager.
+            if fmt != "html":
+                self.parent.after(0, lambda p=saved: reveal_in_folder(p))
         except Exception as e:
             self.parent.after(0, lambda: self.lbl_mr_status_bar.configure(text=f"❌ {str(e)[:50]}"))
         finally:

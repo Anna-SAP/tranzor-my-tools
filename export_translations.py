@@ -1335,12 +1335,12 @@ def save_file(rows, filename, label, fmt, bridge_info=None, open_after=True):
         for attempt in range(100):
             try:
                 export_json.write_translations_json(rows, save_path)
-                return
+                return save_path
             except PermissionError:
                 attempt_num = attempt + 1
                 save_path = f"{base}_{attempt_num}{ext}"
                 print(f"  文件被占用，尝试保存为: {save_path}")
-        return
+        return None
 
     # HTML 大数据集自动分页
     if fmt == "html" and len(rows) > PAGE_SIZE:
@@ -1383,9 +1383,10 @@ def save_file(rows, filename, label, fmt, bridge_info=None, open_after=True):
                 if open_after:
                     from export_gui import open_in_browser
                     open_in_browser(index_path)
-                return
+                return index_path
             except PermissionError:
                 index_path = f"{base}_{attempt+1}{ext}"
+        return None
 
     else:
         # 小数据集或 Excel：正常单文件输出
@@ -1400,11 +1401,12 @@ def save_file(rows, filename, label, fmt, bridge_info=None, open_after=True):
                 if fmt == "html" and open_after:
                     from export_gui import open_in_browser
                     open_in_browser(save_path)
-                return
+                return save_path
             except PermissionError:
                 attempt_num = attempt + 1
                 save_path = f"{base}_{attempt_num}{ext}"
                 print(f"  文件被占用，尝试保存为: {save_path}")
+        return None
 
 
 # ---------------------------------------------------------------------------

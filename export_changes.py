@@ -1198,11 +1198,12 @@ def save_file(rows, filename, label, fmt, open_after=True):
             if fmt == "html" and open_after:
                 from export_gui import open_in_browser
                 open_in_browser(save_path)
-            return
+            return save_path
         except PermissionError:
             attempt_num = attempt + 1
             save_path = f"{base}_{attempt_num}{ext}"
             print(f"  文件被占用，尝试保存为: {save_path}")
+    return None
 
 
 # ---------------------------------------------------------------------------
