@@ -109,6 +109,23 @@ STRINGS = {
         "opus_src_mr":              "MR",
         "opus_src_scan":            "Scan",
         "opus_src_file":            "File",
+        # Anomaly line below the cards
+        "opus_anomaly_normal":      (
+            "📊 30-day avg ~{avg}/day · today +{today} · "
+            "{ratio}× baseline · within normal range"),
+        "opus_anomaly_warning":     (
+            "🟡 30-day avg ~{avg}/day · today +{today} · "
+            "{ratio}× baseline — above {threshold}× warning threshold"),
+        "opus_anomaly_critical":    (
+            "🔴 30-day avg ~{avg}/day · today +{today} · "
+            "{ratio}× baseline — above {threshold}× critical threshold!"),
+        "opus_anomaly_no_data":     "📊 No baseline yet — sync first to see anomaly detection",
+        # Send-to-Tranzor button on OpusDetailDialog
+        "opus_dlg_send":            "↗ Send to Tranzor",
+        "opus_dlg_send_ok":         "✓ Sent to Tranzor browser tab",
+        "opus_dlg_send_no_bridge":  "⚠ Bridge not running · envelope JSON copied to clipboard",
+        "opus_dlg_send_failed":     "❌ Send failed: {error}",
+        "opus_dlg_copied":          "✓ Copied",
     },
     "zh": {
         "tab_opus_monitor":         "🧬 OPUS ID 监控",
@@ -186,6 +203,23 @@ STRINGS = {
         "opus_src_mr":              "MR",
         "opus_src_scan":            "Scan",
         "opus_src_file":            "File",
+        # 异常侦测
+        "opus_anomaly_normal":      (
+            "📊 30 天日均 ~{avg}/天 · 今日 +{today} · "
+            "{ratio}× 均值 · 在正常区间"),
+        "opus_anomaly_warning":     (
+            "🟡 30 天日均 ~{avg}/天 · 今日 +{today} · "
+            "{ratio}× 均值 — 超过 {threshold}× 告警阈值"),
+        "opus_anomaly_critical":    (
+            "🔴 30 天日均 ~{avg}/天 · 今日 +{today} · "
+            "{ratio}× 均值 — 超过 {threshold}× 红色阈值！"),
+        "opus_anomaly_no_data":     "📊 暂无基线数据 — 先点同步以启用异常侦测",
+        # 详情对话框 Send-to-Tranzor 按钮
+        "opus_dlg_send":            "↗ 发送到 Tranzor",
+        "opus_dlg_send_ok":         "✓ 已发送到 Tranzor 浏览器 tab",
+        "opus_dlg_send_no_bridge":  "⚠ Bridge 未运行 · envelope JSON 已复制到剪贴板",
+        "opus_dlg_send_failed":     "❌ 发送失败：{error}",
+        "opus_dlg_copied":          "✓ 已复制",
     },
 }
 
@@ -268,6 +302,18 @@ def _project_label(project_id: str, source_kind: str, t) -> str:
     return f"{project_id} ({src})" if src else project_id
 
 
+def _source_tag(source_kind: str) -> str:
+    """source_kind → ttk.Treeview row tag name。给行加色靠这个映射。"""
+    sk = (source_kind or "").lower()
+    if sk == "mr":
+        return "src_mr"
+    if sk == "scan":
+        return "src_scan"
+    if sk == "file":
+        return "src_file"
+    return "src_unknown"
+
+
 class OpusIdMonitorTab:
     """OPUS ID 监控面板。"""
 
@@ -345,6 +391,16 @@ class OpusIdMonitorTab:
         self.card_new = _SummaryCard(cards_row, color="#8E44AD")
         self.card_new.pack(side="left", expand=True, fill="x", padx=(6, 0))
 
+        # ── Anomaly line ── one-line "baseline vs today"早期预警
+        # 颜色随告警级别变（normal=灰、warning=黄、critical=红），把"今天
+        # 突然多了 N 倍"这种异常推到用户视野最显眼的位置。
+        self.lbl_anomaly = tk.Label(
+            content, text="",
+            bg="#16213e", fg="#9aa0b0",
+            font=(FONT_FAMILY, 10), anchor="w", justify="left",
+        )
+        self.lbl_anomaly.pack(fill="x", pady=(0, 10))
+
         # ── Main body: left = breakdown table, right = trend + recent ──
         body = ttk.Frame(content, style="App.TFrame")
         body.pack(fill="both", expand=True)
@@ -380,6 +436,16 @@ class OpusIdMonitorTab:
         self.tree_breakdown.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
         self._breakdown_sort = ("opus", True)  # (col, desc)
+        # Source-color tags —— 给行加浅底色，让用户一眼看清"这屏里 MR
+        # 占比偏多 / Scan 突然多了一批"这种 pattern。配色和 Full
+        # Translations tab 的源色保持同一语言（蓝=MR / 绿=Scan / 暖=File）。
+        _SRC_BG = {"src_mr": "#1b2c44", "src_scan": "#1f3a2b",
+                   "src_file": "#3a2e1f", "src_unknown": "#1a1a2e"}
+        _SRC_FG = {"src_mr": "#cfe1ff", "src_scan": "#caf0d3",
+                   "src_file": "#f0d9b8", "src_unknown": "#ccc"}
+        for tag, bg in _SRC_BG.items():
+            self.tree_breakdown.tag_configure(
+                tag, background=bg, foreground=_SRC_FG[tag])
 
         # Right top: Trend chart
         self.lbl_trend = ttk.Label(right, text="", style="CardBold.TLabel")
@@ -410,6 +476,10 @@ class OpusIdMonitorTab:
         self.tree_recent.configure(yscrollcommand=rsb.set)
         self.tree_recent.pack(side="left", fill="both", expand=True)
         rsb.pack(side="right", fill="y")
+        # Same source-color scheme on the recent list
+        for tag, bg in _SRC_BG.items():
+            self.tree_recent.tag_configure(
+                tag, background=bg, foreground=_SRC_FG[tag])
 
         # 持有数据以便 sort 时直接重画，避免再查 DB
         self._trend_data: list[dict] = []
@@ -473,6 +543,7 @@ class OpusIdMonitorTab:
             breakdown = om.get_per_project_breakdown()
             trend = om.get_daily_trend(days=30)
             recent = om.get_recent_additions(limit=50)
+            anomaly = om.get_anomaly_stats()
         except Exception as e:
             self.lbl_status.configure(
                 text=self._t("opus_status_failed").format(error=str(e)[:60]))
@@ -496,6 +567,9 @@ class OpusIdMonitorTab:
         # 这样用户既能感知时间流逝，也能精确看到具体什么时候同步的。
         self._last_sync_iso = summary.get("last_sync_at")
         self._render_last_sync_label()
+
+        # 异常侦测一行：根据偏离度切换颜色，让大尖刺一眼就能看见
+        self._render_anomaly_line(anomaly)
 
         # 表格 + 图
         self._breakdown_data = breakdown
@@ -537,7 +611,7 @@ class OpusIdMonitorTab:
                 f"{r.get('path_count', 0):,}",
                 r.get("lang_count", 0),
                 _fmt_iso_short(r.get("last_added", "")),
-            ))
+            ), tags=(_source_tag(source),))
             self._breakdown_row_keys[iid] = (project, source)
 
     def _sort_breakdown(self, col):
@@ -559,14 +633,52 @@ class OpusIdMonitorTab:
             opus = r.get("opus_id", "")
             # 中段太长不易看，做软截断；双击仍能拿到完整 opus_id
             disp = opus if len(opus) <= 60 else opus[:30] + "…" + opus[-25:]
+            source = r.get("source_kind", "")
             iid = self.tree_recent.insert("", "end", values=(
                 _fmt_iso_short(r.get("first_seen", "")),
-                _project_label(r.get("project_id", ""),
-                                r.get("source_kind", ""), t),
+                _project_label(r.get("project_id", ""), source, t),
                 r.get("alias", ""),
                 disp,
-            ))
+            ), tags=(_source_tag(source),))
             self._recent_row_keys[iid] = opus
+
+    # ------------------------------------------------------------------
+    # 异常侦测一行 —— 30 天日均 vs 今日，自动配色
+    # ------------------------------------------------------------------
+    # 颜色按级别走，和卡片配色保持一致；不要随意改值，否则色盲用户也会
+    # 跟着倒霉（normal 浅灰、warning 琥珀、critical 鲜红）。
+    _ANOMALY_COLORS = {
+        "normal":   ("#16213e", "#9aa0b0"),  # 与背景近，弱化呈现
+        "warning":  ("#3a2d10", "#f1c40f"),  # 琥珀
+        "critical": ("#3d1212", "#ff6b6b"),  # 红
+    }
+
+    def _render_anomaly_line(self, anomaly: dict):
+        """把 get_anomaly_stats 的结果渲染成一行带颜色的提示。"""
+        t = self._t
+        level = anomaly.get("level", "normal")
+        today = anomaly.get("today_new", 0)
+        avg = anomaly.get("daily_avg", 0)
+        ratio = anomaly.get("ratio", 0)
+
+        # 还没基线：友好提示用户先同步
+        if avg < 1 and today == 0:
+            text = t("opus_anomaly_no_data")
+            bg, fg = self._ANOMALY_COLORS["normal"]
+        else:
+            if level == "warning":
+                text = t("opus_anomaly_warning").format(
+                    avg=avg, today=f"{today:,}", ratio=ratio,
+                    threshold=anomaly.get("warning_ratio", 3))
+            elif level == "critical":
+                text = t("opus_anomaly_critical").format(
+                    avg=avg, today=f"{today:,}", ratio=ratio,
+                    threshold=anomaly.get("critical_ratio", 10))
+            else:
+                text = t("opus_anomaly_normal").format(
+                    avg=avg, today=f"{today:,}", ratio=ratio)
+            bg, fg = self._ANOMALY_COLORS[level]
+        self.lbl_anomaly.configure(text=text, bg=bg, fg=fg)
 
     def _draw_trend(self):
         cv = self.canvas_trend
@@ -1015,15 +1127,33 @@ class OpusDetailDialog(tk.Toplevel):
         langs_box.configure(state="disabled")
         langs_box.pack(fill="x", pady=(0, 8))
 
-        # Close
+        # 操作按钮区：左下 status 反馈条 · 右下 Send / Close
         btn_row = ttk.Frame(outer, style="App.TFrame")
         btn_row.pack(fill="x", pady=(8, 0))
+
+        # status 条 —— Send 完了把 ok / fallback / err 文案写这里
+        self._send_status = tk.Label(
+            btn_row, text="", bg="#16213e", fg="#9aa0b0",
+            font=(FONT_FAMILY, 9), anchor="w")
+        self._send_status.pack(side="left", fill="x", expand=True)
+
         close_btn = app._create_button(
             btn_row, text=t("opus_dlg_close"), command=self.destroy,
             style_name="SecondarySmall",
             font=(FONT_FAMILY, 10),
             bg="#0f3460", fg="#ccc", padx=14, pady=4)
         close_btn.pack(side="right")
+
+        # Send to Tranzor —— 通过 Tranzor Bridge 把这个 opus_id 推送给
+        # Tranzor Platform tab 上的 Tampermonkey 脚本，浏览器侧立刻
+        # 定位到对应 MR / scan task / file translation 详情。
+        # Bridge 未启动时降级为：复制 envelope JSON 到剪贴板，并提示。
+        send_btn = app._create_button(
+            btn_row, text=t("opus_dlg_send"), command=self._send_to_tranzor,
+            style_name="SuccessSmall",
+            font=(FONT_FAMILY, 10, "bold"),
+            bg="#2ecc71", fg="#fff", padx=14, pady=4)
+        send_btn.pack(side="right", padx=(0, 8))
 
         self.bind("<Escape>", lambda _e: self.destroy())
         self.transient(parent)
@@ -1035,3 +1165,101 @@ class OpusDetailDialog(tk.Toplevel):
             # 不弹 toast；按钮文案瞬时变化就够
         except Exception:
             pass
+
+    # ------------------------------------------------------------------
+    # Send to Tranzor —— 走本地 Tranzor Bridge 推 envelope
+    # ------------------------------------------------------------------
+    def _build_envelope(self) -> dict:
+        """构造 tranzor-bridge/handoff/v1 envelope。
+
+        schema 参考 export_mr_pipeline.write_mr_html 里的 buildEnvelope JS
+        实现：每个 (opus_id, target_language) 二元组一个 item；
+        userscript 凭 ``source.kind`` + ``context.*`` 决定路由到 MR / Scan /
+        File Translation 哪个详情页。
+        """
+        import uuid
+        from datetime import timezone as _tz
+        d = self.detail
+        source_kind = (d.get("source_kind") or "").lower()
+        kind_map = {"mr": "mr_pipeline", "scan": "scan_task",
+                    "file": "file_translation"}
+        kind = kind_map.get(source_kind, "mr_pipeline")
+        translation_type_map = {"mr": "MR", "scan": "Scan", "file": "Legacy"}
+
+        opus_id = d.get("opus_id", "")
+        project_id = d.get("project_id", "")
+        task_id = d.get("task_id", "")
+        mr_id = d.get("mr_iid")
+        source_text = d.get("source_text", "")
+        langs = d.get("target_languages") or []
+
+        items = [{
+            "string_key": opus_id,
+            "task_id": task_id,
+            "task_name": "",  # 我们不存这个；userscript 侧会用其他字段
+            "project_id": project_id,
+            "mr_id": mr_id if kind == "mr_pipeline" else None,
+            "scan_task_id": task_id if kind == "scan_task" else None,
+            "language": lang.get("target_language", ""),
+            "source_text": source_text,
+            "translated_text": "",  # 监控面板没存译文；userscript 会再去拉
+            "translation_type": translation_type_map.get(source_kind, "MR"),
+        } for lang in langs] or [{
+            # 极端：opus 居然没有任何 target_language 行（异常数据）
+            # 也要给一个空 item，避免 envelope items 为空被 bridge 拒收
+            "string_key": opus_id,
+            "task_id": task_id,
+            "task_name": "",
+            "project_id": project_id,
+            "mr_id": mr_id if kind == "mr_pipeline" else None,
+            "scan_task_id": task_id if kind == "scan_task" else None,
+            "language": "",
+            "source_text": source_text,
+            "translated_text": "",
+            "translation_type": translation_type_map.get(source_kind, "MR"),
+        }]
+
+        return {
+            "$schema": "tranzor-bridge/handoff/v1",
+            "envelope_id": str(uuid.uuid4()),
+            "created_at": datetime.now(_tz.utc).isoformat(timespec="seconds"),
+            "source": {
+                "tool": "TranzorExporter",
+                "kind": kind,
+                "report_file": "opus_id_monitor",
+            },
+            "context": {
+                "task_id": task_id or None,
+                "task_name": None,
+                "project_id": project_id or None,
+                "mr_id": mr_id if kind == "mr_pipeline" else None,
+                "scan_task_id": task_id if kind == "scan_task" else None,
+                "language": None,
+            },
+            "items": items,
+        }
+
+    def _send_to_tranzor(self):
+        t = self.app._t
+        envelope = self._build_envelope()
+        bridge = getattr(self.app, "bridge", None)
+        if bridge is None:
+            # Bridge 没起来 —— 退化为复制 envelope JSON，让用户能粘贴到别处
+            import json as _json
+            try:
+                self.clipboard_clear()
+                self.clipboard_append(_json.dumps(
+                    envelope, ensure_ascii=False, indent=2))
+            except Exception:
+                pass
+            self._send_status.configure(
+                text=t("opus_dlg_send_no_bridge"), fg="#f1c40f")
+            return
+        try:
+            bridge.push(envelope)
+            self._send_status.configure(
+                text=t("opus_dlg_send_ok"), fg="#2ecc71")
+        except Exception as e:
+            self._send_status.configure(
+                text=t("opus_dlg_send_failed").format(error=str(e)[:60]),
+                fg="#ff6b6b")

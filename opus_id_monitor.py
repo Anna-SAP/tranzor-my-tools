@@ -879,6 +879,103 @@ def get_daily_trend(days: int = 30, db_path: str | None = None) -> list[dict]:
     return [{"date": d, "new_count": c} for d, c in out.items()]
 
 
+def get_anomaly_stats(
+    db_path: str | None = None,
+    *,
+    baseline_days: int = 30,
+    warning_ratio: float = 3.0,
+    critical_ratio: float = 10.0,
+) -> dict:
+    """计算今日新增 opus_id vs 30 天日均的偏离度，给 UI 做异常提示。
+
+    "异常"在我们这里的语义是：今日突然涌入比基线大得多的新 opus_id，
+    可能意味着：
+      - 上游有大规模重命名 / 路径迁移（path_hash 集体翻新）
+      - 抽取规则被改动、命中了更多文件
+      - Tranzor 后端被批量补跑了一批历史任务
+      - 真的有一次大改动落地了
+
+    无论哪一种，让用户立刻看见数字尖刺都比等他偶然刷到趋势图发现要早。
+
+    Returns:
+        {
+          today_new, yesterday_new, baseline_days,
+          daily_avg,                    # 不包含今天，避免今天的尖刺把基线拉高
+          ratio,                         # today / max(daily_avg, 1)
+          level: 'normal' | 'warning' | 'critical',
+          warning_ratio, critical_ratio  # 给 UI 显示阈值
+        }
+    """
+    init_db(db_path)
+    today = datetime.now(timezone.utc).date()
+    today_iso = today.isoformat()
+    yesterday_iso = (today - timedelta(days=1)).isoformat()
+    baseline_start = (today - timedelta(days=baseline_days)).isoformat()
+
+    with _connect(db_path) as conn:
+        def scalar(sql, *args):
+            cur = conn.execute(sql, args)
+            row = cur.fetchone()
+            return (row[0] if row else 0) or 0
+
+        today_new = scalar(
+            "SELECT COUNT(DISTINCT opus_id) FROM opus_index "
+            "WHERE substr(first_seen, 1, 10) = ?", today_iso)
+        yesterday_new = scalar(
+            "SELECT COUNT(DISTINCT opus_id) FROM opus_index "
+            "WHERE substr(first_seen, 1, 10) = ?", yesterday_iso)
+
+        # 基线：过去 baseline_days 天里每天的 distinct opus 数取均值，
+        # **排除今天**避免今天的尖刺把均值拉高。
+        # 如果索引不到 baseline_days 天的数据，按实际天数算（避免除以 0 显示 inf）。
+        cur = conn.execute(
+            """
+            SELECT
+                substr(first_seen, 1, 10) AS day,
+                COUNT(DISTINCT opus_id)   AS n
+            FROM opus_index
+            WHERE substr(first_seen, 1, 10) >= ?
+              AND substr(first_seen, 1, 10) < ?
+            GROUP BY day
+            """,
+            (baseline_start, today_iso),
+        )
+        per_day = [row["n"] for row in cur.fetchall()]
+        if per_day:
+            daily_avg = sum(per_day) / len(per_day)
+        else:
+            daily_avg = 0.0
+
+    # 计算偏离倍率 + 等级
+    if daily_avg < 1:
+        ratio = float(today_new)  # 没有基线时按绝对值判断
+    else:
+        ratio = today_new / daily_avg
+
+    if today_new == 0:
+        level = "normal"
+    elif daily_avg < 1 and today_new < 100:
+        # 缓存还很少的早期阶段，别让小数字误报红色
+        level = "normal"
+    elif ratio >= critical_ratio:
+        level = "critical"
+    elif ratio >= warning_ratio:
+        level = "warning"
+    else:
+        level = "normal"
+
+    return {
+        "today_new": today_new,
+        "yesterday_new": yesterday_new,
+        "baseline_days": baseline_days,
+        "daily_avg": round(daily_avg, 1),
+        "ratio": round(ratio, 2),
+        "level": level,
+        "warning_ratio": warning_ratio,
+        "critical_ratio": critical_ratio,
+    }
+
+
 def get_recent_additions(
     limit: int = 50,
     db_path: str | None = None,
@@ -935,4 +1032,5 @@ __all__ = [
     "get_recent_additions",
     "get_project_detail",
     "get_opus_detail",
+    "get_anomaly_stats",
 ]
