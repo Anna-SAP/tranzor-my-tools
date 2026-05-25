@@ -439,6 +439,10 @@ class OpusIdMonitorTab:
     def _on_cancel(self):
         self._cancel_event.set()
 
+    # 同步期间的活体刷新节拍。3 秒一次：既能让用户看到卡片在涨，
+    # 又不会因为反复查 SQLite 抢同步线程的 commit 时间。
+    _LIVE_REFRESH_MS = 3000
+
     def _kickoff_sync(self, *, full: bool):
         if self._sync_thread and self._sync_thread.is_alive():
             return  # 不允许并发同步
@@ -450,6 +454,21 @@ class OpusIdMonitorTab:
         self._sync_thread = threading.Thread(
             target=self._run_sync, args=(full,), daemon=True)
         self._sync_thread.start()
+        # 用户最大的痛点：同步期间卡片永远是 0，看上去像卡死。
+        # 启动一个 after 链路，只要后台线程还活着，就每 3 秒把本地
+        # SQLite 里已经落地的数据查一次刷上来。
+        self.parent.after(
+            self._LIVE_REFRESH_MS, self._tick_live_refresh)
+
+    def _tick_live_refresh(self):
+        """同步期间的定时刷新；线程死掉就自动停止。"""
+        if not (self._sync_thread and self._sync_thread.is_alive()):
+            return  # 同步线程已结束，最终刷新已由 _run_sync 触发
+        try:
+            self._refresh_from_cache()
+        except Exception:
+            pass  # 刷新失败不能影响同步本身
+        self.parent.after(self._LIVE_REFRESH_MS, self._tick_live_refresh)
 
     def _set_sync_buttons(self, *, running: bool):
         new_state = ["disabled"] if running else ["!disabled"]
