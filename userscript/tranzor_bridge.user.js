@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tranzor Bridge
 // @namespace    tranzor-my-tools
-// @version      0.5.0
+// @version      0.6.0
 // @description  Receive Exporter selections and walk through them on the Tranzor Platform.
 // @match        http://tranzor-platform.int.rclabenv.com/*
 // @match        https://tranzor-platform.int.rclabenv.com/*
@@ -282,6 +282,12 @@
         return true;
     }
 
+    // The @version meta tag at the top of this file. Sent as
+    // X-Userscript-Version on every /pull so the my-tools setup wizard can
+    // detect outdated installs and prompt for re-install. Keep this in sync
+    // with the meta block; any change to either MUST bump the other.
+    const USERSCRIPT_VERSION = '0.6.0';
+
     async function pullEnvelope() {
         if (!endpoint || !endpoint.token) return null;
         const url = `http://127.0.0.1:${endpoint.port}/pull?since=${lastSeq}`;
@@ -291,6 +297,7 @@
                 url: url,
                 headers: {
                     'X-Bridge-Token': endpoint.token,
+                    'X-Userscript-Version': USERSCRIPT_VERSION,
                     'Origin': 'http://tranzor-platform.int.rclabenv.com',
                 },
                 timeout: 2000,

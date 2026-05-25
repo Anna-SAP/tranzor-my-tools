@@ -64,6 +64,17 @@ except Exception as _bridge_imp_err:  # pragma: no cover
 else:
     _bridge_import_error = None
 
+# Bridge first-time setup wizard — opens automatically the first time the
+# user clicks Send to Tranzor without an installed/live userscript. Optional
+# import so a broken module never blocks the rest of the GUI.
+try:
+    import bridge_setup_wizard as _bridge_wizard
+except Exception as _bridge_wizard_imp_err:  # pragma: no cover
+    _bridge_wizard = None
+    _bridge_wizard_import_error = _bridge_wizard_imp_err
+else:
+    _bridge_wizard_import_error = None
+
 # Optional: Full Translation Export Tab (nested module, must not break GUI if missing)
 try:
     import gui_tab_full_translations as _ft_tab_mod
@@ -600,6 +611,13 @@ class ExportApp:
         self._build_ui()
         self._refresh_ui_text()
         self._start_bridge()
+        # Bridge-setup auto-trigger: per-session "already prompted" guard
+        # so a dismissed wizard doesn't re-pop on every poll within the same
+        # session. Cross-session re-trigger is decided by the heuristic in
+        # bridge_setup_wizard.should_auto_open_wizard(), not by this flag.
+        self._bridge_wizard_shown_this_session = False
+        self._bridge_wizard_instance = None
+        self._start_bridge_watchdog()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         # Center window
@@ -1613,6 +1631,79 @@ class ExportApp:
             return self.bridge.html_info()
         except Exception:
             return None
+
+    # ------------------------------------------------------------------
+    # Bridge setup auto-trigger
+    # ------------------------------------------------------------------
+    BRIDGE_WATCHDOG_INTERVAL_MS = 3000  # 3s — reacts within ~5s of threshold
+
+    def _start_bridge_watchdog(self):
+        """Begin a recurring poll that auto-opens the first-time setup
+        wizard the moment we detect a "Send to Tranzor" click that the
+        userscript clearly couldn't handle.
+
+        The watchdog stays cheap (status_snapshot is an in-process method
+        call, no I/O) and never auto-pops more than once per session. The
+        cross-session decision lives in the wizard module's heuristic so
+        this loop has no policy of its own.
+        """
+        # Guard: if the wizard module didn't import or the bridge never
+        # came up, there is nothing for the watchdog to do. We still call
+        # ``after`` once so a later bridge restart could pick up — but
+        # this path is currently a no-op because we don't reattempt bridge
+        # startup at runtime.
+        if _bridge_wizard is None:
+            return
+        self._bridge_watchdog_tick()
+
+    def _bridge_watchdog_tick(self):
+        try:
+            if (
+                not self._bridge_wizard_shown_this_session
+                and self.bridge is not None
+                and _bridge_wizard is not None
+                and _bridge_wizard.should_auto_open_wizard(self.bridge)
+            ):
+                self._open_bridge_setup_wizard(force=True)
+        except Exception as exc:  # pragma: no cover
+            # The watchdog must never bubble — a corrupt snapshot would
+            # otherwise tear down the entire Tk after-loop.
+            print(f"[bridge-watchdog] tick failed: {exc!r}")
+        finally:
+            self.root.after(
+                self.BRIDGE_WATCHDOG_INTERVAL_MS,
+                self._bridge_watchdog_tick,
+            )
+
+    def _open_bridge_setup_wizard(self, *, force: bool = False):
+        """Open the first-time setup wizard. ``force=True`` bypasses the
+        auto-trigger heuristic; callers that want the heuristic should
+        instead call :func:`bridge_setup_wizard.open_wizard_if_needed`.
+        """
+        if _bridge_wizard is None or self.bridge is None:
+            return
+        # If an instance is already open (user navigating slowly), don't
+        # spawn another — bring the existing one forward instead.
+        if self._bridge_wizard_instance is not None:
+            try:
+                if self._bridge_wizard_instance.winfo_exists():
+                    self._bridge_wizard_instance.lift()
+                    self._bridge_wizard_instance.focus_set()
+                    return
+            except Exception:
+                pass
+            self._bridge_wizard_instance = None
+        self._bridge_wizard_shown_this_session = True
+        try:
+            self._bridge_wizard_instance = _bridge_wizard.BridgeSetupWizard(
+                self.root,
+                bridge=self.bridge,
+                app=self,
+                lang=self.lang,
+            )
+        except Exception as exc:  # pragma: no cover
+            print(f"[bridge-wizard] open failed: {exc!r}")
+            self._bridge_wizard_instance = None
 
     def _on_close(self):
         try:

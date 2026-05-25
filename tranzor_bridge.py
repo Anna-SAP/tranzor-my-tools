@@ -32,6 +32,12 @@ from typing import Optional, Tuple
 
 BRIDGE_VERSION = "0.1.0"
 
+# Userscript minimum version. The setup wizard treats any installed userscript
+# below this as "outdated" and prompts a re-install. Bump in lockstep with the
+# @version field in userscript/tranzor_bridge.user.js whenever a server-side
+# protocol change requires a corresponding client update.
+MIN_USERSCRIPT_VERSION = "0.6.0"
+
 BIND_HOST = "127.0.0.1"
 PORT_RANGE = range(48217, 48227)  # 10 candidate ports
 
@@ -40,6 +46,9 @@ TRANZOR_ORIGIN = "http://tranzor-platform.int.rclabenv.com"
 REPORT_ORIGINS = frozenset({"null", "file://"})
 
 MAX_BODY_BYTES = 1 * 1024 * 1024  # 1 MiB envelope cap
+
+# Userscript is considered "live" if we've seen a /pull within this window.
+USERSCRIPT_LIVE_WINDOW_SEC = 15.0
 
 
 def _state_dir() -> Path:
@@ -52,6 +61,29 @@ def _port_file() -> Path:
 
 class BridgePortBusy(RuntimeError):
     """All candidate ports already bound; bridge cannot start."""
+
+
+def _version_lt(installed: Optional[str], minimum: str) -> bool:
+    """Return True iff ``installed`` is a known version strictly less than
+    ``minimum`` under simple dotted-numeric ordering (semver-lite).
+
+    Unknown / unparsable versions return False — we never flag those as
+    outdated, because they're either pre-versioning userscripts or a future
+    format we don't recognize. The wizard prefers under-reporting an
+    "outdated" warning to nagging the user with false positives.
+    """
+    if not installed:
+        return False
+    try:
+        ipart = [int(x) for x in str(installed).split(".") if x]
+        mpart = [int(x) for x in str(minimum).split(".") if x]
+    except ValueError:
+        return False
+    # Pad to equal length so 1.2 < 1.2.1 comes out correctly.
+    width = max(len(ipart), len(mpart))
+    ipart += [0] * (width - len(ipart))
+    mpart += [0] * (width - len(mpart))
+    return ipart < mpart
 
 
 class _RateLimiter:
@@ -97,7 +129,18 @@ class BridgeServer:
         self._inbox_lock = threading.Lock()
         self._inbox: Optional[dict] = None
         self._inbox_seq: int = 0
+        # Highest seq the userscript has acknowledged via /pull (returned a
+        # non-204 response). Used to detect "envelope pushed but never picked
+        # up" — the signature of a missing/dead userscript.
+        self._inbox_delivered_seq: int = 0
         self._rate = _RateLimiter()
+        # Activity timestamps — surfaced through ``status_snapshot()`` so the
+        # setup wizard can detect "userscript installed and live" without
+        # depending on the browser or extension API. All times are
+        # ``time.time()`` (epoch seconds), float.
+        self.last_handoff_at: Optional[float] = None
+        self.last_userscript_pull_at: Optional[float] = None
+        self.last_userscript_version: Optional[str] = None
         self._stopped = False
         self._atexit_registered = False
 
@@ -154,13 +197,93 @@ class BridgeServer:
         with self._inbox_lock:
             self._inbox = envelope
             self._inbox_seq += 1
+            self.last_handoff_at = time.time()
             return self._inbox_seq
 
     def pull(self, since: int) -> Tuple[int, Optional[dict]]:
         with self._inbox_lock:
             if self._inbox is None or self._inbox_seq <= since:
                 return self._inbox_seq, None
+            # The userscript is fetching a fresh envelope — record delivery so
+            # ``status_snapshot()`` can tell "queued but undelivered" apart
+            # from "queued and the userscript handled it".
+            self._inbox_delivered_seq = max(
+                self._inbox_delivered_seq, self._inbox_seq
+            )
             return self._inbox_seq, self._inbox
+
+    def note_userscript_pull(self, version: Optional[str]) -> None:
+        """Record that the userscript polled /pull. Called on EVERY hit
+        (including the no-new-envelope 204 path) — this is the heartbeat we
+        use to decide whether the userscript is installed and live.
+        ``version`` is whatever the client put in the ``X-Userscript-Version``
+        header; we accept ``None`` or any string to stay forward-compatible.
+        """
+        self.last_userscript_pull_at = time.time()
+        if version:
+            self.last_userscript_version = str(version)[:32]  # defensive cap
+
+    # ---- diagnostics snapshot -------------------------------------------
+
+    def status_snapshot(self) -> dict:
+        """In-process state snapshot for the Tk GUI's setup wizard / status
+        indicator. Not exposed over HTTP — callers hold a direct reference
+        to the ``BridgeServer`` instance.
+
+        Returned keys
+        -------------
+        - ``bridge_running`` (bool): always True when this method is reachable.
+        - ``port`` (int), ``token`` (str), ``instance_id`` (str),
+          ``bridge_version`` (str): for diagnostics / wizard display.
+        - ``last_handoff_at`` (float | None), ``last_userscript_pull_at``
+          (float | None): epoch seconds.
+        - ``last_userscript_version`` (str | None): latest version reported
+          by the userscript.
+        - ``min_userscript_version`` (str): from module constant.
+        - ``userscript_live`` (bool): True if we've seen a /pull within
+          ``USERSCRIPT_LIVE_WINDOW_SEC``.
+        - ``userscript_outdated`` (bool): True if the userscript reported a
+          version and that version is below ``MIN_USERSCRIPT_VERSION``.
+          Unknown-version installs are *not* flagged as outdated — they're
+          either pre-versioning (we don't know) or fresh installs about to
+          send their version on the next /pull.
+        - ``pending_handoff_age_sec`` (float | None): seconds since the most
+          recent /handoff that hasn't been picked up by the userscript yet.
+          ``None`` when there's no pending envelope. This is the primary
+          signal that drives "auto-pop the setup wizard" — if it grows past
+          a threshold (~15s) the userscript is almost certainly missing.
+        """
+        now = time.time()
+        with self._inbox_lock:
+            pending_seq = self._inbox_seq
+            delivered_seq = self._inbox_delivered_seq
+            handoff_at = self.last_handoff_at
+        has_pending = pending_seq > delivered_seq
+        pending_age: Optional[float] = (
+            (now - handoff_at) if (has_pending and handoff_at is not None)
+            else None
+        )
+        last_pull = self.last_userscript_pull_at
+        live = (
+            last_pull is not None
+            and (now - last_pull) <= USERSCRIPT_LIVE_WINDOW_SEC
+        )
+        return {
+            "bridge_running": True,
+            "port": self.port,
+            "token": self.token,
+            "instance_id": self.instance_id,
+            "bridge_version": BRIDGE_VERSION,
+            "last_handoff_at": handoff_at,
+            "last_userscript_pull_at": last_pull,
+            "last_userscript_version": self.last_userscript_version,
+            "min_userscript_version": MIN_USERSCRIPT_VERSION,
+            "userscript_live": bool(live),
+            "userscript_outdated": _version_lt(
+                self.last_userscript_version, MIN_USERSCRIPT_VERSION,
+            ),
+            "pending_handoff_age_sec": pending_age,
+        }
 
     # ---- discovery file --------------------------------------------------
 
@@ -223,7 +346,8 @@ def _make_handler(bridge: BridgeServer):
             self.send_header("Access-Control-Allow-Origin", allow_origin)
             self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
             self.send_header(
-                "Access-Control-Allow-Headers", "Content-Type, X-Bridge-Token"
+                "Access-Control-Allow-Headers",
+                "Content-Type, X-Bridge-Token, X-Userscript-Version",
             )
             self.send_header("Access-Control-Allow-Private-Network", "true")
             self.send_header("Vary", "Origin")
@@ -300,6 +424,13 @@ def _make_handler(bridge: BridgeServer):
                 if not bridge._rate.allow(bridge.token):
                     self._reject(429, "rate_limited")
                     return
+                # Heartbeat: a successful, authenticated /pull from the
+                # Tranzor origin means the userscript is alive in the user's
+                # browser. Record this BEFORE the inbox check so empty polls
+                # still count toward "userscript is installed and live".
+                bridge.note_userscript_pull(
+                    self.headers.get("X-Userscript-Version") or None,
+                )
                 since = 0
                 if "?" in self.path:
                     qs = self.path.split("?", 1)[1]
