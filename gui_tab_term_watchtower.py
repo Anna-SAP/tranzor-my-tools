@@ -130,6 +130,10 @@ STRINGS = {
         "tw_tt_loading":              "Loading… {n}/{total}",
         "tw_tt_loaded":              "{n} terms loaded.",
         "tw_tt_filter":              "Filter",
+        "tw_tt_filter_dnt":          "DNT",
+        "tw_tt_dnt_any":             "(any)",
+        "tw_tt_dnt_yes":             "DNT only",
+        "tw_tt_dnt_no":              "Translatable only",
         "tw_tt_select_all":          "Select All",
         "tw_tt_select_none":         "Clear",
         "tw_tt_select_visible":      "Select Visible",
@@ -171,6 +175,9 @@ STRINGS = {
         "tw_td_open_browser":        "Open Terminology Page",
         "tw_td_open_failed":         "Failed to open page: {err}",
         "tw_td_close":               "Close",
+        "tw_td_updated_at":          "Last updated",
+        "tw_td_updated_at_unknown":  "—",
+        "tw_td_author_unavailable":  "Tranzor Platform does not record creator / updater user identity — only the last-updated timestamp is exposed by the API.",
         "tw_qc_run":                 "Run Quick Scan…",
         "tw_qc_no_pairs":            "Provide at least one (locale, approved translation) pair.",
         "tw_qc_running":             "Quick Check on '{term}' ({n} locales)…",
@@ -305,6 +312,10 @@ STRINGS = {
         "tw_tt_loading":              "加载中… {n}/{total}",
         "tw_tt_loaded":              "已加载 {n} 条术语。",
         "tw_tt_filter":              "过滤",
+        "tw_tt_filter_dnt":          "DNT",
+        "tw_tt_dnt_any":             "（全部）",
+        "tw_tt_dnt_yes":             "仅 DNT",
+        "tw_tt_dnt_no":              "仅可翻译",
         "tw_tt_select_all":          "全选",
         "tw_tt_select_none":         "全不选",
         "tw_tt_select_visible":      "选当前可见",
@@ -346,6 +357,9 @@ STRINGS = {
         "tw_td_open_browser":        "打开术语主页",
         "tw_td_open_failed":         "打开页面失败：{err}",
         "tw_td_close":               "关闭",
+        "tw_td_updated_at":          "最后更新",
+        "tw_td_updated_at_unknown":  "—",
+        "tw_td_author_unavailable":  "Tranzor 平台目前不记录创建者 / 更新者的用户身份，API 仅暴露最后更新时间。",
         "tw_qc_run":                 "运行快速扫描…",
         "tw_qc_no_pairs":            "至少提供一对（locale, 已批准译法）。",
         "tw_qc_running":             "Quick Check「{term}」（{n} 个语种）…",
@@ -1849,6 +1863,27 @@ class _TranzorTerminologyDialog(tk.Toplevel):
                  insertbackground="#fff", relief="flat"
                  ).pack(side="left", padx=(4, 12), ipady=2)
 
+        # DNT filter — pick "any" / "DNT only" / "Translatable only". Keys
+        # are stable identifiers; the display label uses localized strings.
+        ttk.Label(frow, text=tab._t("tw_tt_filter_dnt") + ":"
+                  ).pack(side="left")
+        self._dnt_options = (
+            ("any", tab._t("tw_tt_dnt_any")),
+            ("yes", tab._t("tw_tt_dnt_yes")),
+            ("no",  tab._t("tw_tt_dnt_no")),
+        )
+        self._dnt_label_to_key = {lbl: key for key, lbl in self._dnt_options}
+        self.dnt_var = tk.StringVar(value=self._dnt_options[0][1])
+        cmb_dnt = ttk.Combobox(
+            frow, textvariable=self.dnt_var,
+            width=max(8, max(len(lbl) for _, lbl in self._dnt_options) + 2),
+            state="readonly",
+            values=[lbl for _, lbl in self._dnt_options],
+        )
+        cmb_dnt.pack(side="left", padx=(4, 12))
+        cmb_dnt.bind("<<ComboboxSelected>>",
+                     lambda *_: self._render_terms())
+
         for txt_key, cmd in (
             ("tw_tt_select_all",     lambda: self._set_all(True)),
             ("tw_tt_select_none",    lambda: self._set_all(False)),
@@ -1961,6 +1996,7 @@ class _TranzorTerminologyDialog(tk.Toplevel):
         we keep the iid map stable and just detach/reattach rows.
         """
         kw = self.filter_var.get().strip().lower()
+        dnt_key = self._dnt_label_to_key.get(self.dnt_var.get(), "any")
         # Initial population
         if not self._iid_by_id and self._all_terms:
             for t in self._all_terms:
@@ -1979,14 +2015,22 @@ class _TranzorTerminologyDialog(tk.Toplevel):
                         "Yes" if t.get("dnt") else "",
                     ),
                 )
-        # Filter by name (and scope) substring
+        # Filter by name+scope substring AND by DNT classifier
         for t in self._all_terms:
             tid = int(t.get("id") or 0)
             iid = self._iid_by_id.get(tid)
             if not iid:
                 continue
             hay = ((t.get("name") or "") + " " + (t.get("scope") or "")).lower()
-            visible = (kw in hay) if kw else True
+            text_ok = (kw in hay) if kw else True
+            is_dnt = bool(t.get("dnt"))
+            if dnt_key == "yes":
+                dnt_ok = is_dnt
+            elif dnt_key == "no":
+                dnt_ok = not is_dnt
+            else:
+                dnt_ok = True
+            visible = text_ok and dnt_ok
             try:
                 if visible:
                     self.tree.reattach(iid, "", "end")
@@ -2159,7 +2203,19 @@ class _TermDetailDialog(tk.Toplevel):
             body, text=tab._t("tw_td_loading"),
             foreground="#7a7a8a",
         )
-        self.lbl_meta.pack(fill="x", anchor="w", pady=(2, 8))
+        self.lbl_meta.pack(fill="x", anchor="w", pady=(2, 0))
+
+        # "Author info" advisory — Tranzor Platform's term schema does NOT
+        # record created_by / updated_by user identity (only timestamps).
+        # We surface this once per dialog so users don't keep looking for
+        # an "author" field that doesn't exist server-side.
+        self.lbl_author_note = ttk.Label(
+            body, text="",
+            foreground="#7a7a8a",
+            font=(FONT_FAMILY, 9, "italic"),
+            wraplength=680, justify="left",
+        )
+        self.lbl_author_note.pack(fill="x", anchor="w", pady=(0, 8))
 
         canvas_wrap = ttk.Frame(body)
         canvas_wrap.pack(fill="both", expand=True)
@@ -2237,7 +2293,15 @@ class _TermDetailDialog(tk.Toplevel):
             meta_parts.append(f"Code: {code}")
         meta_parts.append(self.tab._t("tw_td_dnt_yes")
                           if dnt else self.tab._t("tw_td_dnt_no"))
+        updated_at = self._format_updated_at(detail.get("updated_at"))
+        if updated_at:
+            meta_parts.append(
+                f"{self.tab._t('tw_td_updated_at')}: {updated_at}"
+            )
         self.lbl_meta.configure(text="  ·  ".join(meta_parts))
+        self.lbl_author_note.configure(
+            text=self.tab._t("tw_td_author_unavailable"),
+        )
 
         def _field(label_key, value):
             value = (value or "").strip() if isinstance(value, str) else value
@@ -2308,6 +2372,31 @@ class _TermDetailDialog(tk.Toplevel):
                     v.get("type") or "",
                     v.get("name") or "",
                 ))
+
+    @staticmethod
+    def _format_updated_at(value: Any) -> str:
+        """Format an ISO datetime (the only audit field Tranzor exposes)
+        as ``YYYY-MM-DD HH:MM:SS``. Returns ``""`` for missing / unparsable
+        values so the caller can skip rendering the field entirely.
+
+        The platform serializes ``updated_at`` as Pydantic-encoded ISO
+        (e.g. ``"2026-03-06T14:23:45.123456"`` or ``"…+00:00"``). We
+        tolerate a trailing ``Z`` defensively since stdlib's
+        ``fromisoformat`` didn't accept it until Python 3.11.
+        """
+        if not value:
+            return ""
+        text = str(value).strip()
+        if not text:
+            return ""
+        try:
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            return datetime.fromisoformat(text).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+        except Exception:
+            return text[:19]  # best-effort fallback
 
     def _open_in_browser(self):
         try:
