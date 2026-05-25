@@ -33,6 +33,7 @@ import sqlite3
 import sys
 import threading
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Iterable
@@ -40,6 +41,13 @@ from typing import Iterable
 # 复用现有 Tranzor HTTP 封装，避免与 MR Pipeline tab 重复鉴权 / 重试逻辑。
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import export_mr_pipeline as mr_api
+
+
+# ---------------------------------------------------------------------------
+# 并行抓取上限 —— 8 个 worker 在实测里既能榨干 Tranzor API 的带宽
+# 又不会让 requests.Session 出现明显的竞态。如果未来后端撑不住，调低即可。
+# ---------------------------------------------------------------------------
+MAX_FETCH_WORKERS = 8
 
 
 # ---------------------------------------------------------------------------
@@ -52,31 +60,31 @@ def _default_db_path() -> str:
     return os.path.join(base, "opus_index.db")
 
 
-# 进程内单例锁 —— SQLite 在多线程下需要串行化写入，UI 后台线程会触发同步。
-_DB_LOCK = threading.RLock()
-
-
 @contextmanager
 def _connect(db_path: str | None = None):
-    """打开一个 SQLite 连接并保证写入串行化。
+    """打开一个 SQLite 连接。每个调用方拿到独立连接、独立事务边界。
 
-    我们刻意不用连接池：每个调用方拿到的都是新连接，事务边界由
-    ``with _connect() as conn`` 自然界定。``RLock`` 保证多个后台线程
-    并发同步时不会触发 ``database is locked`` 错误。
+    **不加全局锁**：SQLite 在 WAL 模式下原生支持"多读 + 单写"并发，
+    并发的写入会被 SQLite 内部排队。我们只要保证：
+      - 每个线程用自己的连接（``_connect`` 每次都新建一个）；
+      - 同一连接不跨线程使用（默认 ``check_same_thread=True`` 会强校验）。
+
+    早期版本在这里加过 ``threading.RLock``，结果"同步期间 UI 读不到任何
+    数据"——因为同步主线程把 RLock 占了整段同步时间，UI 后台刷新被阻塞
+    在 ``_connect`` 入口。改成无锁后 WAL 才真正生效。
     """
     path = db_path or _default_db_path()
-    with _DB_LOCK:
-        conn = sqlite3.connect(path)
-        # 让查询能 dict-style 取列名，对 UI 层更友好。
-        conn.row_factory = sqlite3.Row
-        # WAL 模式让"读不阻塞写、写不阻塞读"，对 GUI 边同步边查询很关键。
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        try:
-            yield conn
-            conn.commit()
-        finally:
-            conn.close()
+    conn = sqlite3.connect(path, timeout=30.0)
+    # timeout=30s：万一某次写真的撞上，SQLite 会自动重试这么久才报
+    # "database is locked"。对我们的写量足够宽裕。
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    try:
+        yield conn
+        conn.commit()
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -226,6 +234,103 @@ def _bulk_upsert(
 
 
 # ---------------------------------------------------------------------------
+# 并行抓取共享逻辑：MR 和 Scan 同步都用它
+# ---------------------------------------------------------------------------
+def _drain_results_into_db(
+    tasks: list[dict],
+    *,
+    fetch_fn,
+    conn,
+    source_kind: str,
+    log,
+    log_stage: str,
+    cancel_event: threading.Event | None,
+    stats: dict,
+) -> None:
+    """把 ``tasks`` 列表的 results 用线程池并行拉取，按完成顺序串行落库。
+
+    设计要点：
+      - **HTTP 走线程池**（I/O bound，8 路并行能比串行快近一个数量级）；
+      - **SQLite 写入留在主调线程**（_bulk_upsert + conn.commit），SQLite
+        WAL 模式下的写入串行化由我们自己保证，绝不在 worker 里碰 conn；
+      - **as_completed 一边出一边写**，首屏的"卡片在涨"动效随时可见；
+      - **cancel_event**：触发后立刻停止派发未发出的 future，对于已经在
+        飞的 HTTP（requests.get 不能安全中断），等它返回再丢弃。
+    """
+    if not tasks:
+        return
+
+    total = len(tasks)
+    completed = 0
+
+    # 给 worker 用的 fetch 包装：失败也要返回 (task, exception)，
+    # 不能让某个坏 task 把整个 future 卡到永远 pending。
+    def _worker(task):
+        if cancel_event and cancel_event.is_set():
+            return task, None  # 主线程会忽略 None
+        try:
+            return task, fetch_fn(task)
+        except Exception as e:
+            return task, e
+
+    pool = ThreadPoolExecutor(
+        max_workers=MAX_FETCH_WORKERS,
+        thread_name_prefix=f"opus-{source_kind}",
+    )
+    try:
+        futures = [pool.submit(_worker, t) for t in tasks]
+        for future in as_completed(futures):
+            if cancel_event and cancel_event.is_set():
+                # 不再处理新的；in-flight 的也忽略结果，外层 finally 会
+                # 用 cancel_futures=True 把还没开跑的全砍掉，加速退出。
+                break
+
+            try:
+                task, results = future.result()
+            except Exception as e:
+                # _worker 已经吞掉了 fetch 异常，能到这里说明是更深的 bug。
+                log(f"{log_stage}_error", completed, total, error=str(e))
+                continue
+
+            if results is None:
+                # cancel 在 worker 入口就被检测到，没必要处理
+                continue
+
+            task_id = (task.get("task_id") or task.get("id") or "").strip()
+            if isinstance(results, Exception):
+                log(f"{log_stage}_error", completed + 1, total,
+                    task_id=task_id, error=str(results))
+                completed += 1
+                continue
+
+            translations = (results or {}).get("translations") or []
+            inserted = _bulk_upsert(
+                conn,
+                translations,
+                source_kind=source_kind,
+                default_task_id=task_id,
+                default_project_id=task.get("project_id", ""),
+                default_release=task.get("release", ""),
+                default_mr_iid=task.get("merge_request_iid"),
+                task_created_at=task.get("created_at") or "",
+            )
+            stats["tasks_seen"] += 1
+            stats["rows_inserted"] += inserted
+            completed += 1
+            # 每个任务结束 commit 一次：哪怕同步中途崩，已处理的也安全落库；
+            # 更重要的是 —— 主 GUI 的定时刷新走的是新连接，
+            # 必须及时 commit 才能读到。
+            conn.commit()
+            log(log_stage, completed, total,
+                task_id=task_id, inserted=inserted,
+                rows_total=stats["rows_inserted"])
+    finally:
+        # 取消还没开跑的 future（Python 3.9+ 行为）；in-flight 的让它跑完
+        # 但不再处理它的返回——避免阻塞 UI 上的"取消"按钮。
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+# ---------------------------------------------------------------------------
 # 同步：MR Pipeline
 # ---------------------------------------------------------------------------
 def _sync_mr_tasks(
@@ -274,37 +379,26 @@ def _sync_mr_tasks(
 
     log("mr_results", 0, len(all_tasks))
 
-    # 第二步：逐个拉 results 并落库
-    for i, task in enumerate(all_tasks, 1):
-        if cancel_event and cancel_event.is_set():
-            return stats
-        task_id = task.get("task_id") or task.get("id") or ""
-        if not task_id:
-            continue
-        try:
-            results = mr_api.fetch_mr_results(task_id)
-        except Exception as e:
-            log("mr_results_error", i, len(all_tasks),
-                task_id=task_id, error=str(e))
-            continue
-        translations = results.get("translations") or []
-        inserted = _bulk_upsert(
-            conn,
-            translations,
-            source_kind="mr",
-            default_task_id=task_id,
-            default_project_id=task.get("project_id", ""),
-            default_release=task.get("release", ""),
-            default_mr_iid=task.get("merge_request_iid"),
-            task_created_at=task.get("created_at") or "",
-        )
-        stats["tasks_seen"] += 1
-        stats["rows_inserted"] += inserted
-        # 每个任务结束 commit 一次：哪怕同步中途崩，已处理的也安全落库。
-        conn.commit()
-        log("mr_results", i, len(all_tasks),
-            task_id=task_id, inserted=inserted,
-            rows_total=stats["rows_inserted"])
+    # 第二步：并行拉 results、串行落库。
+    # 设计要点：
+    #   - HTTP fetch 是 I/O bound，开 8 个 worker 并行；
+    #   - SQLite 写入回到主线程（这里就是 sync 调用方所在线程），
+    #     避免 "database is locked" / WAL 写入竞态；
+    #   - 用 as_completed 一边出结果一边落库，第一秒就有数据进 DB，
+    #     UI 的定时刷新立刻能看到卡片往上跳；
+    #   - cancel_event 触发后停止派发新任务，但已 in-flight 的 HTTP
+    #     会让它跑完（无法安全中断 requests.get）。
+    _drain_results_into_db(
+        all_tasks,
+        fetch_fn=lambda t: mr_api.fetch_mr_results(
+            t.get("task_id") or t.get("id") or ""),
+        conn=conn,
+        source_kind="mr",
+        log=log,
+        log_stage="mr_results",
+        cancel_event=cancel_event,
+        stats=stats,
+    )
 
     _set_meta(conn, "mr_total_tasks", str(total_mr_tasks))
     return stats
@@ -353,33 +447,17 @@ def _sync_scan_tasks(
 
     log("scan_results", 0, len(all_tasks))
 
-    for i, task in enumerate(all_tasks, 1):
-        if cancel_event and cancel_event.is_set():
-            return stats
-        task_id = task.get("task_id") or task.get("id") or ""
-        if not task_id:
-            continue
-        try:
-            results = mr_api.fetch_scan_results(task_id)
-        except Exception as e:
-            log("scan_results_error", i, len(all_tasks),
-                task_id=task_id, error=str(e))
-            continue
-        translations = results.get("translations") or []
-        inserted = _bulk_upsert(
-            conn,
-            translations,
-            source_kind="scan",
-            default_task_id=task_id,
-            default_project_id=task.get("project_id", ""),
-            task_created_at=task.get("created_at") or "",
-        )
-        stats["tasks_seen"] += 1
-        stats["rows_inserted"] += inserted
-        conn.commit()
-        log("scan_results", i, len(all_tasks),
-            task_id=task_id, inserted=inserted,
-            rows_total=stats["rows_inserted"])
+    _drain_results_into_db(
+        all_tasks,
+        fetch_fn=lambda t: mr_api.fetch_scan_results(
+            t.get("task_id") or t.get("id") or ""),
+        conn=conn,
+        source_kind="scan",
+        log=log,
+        log_stage="scan_results",
+        cancel_event=cancel_event,
+        stats=stats,
+    )
 
     _set_meta(conn, "scan_total_tasks", str(total_scan))
     return stats
