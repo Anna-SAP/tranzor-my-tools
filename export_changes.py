@@ -465,8 +465,13 @@ def write_html(rows, filename, label):
         max-height: 0; opacity: 0; transition: max-height .35s ease, opacity .25s ease, margin .25s ease, padding .25s ease;
         padding: 0 20px;
     }}
+    /* When the panel is fully open we must allow children to overflow,
+       otherwise the LANG multi-select dropdown gets clipped at the panel
+       boundary and locales beyond the visible 5-or-so are unreachable. The
+       collapsed state KEEPS overflow:hidden so the max-height 0 animation
+       doesn't briefly flash internal content during open/close. */
     .filter-panel.open {{
-        max-height: 800px; opacity: 1; padding: 20px;
+        max-height: 800px; opacity: 1; padding: 20px; overflow: visible;
     }}
     .fp-row {{
         display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 16px;
