@@ -159,7 +159,12 @@ class MRPipelineTab:
         ttk.Radiobutton(action, text="HTML", variable=self.mr_fmt_var, value="html",
                          style="Card.TRadiobutton").pack(side="left", padx=(0, 6))
         ttk.Radiobutton(action, text="Excel", variable=self.mr_fmt_var, value="xlsx",
-                         style="Card.TRadiobutton").pack(side="left")
+                         style="Card.TRadiobutton").pack(side="left", padx=(0, 6))
+        # JSON 选项：透视为 {key, en-US, de-DE, ...} 供 LQA Skill 消费
+        self.rb_mr_json = ttk.Radiobutton(
+            action, text="", variable=self.mr_fmt_var, value="json",
+            style="Card.TRadiobutton")
+        self.rb_mr_json.pack(side="left")
 
         self.lbl_mr_status_bar = ttk.Label(action, text="", style="Status.TLabel")
         self.lbl_mr_status_bar.pack(side="left", padx=(16, 0))
@@ -303,6 +308,7 @@ class MRPipelineTab:
         self.rb_mr_changes.configure(text=t("export_type_changes"))
         self.rb_mr_translations.configure(text=t("export_type_all"))
         self.lbl_mr_fmt.configure(text=t("output_fmt_label"))
+        self.rb_mr_json.configure(text=t("output_fmt_json"))
         self.btn_mr_refresh.configure(text=t("summary_refresh"))
 
         for i, col in enumerate(("idx", "project", "mr", "release", "status", "avg_score", "created", "duration")):
@@ -657,7 +663,7 @@ class MRPipelineTab:
                     id_tag = "all_tasks"
                 type_tag = "all"
 
-            ext = ".xlsx" if fmt == "xlsx" else ".html"
+            ext = {"xlsx": ".xlsx", "json": ".json"}.get(fmt, ".html")
             today = date.today().isoformat()
             filename = f"mr_pipeline_{id_tag}_{type_tag}_{today}{ext}"
             script_dir = os.path.dirname(os.path.abspath(__file__))

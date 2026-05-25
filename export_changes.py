@@ -1177,6 +1177,9 @@ def save_file(rows, filename, label, fmt, open_after=True):
         in the user's default browser. The GUI sets this to False because
         its _on_done callback already handles auto-open — avoids the
         duplicate-tab bug.
+
+    fmt 支持 "html" / "xlsx" / "json"。json 走 export_json 透视为
+    {key, en-US, de-DE, ...} 供翻译 QA Skill 直接消费。
     """
     base, ext = os.path.splitext(filename)
     save_path = filename
@@ -1184,9 +1187,13 @@ def save_file(rows, filename, label, fmt, open_after=True):
         try:
             if fmt == "html":
                 write_html(rows, save_path, label)
+                print(f"已导出: {save_path}")
+            elif fmt == "json":
+                import export_json
+                export_json.write_translations_json(rows, save_path)
             else:
                 write_excel(rows, save_path)
-            print(f"已导出: {save_path}")
+                print(f"已导出: {save_path}")
             # HTML 自动在浏览器中打开（仅 CLI 默认行为；GUI 由 _on_done 接管）
             if fmt == "html" and open_after:
                 from export_gui import open_in_browser

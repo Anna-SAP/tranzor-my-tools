@@ -2331,6 +2331,10 @@ def save_mr_file(results_data, filename, label, fmt, bridge_info=None, open_afte
     open_after: when True (default) and the output is HTML, open the result
         in the user's default browser. The GUI passes False because its
         own export-done callback already handles auto-open.
+
+    fmt 支持 "html" / "xlsx" / "json"。json 走 export_json.write_translations_json，
+    输出的 schema 与翻译 QA Skill（如 /rc-core-products-trans-checker）期望的
+    {key, en-US, de-DE, ...} 透视格式一致。
     """
     base, ext = os.path.splitext(filename)
     save_path = filename
@@ -2338,9 +2342,14 @@ def save_mr_file(results_data, filename, label, fmt, bridge_info=None, open_afte
         try:
             if fmt == "html":
                 write_mr_html(results_data, save_path, label, bridge_info=bridge_info)
+                print(f"已导出: {save_path}")
+            elif fmt == "json":
+                # 延迟导入避免循环依赖（GUI 启动时 export_json 尚未加载）
+                import export_json
+                export_json.write_translations_json(results_data, save_path)
             else:
                 write_mr_excel(results_data, save_path)
-            print(f"已导出: {save_path}")
+                print(f"已导出: {save_path}")
             if fmt == "html" and open_after:
                 from export_gui import open_in_browser
                 open_in_browser(save_path)

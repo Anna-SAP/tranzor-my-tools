@@ -189,7 +189,12 @@ class ScanTasksTab:
                          ).pack(side="left", padx=(0, 6))
         ttk.Radiobutton(action, text="Excel", variable=self.scan_fmt_var,
                          value="xlsx", style="Card.TRadiobutton"
-                         ).pack(side="left")
+                         ).pack(side="left", padx=(0, 6))
+        # JSON 选项：透视为 {key, en-US, de-DE, ...} 供 LQA Skill 消费
+        self.rb_scan_json = ttk.Radiobutton(
+            action, text="", variable=self.scan_fmt_var,
+            value="json", style="Card.TRadiobutton")
+        self.rb_scan_json.pack(side="left")
 
         self.lbl_scan_status_bar = ttk.Label(action, text="", style="Status.TLabel")
         self.lbl_scan_status_bar.pack(side="left", padx=(16, 0))
@@ -283,6 +288,7 @@ class ScanTasksTab:
         self.rb_scan_changes.configure(text=t("export_type_changes"))
         self.rb_scan_translations.configure(text=t("export_type_all"))
         self.lbl_scan_fmt.configure(text=t("output_fmt_label"))
+        self.rb_scan_json.configure(text=t("output_fmt_json"))
         self.btn_scan_refresh.configure(text=t("summary_refresh"))
 
         for col in ("idx", "task_name", "project", "base_ref", "head_ref",
@@ -504,7 +510,7 @@ class ScanTasksTab:
                 type_tag = "all"
 
             id_tag = task_id[:8]
-            ext = ".xlsx" if fmt == "xlsx" else ".html"
+            ext = {"xlsx": ".xlsx", "json": ".json"}.get(fmt, ".html")
             today = date.today().isoformat()
             filename = f"scan_task_{id_tag}_{type_tag}_{today}{ext}"
             script_dir = os.path.dirname(os.path.abspath(__file__))
