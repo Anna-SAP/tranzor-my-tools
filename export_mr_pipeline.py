@@ -2388,14 +2388,43 @@ def fetch_scan_task_detail(task_id):
 
 
 def fetch_scan_results(task_id):
-    """GET /missing_translation_scan/tasks/{task_id}/results
+    """GET /missing_translation_scan/tasks/{task_id}/results — 分页拉全。
 
-    Response shape mirrors MR task /results: { task_id, translations: [...], ... }
-    so the existing save_mr_file / html / xlsx writers can render it unchanged.
+    ⚠️ 重要：Tranzor 后端这条接口默认 ``limit=200, max=1000``，**必须分页**。
+    早期版本直接调一次裸接口，对有几千条 (opus×lang) 的任务只能拿到前 200 条，
+    源文件路径等下游字段对绝大多数 opus_id 永远是空，OPUS ID Monitor 显示
+    "未同步" 就是这个 bug。
+
+    服务端响应 schema 是 ``{ task_id, translations: [...], total }`` —— 我们
+    凭 ``total`` 决定要不要继续翻页；老调用方拿到的依然是合并后的同一
+    结构，对它们完全透明。
     """
-    resp = _api_get(f"{SCAN_API}/tasks/{task_id}/results")
-    resp.raise_for_status()
-    return resp.json()
+    page_size = 1000  # 后端 hard cap = 1000，能一次拉多少就拉多少
+    all_translations: list = []
+    first_resp = None
+    offset = 0
+    while True:
+        resp = _api_get(
+            f"{SCAN_API}/tasks/{task_id}/results",
+            params={"limit": page_size, "offset": offset},
+        )
+        resp.raise_for_status()
+        data = resp.json() or {}
+        if first_resp is None:
+            first_resp = data
+        translations = data.get("translations") or []
+        all_translations.extend(translations)
+        total = int(data.get("total") or 0)
+        # 结束条件：要么这一页空了、要么累计已 ≥ total
+        if not translations or len(all_translations) >= total:
+            break
+        offset += len(translations)
+        # 防御性上限：如果服务端 total 不准，避免无限循环
+        if offset > 100_000:
+            break
+
+    first_resp["translations"] = all_translations
+    return first_resp
 
 
 def detect_scan_changes(task_id, progress_callback=None):

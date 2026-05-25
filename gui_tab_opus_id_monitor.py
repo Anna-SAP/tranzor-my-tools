@@ -146,6 +146,51 @@ STRINGS = {
         "opus_dlg_send_no_bridge":  "⚠ Bridge not running · envelope JSON copied to clipboard",
         "opus_dlg_send_failed":     "❌ Send failed: {error}",
         "opus_dlg_copied":          "✓ Copied",
+        # v4: per-source-kind missing-path messages
+        "opus_dlg_opus_path_mr_missing": (
+            "— MR Pipeline /results API does not expose this field. "
+            "Use the Path-hash lookup tool to reverse-resolve."),
+        "opus_dlg_opus_path_legacy_missing": (
+            "— File Translation API does not expose this field."),
+        # v4: Recent search box
+        "opus_recent_search_ph":    "🔍 Filter OPUS ID / project / alias…",
+        "opus_recent_filter_hint":  "{shown}/{total}",
+        # v4: File detail dialog
+        "opus_dlg_file_title":      "File · {label}",
+        "opus_dlg_file_summary":    (
+            "OPUS IDs: {opus}  ·  Langs: {langs}  ·  Rows: {rows}\n"
+            "Source file path: {path}\n"
+            "First seen: {first}   Last added: {last}"),
+        "opus_dlg_file_opus_title": "OPUS IDs in this file (top {n})",
+        "opus_dlg_file_col_logkey": "Logical key",
+        "opus_dlg_file_col_langs":  "Langs",
+        "opus_dlg_file_col_source": "Source text",
+        "opus_dlg_file_col_added":  "Last added",
+        # v4: ProjectDetailDialog source-file-path column
+        "opus_dlg_files_col_path":  "Source file path",
+        # v4: Path-hash lookup tool
+        "opus_path_lookup_btn":     "🔎 Path-hash lookup",
+        "opus_path_lookup_btn_tip": (
+            "Reverse-resolve a path_hash (or compute the path_hash for a "
+            "relative file path) against the local cache.\n\n"
+            "Especially useful for MR-source opus_ids whose source_file_path "
+            "is not exposed by the Tranzor API — paste a candidate path you "
+            "suspect, and see which opus_ids belong to it."),
+        "opus_path_lookup_title":   "Path-hash reverse-lookup",
+        "opus_path_lookup_intro":   (
+            "Paste a 32-hex path_hash to see which projects use it,\n"
+            "or paste a relative file path to compute its hash and search."),
+        "opus_path_lookup_input":   "Path or 32-hex hash:",
+        "opus_path_lookup_go":      "Look up",
+        "opus_path_lookup_no_match": "No matches in local cache.",
+        "opus_path_lookup_computed": "Computed path_hash: {hash}",
+        "opus_path_lookup_used_hash": "Using path_hash: {hash}",
+        "opus_path_lookup_col_proj":   "Project",
+        "opus_path_lookup_col_alias":  "Alias",
+        "opus_path_lookup_col_source": "Source",
+        "opus_path_lookup_col_opus":   "OPUS IDs",
+        "opus_path_lookup_col_langs":  "Langs",
+        "opus_path_lookup_col_path":   "Known source path",
     },
     "zh": {
         "tab_opus_monitor":         "🧬 OPUS ID 监控",
@@ -260,6 +305,50 @@ STRINGS = {
         "opus_dlg_send_no_bridge":  "⚠ Bridge 未运行 · envelope JSON 已复制到剪贴板",
         "opus_dlg_send_failed":     "❌ 发送失败：{error}",
         "opus_dlg_copied":          "✓ 已复制",
+        # v4: 按源头管线分别给出"为什么是空"的诚实解释
+        "opus_dlg_opus_path_mr_missing": (
+            "— MR Pipeline 的 /results API 不暴露此字段。\n"
+            "可用「Path-hash 反查工具」从已知路径反推。"),
+        "opus_dlg_opus_path_legacy_missing": (
+            "— File Translation API 不暴露此字段。"),
+        # v4: 最近新增搜索框
+        "opus_recent_search_ph":    "🔍 按 OPUS ID / 项目 / Alias 过滤…",
+        "opus_recent_filter_hint":  "{shown}/{total}",
+        # v4: 文件详情对话框
+        "opus_dlg_file_title":      "源文件 · {label}",
+        "opus_dlg_file_summary":    (
+            "OPUS ID：{opus}  ·  语言：{langs}  ·  总行：{rows}\n"
+            "源文件路径：{path}\n"
+            "首次出现：{first}   最近新增：{last}"),
+        "opus_dlg_file_opus_title": "本文件下的 OPUS ID（Top {n}）",
+        "opus_dlg_file_col_logkey": "Logical key",
+        "opus_dlg_file_col_langs":  "语言",
+        "opus_dlg_file_col_source": "源文本",
+        "opus_dlg_file_col_added":  "最近新增",
+        # v4: ProjectDetailDialog 加源文件路径列
+        "opus_dlg_files_col_path":  "源文件路径",
+        # v4: Path-hash 反查工具
+        "opus_path_lookup_btn":     "🔎 Path-hash 反查",
+        "opus_path_lookup_btn_tip": (
+            "反查 path_hash → 项目 / opus_id；或者给一个相对路径\n"
+            "算出 hash 并在本地缓存里查。\n\n"
+            "对 MR 来源的 opus_id 特别有用：因为 Tranzor API 不返回\n"
+            "source_file_path，这是唯一能把 hash 还原为可读路径的途径。"),
+        "opus_path_lookup_title":   "Path-hash 反查工具",
+        "opus_path_lookup_intro":   (
+            "粘贴 32 位 hex 的 path_hash → 查哪些项目用它；\n"
+            "或粘贴相对路径 → 算出 hash 再查。"),
+        "opus_path_lookup_input":   "路径或 32 位 hex hash：",
+        "opus_path_lookup_go":      "查询",
+        "opus_path_lookup_no_match": "本地缓存中无匹配。",
+        "opus_path_lookup_computed": "算出的 path_hash：{hash}",
+        "opus_path_lookup_used_hash": "使用 path_hash：{hash}",
+        "opus_path_lookup_col_proj":   "项目",
+        "opus_path_lookup_col_alias":  "Alias",
+        "opus_path_lookup_col_source": "源头",
+        "opus_path_lookup_col_opus":   "OPUS ID",
+        "opus_path_lookup_col_langs":  "语言",
+        "opus_path_lookup_col_path":   "已知源路径",
     },
 }
 
@@ -418,6 +507,16 @@ class OpusIdMonitorTab:
         self.lbl_status = ttk.Label(topbar, text="", style="Status.TLabel")
         self.lbl_status.pack(side="right")
 
+        # Path-hash 反查工具按钮 —— 给 MR 来源缺路径的兜底入口
+        self.btn_path_lookup = self.app._create_button(
+            topbar, text="", command=self._open_path_lookup,
+            style_name="SecondarySmall",
+            font=(FONT_FAMILY, 10),
+            bg="#0f3460", fg="#ccc", padx=14, pady=4)
+        self.btn_path_lookup.pack(side="right", padx=(0, 8))
+        from export_gui import Tooltip as _Tooltip
+        self._tip_path_lookup = _Tooltip(self.btn_path_lookup, text="")
+
         # ── Summary cards row ──
         cards_row = ttk.Frame(content, style="App.TFrame")
         cards_row.pack(fill="x", pady=(0, 10))
@@ -527,6 +626,30 @@ class OpusIdMonitorTab:
         # Right bottom: Recent additions —— 7 天窗口、可滚动
         self.lbl_recent = ttk.Label(right, text="", style="CardBold.TLabel")
         self.lbl_recent.pack(anchor="w", pady=(0, 4))
+
+        # 同款搜索框 —— 7 天可能有上千条，没搜索框找一个 opus_id 要翻页翻死
+        rc_search = ttk.Frame(right, style="App.TFrame")
+        rc_search.pack(fill="x", pady=(0, 4))
+        self.rc_search_var = tk.StringVar()
+        self.ent_rc_search = tk.Entry(
+            rc_search, textvariable=self.rc_search_var,
+            font=(FONT_FAMILY, 10),
+            bg="#0a0a1a", fg="#fff", insertbackground="#fff",
+            relief="flat")
+        self.ent_rc_search.pack(side="left", fill="x", expand=True, ipady=3)
+        self.rc_search_var.trace_add(
+            "write", lambda *_: self._render_recent(self._recent_data))
+        self.btn_rc_search_clear = tk.Button(
+            rc_search, text="✕", command=lambda: self.rc_search_var.set(""),
+            font=(FONT_FAMILY, 10), relief="flat",
+            bg="#0f3460", fg="#ccc", padx=6, pady=0,
+            activebackground="#1a3a6a", activeforeground="#fff",
+            cursor="hand2")
+        self.btn_rc_search_clear.pack(side="left", padx=(4, 0))
+        self.lbl_rc_filter_hint = ttk.Label(
+            rc_search, text="", style="Status.TLabel")
+        self.lbl_rc_filter_hint.pack(side="left", padx=(6, 0))
+
         rc_frame = ttk.Frame(right, style="App.TFrame")
         rc_frame.pack(fill="both", expand=True)
         rcols = ("time", "project", "alias", "opus")
@@ -575,6 +698,8 @@ class OpusIdMonitorTab:
         self._tip_sync.set_text(t("opus_sync_now_tip"))
         self._tip_sync_full.set_text(t("opus_sync_full_tip"))
         self._tip_sync_cancel.set_text(t("opus_sync_cancel_tip"))
+        self.btn_path_lookup.configure(text=t("opus_path_lookup_btn"))
+        self._tip_path_lookup.set_text(t("opus_path_lookup_btn_tip"))
         self.lbl_breakdown.configure(text=t("opus_breakdown_title"))
         self.lbl_trend.configure(text=t("opus_trend_title"))
         self.lbl_recent.configure(text=t("opus_recent_title"))
@@ -710,14 +835,34 @@ class OpusIdMonitorTab:
         self._render_breakdown()
 
     def _render_recent(self, recent: list[dict]):
+        # _render_recent 既被首次填充也被搜索框 trace 回调调用，所以
+        # 第一次传进来的 recent 是新数据要落到 self._recent_data；
+        # 搜索时传进来的 recent 本来就是 self._recent_data 自身。
+        if recent is not self._recent_data:
+            self._recent_data = recent
         self.tree_recent.delete(*self.tree_recent.get_children())
-        self._recent_data = recent
         self._recent_row_keys.clear()
         t = self._t
+        # 搜索过滤
+        q = (self.rc_search_var.get() or "").strip().lower() \
+            if hasattr(self, "rc_search_var") else ""
+        if q:
+            shown_rows = [
+                r for r in self._recent_data
+                if q in (r.get("opus_id") or "").lower()
+                   or q in (r.get("project_id") or "").lower()
+                   or q in (r.get("alias") or "").lower()
+            ]
+        else:
+            shown_rows = self._recent_data
         # 标题动态显示当前条数（"近 7 天新增（234 条）"）
         self.lbl_recent.configure(
-            text=t("opus_recent_title_n").format(n=len(recent)))
-        for r in recent:
+            text=t("opus_recent_title_n").format(n=len(self._recent_data)))
+        if hasattr(self, "lbl_rc_filter_hint"):
+            self.lbl_rc_filter_hint.configure(
+                text=t("opus_recent_filter_hint").format(
+                    shown=len(shown_rows), total=len(self._recent_data)))
+        for r in shown_rows:
             opus = r.get("opus_id", "")
             # 中段太长不易看，做软截断；双击仍能拿到完整 opus_id
             disp = opus if len(opus) <= 60 else opus[:30] + "…" + opus[-25:]
@@ -918,6 +1063,11 @@ class OpusIdMonitorTab:
             return
         OpusDetailDialog(self.parent, self.app, detail)
 
+    def _open_path_lookup(self, prefill: str = ""):
+        """打开 path-hash 反查工具。可由 top-bar 按钮或 OpusDetailDialog
+        里的"路径未知"行触发；prefill 用来预填一个 32 位 hash。"""
+        PathHashLookupDialog(self.parent, self.app, prefill=prefill)
+
     def _set_sync_buttons(self, *, running: bool):
         new_state = ["disabled"] if running else ["!disabled"]
         cancel_state = ["!disabled"] if running else ["disabled"]
@@ -1061,16 +1211,18 @@ class ProjectDetailDialog(tk.Toplevel):
 
         tbl_frame = ttk.Frame(outer, style="App.TFrame")
         tbl_frame.pack(fill="both", expand=True)
-        cols = ("pathhash", "opus", "langs", "last", "samples")
-        tree = ttk.Treeview(
+        # v4: 加 source path 列 + 双击钻取到 FileDetailDialog
+        cols = ("pathhash", "path", "opus", "langs", "last", "samples")
+        self._file_tree = tree = ttk.Treeview(
             tbl_frame, columns=cols, show="headings",
             style="Summary.Treeview", selectmode="browse")
-        widths = {"pathhash": 240, "opus": 70, "langs": 50,
-                  "last": 110, "samples": 280}
+        widths = {"pathhash": 200, "path": 230, "opus": 70, "langs": 50,
+                  "last": 110, "samples": 220}
         for c in cols:
-            anchor = "w" if c in ("pathhash", "samples") else "center"
+            anchor = "w" if c in ("pathhash", "path", "samples") else "center"
             tree.column(c, width=widths.get(c, 80), anchor=anchor)
         tree.heading("pathhash", text=t("opus_dlg_files_col_pathhash"))
+        tree.heading("path",     text=t("opus_dlg_files_col_path"))
         tree.heading("opus",     text=t("opus_dlg_files_col_opus"))
         tree.heading("langs",    text=t("opus_dlg_files_col_langs"))
         tree.heading("last",     text=t("opus_dlg_files_col_last"))
@@ -1081,6 +1233,8 @@ class ProjectDetailDialog(tk.Toplevel):
         tree.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
 
+        # iid → (alias, path_hash) 让双击能精确钻取（不依赖列文本解析）
+        self._file_row_keys: dict[str, tuple[str, str]] = {}
         for f in files:
             # 把样本拼成一串短文本，列内能看到 3-5 个
             samples = f.get("samples") or []
@@ -1088,13 +1242,21 @@ class ProjectDetailDialog(tk.Toplevel):
                 (s.get("logical_key") or "")[:14] for s in samples[:5]
             ]
             sample_text = ", ".join(k for k in sample_keys if k)
-            tree.insert("", "end", values=(
-                f.get("path_hash", "")[:32],
+            path = f.get("source_file_path") or "—"
+            alias = f.get("alias", "")
+            path_hash = f.get("path_hash", "")
+            iid = tree.insert("", "end", values=(
+                path_hash[:32],
+                path,
                 f"{f.get('opus_count', 0):,}",
                 f.get("lang_count", 0),
                 _fmt_iso_short(f.get("last_added")),
                 sample_text,
             ))
+            self._file_row_keys[iid] = (alias, path_hash)
+
+        # 双击文件行 → 弹 FileDetailDialog（该文件下所有 opus_id 一览）
+        tree.bind("<Double-1>", self._on_file_dbl)
 
         # Close button row
         btn_row = ttk.Frame(outer, style="App.TFrame")
@@ -1109,6 +1271,136 @@ class ProjectDetailDialog(tk.Toplevel):
         # 让 ESC / 窗口关都能优雅退出
         self.bind("<Escape>", lambda _e: self.destroy())
         self.transient(parent)
+
+    def _on_file_dbl(self, _event=None):
+        """双击文件行 → FileDetailDialog 展示该文件下所有 opus_id。"""
+        sel = self._file_tree.selection()
+        if not sel:
+            return
+        key = self._file_row_keys.get(sel[0])
+        if not key:
+            return
+        alias, path_hash = key
+        try:
+            fdet = om.get_file_detail(
+                self.detail.get("project_id", ""),
+                alias, path_hash,
+                source_kind=self.detail.get("source_kind") or None,
+            )
+        except Exception as e:
+            print(f"[file_dbl] failed: {e!r}")
+            return
+        FileDetailDialog(self, self.app, fdet)
+
+
+# ---------------------------------------------------------------------------
+# 钻取对话框：点击 File 行 → 该文件下所有 opus_id 一览
+# ---------------------------------------------------------------------------
+class FileDetailDialog(tk.Toplevel):
+    """单文件详情：(project, alias, path_hash) 下所有 opus_id 的列表。
+
+    对 LOC-24722 这种"同 logical_key 跨多个 path_hash" 的事故诊断特别有用：
+    用户能逐字看清这个文件里到底有哪些 key。
+    """
+
+    def __init__(self, parent, app, detail: dict):
+        super().__init__(parent)
+        self.app = app
+        self.detail = detail
+        t = app._t
+        summary = detail.get("summary") or {}
+        path = summary.get("source_file_path") or detail.get("path_hash", "")
+        # title 优先显示真实路径，没路径就退回 path_hash
+        self.title(t("opus_dlg_file_title").format(label=path[:64]))
+        self.configure(bg="#16213e")
+        self.geometry("960x600")
+
+        outer = ttk.Frame(self, style="App.TFrame")
+        outer.pack(fill="both", expand=True, padx=16, pady=12)
+
+        # Summary
+        path_display = (summary.get("source_file_path")
+                         or t("opus_dlg_opus_path_missing"))
+        tk.Label(
+            outer,
+            text=t("opus_dlg_file_summary").format(
+                opus=summary.get("opus_count", 0),
+                langs=summary.get("lang_count", 0),
+                rows=summary.get("row_count", 0),
+                path=path_display,
+                first=_fmt_iso_short(summary.get("first_seen")),
+                last=_fmt_iso_short(summary.get("last_added")),
+            ),
+            bg="#16213e", fg="#ccc",
+            font=(FONT_FAMILY, 10), justify="left", anchor="w",
+        ).pack(fill="x", pady=(0, 8))
+
+        # OPUS ID list
+        opus_rows = detail.get("opus_ids") or []
+        ttk.Label(
+            outer,
+            text=t("opus_dlg_file_opus_title").format(n=len(opus_rows)),
+            style="CardBold.TLabel",
+        ).pack(anchor="w", pady=(0, 4))
+
+        tbl = ttk.Frame(outer, style="App.TFrame")
+        tbl.pack(fill="both", expand=True)
+        cols = ("logkey", "langs", "source", "added")
+        self._opus_tree = tree = ttk.Treeview(
+            tbl, columns=cols, show="headings",
+            style="Summary.Treeview", selectmode="browse")
+        widths = {"logkey": 280, "langs": 60, "source": 460, "added": 110}
+        for c in cols:
+            anchor = "w" if c in ("logkey", "source") else "center"
+            tree.column(c, width=widths.get(c, 80), anchor=anchor)
+        tree.heading("logkey", text=t("opus_dlg_file_col_logkey"))
+        tree.heading("langs",  text=t("opus_dlg_file_col_langs"))
+        tree.heading("source", text=t("opus_dlg_file_col_source"))
+        tree.heading("added",  text=t("opus_dlg_file_col_added"))
+        sb = ttk.Scrollbar(tbl, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=sb.set)
+        tree.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+
+        self._opus_row_keys: dict[str, str] = {}
+        for r in opus_rows:
+            src = (r.get("source_text") or "")[:200]
+            iid = tree.insert("", "end", values=(
+                r.get("logical_key", ""),
+                r.get("lang_count", 0),
+                src,
+                _fmt_iso_short(r.get("last_added")),
+            ))
+            self._opus_row_keys[iid] = r.get("opus_id", "")
+
+        # 双击 opus 行 → 继续钻到 OpusDetailDialog（完整画像）
+        tree.bind("<Double-1>", self._on_opus_dbl)
+
+        # Close
+        btn_row = ttk.Frame(outer, style="App.TFrame")
+        btn_row.pack(fill="x", pady=(8, 0))
+        close_btn = app._create_button(
+            btn_row, text=t("opus_dlg_close"), command=self.destroy,
+            style_name="SecondarySmall",
+            font=(FONT_FAMILY, 10),
+            bg="#0f3460", fg="#ccc", padx=14, pady=4)
+        close_btn.pack(side="right")
+        self.bind("<Escape>", lambda _e: self.destroy())
+        self.transient(parent)
+
+    def _on_opus_dbl(self, _event=None):
+        sel = self._opus_tree.selection()
+        if not sel:
+            return
+        opus_id = self._opus_row_keys.get(sel[0])
+        if not opus_id:
+            return
+        try:
+            od = om.get_opus_detail(opus_id)
+        except Exception as e:
+            print(f"[file→opus] failed: {e!r}")
+            return
+        OpusDetailDialog(self, self.app, od)
 
 
 # ---------------------------------------------------------------------------
@@ -1153,9 +1445,22 @@ class OpusDetailDialog(tk.Toplevel):
 
         # 4-段分解 + 元数据
         # path_hash 后紧跟"真实路径"一行——这是 debug "为啥 ID 变了" 的核心证据。
-        # 老缓存里没有这字段时，给用户一个明确的"未同步"提示。
+        # 路径空时按来源管线给不同的诚实解释：
+        #   - mr   → Tranzor MR API 根本不返回这字段，让用户用反查工具
+        #   - scan → 历史缓存遗留，Scan API 是有这字段的，让用户重建
+        #   - file → File Translation API 也不返回
         path = detail.get("source_file_path", "")
-        path_display = path if path else t("opus_dlg_opus_path_missing")
+        if path:
+            path_display = path
+        else:
+            sk = (detail.get("source_kind") or "").lower()
+            if sk == "mr":
+                path_display = t("opus_dlg_opus_path_mr_missing")
+            elif sk == "file":
+                path_display = t("opus_dlg_opus_path_legacy_missing")
+            else:
+                # scan 或未知 → 老的"重建一下"文案
+                path_display = t("opus_dlg_opus_path_missing")
         meta = [
             (t("opus_dlg_opus_alias"),     detail.get("alias", "")),
             (t("opus_dlg_opus_pathhash"),  detail.get("path_hash", "")),
@@ -1177,6 +1482,13 @@ class OpusDetailDialog(tk.Toplevel):
         meta_frame.pack(fill="x", pady=(0, 8))
         # path_hash 和 source_file_path 都用等宽体，方便和原始数据对照看
         _mono_keys = ("logkey", "path", "alias", "logical")
+        # 几个"我们故意填的占位提示"——这些行的 value 要显示成灰色而不是白色，
+        # 否则视觉上像真实数据，会误导用户。
+        _placeholder_values = {
+            t("opus_dlg_opus_path_missing"),
+            t("opus_dlg_opus_path_mr_missing"),
+            t("opus_dlg_opus_path_legacy_missing"),
+        }
         for row_i, (label, value) in enumerate(meta):
             tk.Label(
                 meta_frame, text=label + ":",
@@ -1185,12 +1497,13 @@ class OpusDetailDialog(tk.Toplevel):
                 width=46,  # 加宽容纳 "源文件路径..." 这类长 label
             ).grid(row=row_i, column=0, sticky="e", padx=(0, 8), pady=1)
             is_mono = any(k in label.lower() for k in _mono_keys)
+            is_placeholder = (value in _placeholder_values)
             tk.Label(
                 meta_frame, text=value or "—",
                 bg="#16213e",
-                fg="#fff" if value and value != t("opus_dlg_opus_path_missing")
-                          else "#9aa0b0",  # 未同步行用灰色
-                font=(FONT_MONO if is_mono else FONT_FAMILY, 9),
+                fg="#9aa0b0" if (not value or is_placeholder) else "#fff",
+                font=(FONT_MONO if is_mono and not is_placeholder
+                                 else FONT_FAMILY, 9),
                 anchor="w",
                 wraplength=520,
                 justify="left",
@@ -1464,3 +1777,153 @@ class OpusDetailDialog(tk.Toplevel):
                 text=self.app._t("opus_dlg_send_failed").format(
                     error=str(e)[:60]),
                 fg="#ff6b6b")
+
+
+# ---------------------------------------------------------------------------
+# Path-hash 反查工具
+# ---------------------------------------------------------------------------
+class PathHashLookupDialog(tk.Toplevel):
+    """Path-hash 反查工具。
+
+    用户场景：
+      1) 看到一个 opus_id 第 3 段是 32 位 hex，想知道它对应哪个项目／文件
+         → 把 hash 粘进来 → 列出本地缓存中所有命中。
+      2) 怀疑 MR 来源 opus_id 的 path 是某个候选路径
+         （比如改名前的 / 改名后的）→ 把候选路径粘进来 →
+         我们自己算 md5(path)，再查缓存看哪个项目用了这个 hash。
+
+    这对 LOC-24722 类"hash 漂移"事故是直接命中需求 —— 在没有上游 API
+    返回 source_file_path 的情况下，用户也能靠"反推+对账"自己排查。
+    """
+
+    # 32 位 hex 的判定：path_hash 一定是 md5 → 32 个 [0-9a-f]
+    _HEX_RE = __import__("re").compile(r"^[0-9a-f]{32}$")
+
+    def __init__(self, parent, app, prefill: str = ""):
+        super().__init__(parent)
+        self.app = app
+        t = app._t
+        self.title(t("opus_path_lookup_title"))
+        self.configure(bg="#16213e")
+        self.geometry("900x560")
+
+        outer = ttk.Frame(self, style="App.TFrame")
+        outer.pack(fill="both", expand=True, padx=16, pady=12)
+
+        # Intro
+        tk.Label(
+            outer, text=t("opus_path_lookup_intro"),
+            bg="#16213e", fg="#9aa0b0",
+            font=(FONT_FAMILY, 10), justify="left", anchor="w",
+        ).pack(fill="x", pady=(0, 8))
+
+        # Input row
+        in_row = ttk.Frame(outer, style="App.TFrame")
+        in_row.pack(fill="x", pady=(0, 8))
+        ttk.Label(
+            in_row, text=t("opus_path_lookup_input"),
+            style="CardBold.TLabel",
+        ).pack(side="left", padx=(0, 8))
+        self.input_var = tk.StringVar(value=prefill)
+        ent = tk.Entry(
+            in_row, textvariable=self.input_var,
+            font=(FONT_MONO, 10),
+            bg="#0a0a1a", fg="#fff", insertbackground="#fff",
+            relief="flat")
+        ent.pack(side="left", fill="x", expand=True, ipady=4)
+        ent.focus_set()
+        ent.bind("<Return>", lambda _e: self._do_lookup())
+        go_btn = app._create_button(
+            in_row, text=t("opus_path_lookup_go"),
+            command=self._do_lookup,
+            style_name="SuccessSmall",
+            font=(FONT_FAMILY, 10, "bold"),
+            bg="#2ecc71", fg="#fff", padx=14, pady=4)
+        go_btn.pack(side="left", padx=(8, 0))
+
+        # Computed-hash readout
+        self.lbl_hash_info = tk.Label(
+            outer, text="", bg="#16213e", fg="#9aa0b0",
+            font=(FONT_MONO, 9), anchor="w", justify="left")
+        self.lbl_hash_info.pack(fill="x", pady=(0, 6))
+
+        # Results table
+        tbl = ttk.Frame(outer, style="App.TFrame")
+        tbl.pack(fill="both", expand=True)
+        cols = ("proj", "alias", "source", "opus", "langs", "path")
+        self._tree = tree = ttk.Treeview(
+            tbl, columns=cols, show="headings",
+            style="Summary.Treeview", selectmode="browse")
+        widths = {"proj": 220, "alias": 70, "source": 60,
+                  "opus": 80, "langs": 60, "path": 380}
+        for c in cols:
+            anchor = "w" if c in ("proj", "path") else "center"
+            tree.column(c, width=widths.get(c, 80), anchor=anchor)
+        tree.heading("proj",   text=t("opus_path_lookup_col_proj"))
+        tree.heading("alias",  text=t("opus_path_lookup_col_alias"))
+        tree.heading("source", text=t("opus_path_lookup_col_source"))
+        tree.heading("opus",   text=t("opus_path_lookup_col_opus"))
+        tree.heading("langs",  text=t("opus_path_lookup_col_langs"))
+        tree.heading("path",   text=t("opus_path_lookup_col_path"))
+        sb = ttk.Scrollbar(tbl, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=sb.set)
+        tree.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+
+        # 状态行（无匹配提示）
+        self.lbl_status = tk.Label(
+            outer, text="", bg="#16213e", fg="#f1c40f",
+            font=(FONT_FAMILY, 10), anchor="w")
+        self.lbl_status.pack(fill="x", pady=(6, 0))
+
+        # Close
+        btn_row = ttk.Frame(outer, style="App.TFrame")
+        btn_row.pack(fill="x", pady=(8, 0))
+        close_btn = app._create_button(
+            btn_row, text=t("opus_dlg_close"), command=self.destroy,
+            style_name="SecondarySmall",
+            font=(FONT_FAMILY, 10),
+            bg="#0f3460", fg="#ccc", padx=14, pady=4)
+        close_btn.pack(side="right")
+        self.bind("<Escape>", lambda _e: self.destroy())
+        self.transient(parent)
+
+        # 预填了 hash → 自动跑一次
+        if prefill:
+            self._do_lookup()
+
+    def _do_lookup(self):
+        t = self.app._t
+        raw = (self.input_var.get() or "").strip()
+        self._tree.delete(*self._tree.get_children())
+        self.lbl_status.configure(text="")
+        if not raw:
+            self.lbl_hash_info.configure(text="")
+            return
+
+        # 自动识别输入是 hash 还是 path：32 位 lowercase hex 当 hash 处理
+        if self._HEX_RE.match(raw.lower()):
+            path_hash = raw.lower()
+            self.lbl_hash_info.configure(
+                text=t("opus_path_lookup_used_hash").format(hash=path_hash))
+            matches = om.lookup_path_hash(path_hash)
+        else:
+            res = om.lookup_path_string(raw)
+            path_hash = res["path_hash"]
+            self.lbl_hash_info.configure(
+                text=t("opus_path_lookup_computed").format(hash=path_hash))
+            matches = res["matches"]
+
+        if not matches:
+            self.lbl_status.configure(text=t("opus_path_lookup_no_match"))
+            return
+
+        for m in matches:
+            self._tree.insert("", "end", values=(
+                m.get("project_id", ""),
+                m.get("alias", ""),
+                _source_label(m.get("source_kind", ""), t),
+                f"{m.get('opus_count', 0):,}",
+                m.get("lang_count", 0),
+                m.get("source_file_path") or "—",
+            ))

@@ -790,14 +790,16 @@ def get_project_detail(
             """, params)
         summary = dict(cur.fetchone() or {})
 
-        # Per-file (path_hash) breakdown
+        # Per-file (path_hash) breakdown —— 同时取 source_file_path
+        # 让 ProjectDetailDialog 不再只能展示 hash，能直观告诉用户"这是哪份文件"。
         cur = conn.execute(
             f"""
             SELECT
                 alias, path_hash,
                 COUNT(DISTINCT opus_id)         AS opus_count,
                 COUNT(DISTINCT target_language) AS lang_count,
-                MAX(first_seen)                 AS last_added
+                MAX(first_seen)                 AS last_added,
+                COALESCE(MAX(NULLIF(source_file_path, '')), '') AS source_file_path
             FROM opus_index
             WHERE {where_sql} AND path_hash != ''
             GROUP BY alias, path_hash
@@ -824,6 +826,123 @@ def get_project_detail(
             "summary": summary,
             "files": files,
         }
+
+
+def get_file_detail(
+    project_id: str,
+    alias: str,
+    path_hash: str,
+    source_kind: str | None = None,
+    *,
+    samples_limit: int = 200,
+    db_path: str | None = None,
+) -> dict:
+    """点击 ProjectDetailDialog 里某个源文件行后的钻取数据。
+
+    展示一个 (project, alias, path_hash) 三元组下所有 opus_id、覆盖的
+    语言数、最近变化。OPUS ID Monitor 用它来回答"这个文件里都有哪些字符串"
+    —— 对追踪 BUG（如 LOC-24722 同一 logical key 跨多个 path_hash）至关重要。
+    """
+    init_db(db_path)
+    with _connect(db_path) as conn:
+        where_sql = "project_id = ? AND alias = ? AND path_hash = ?"
+        params = [project_id, alias, path_hash]
+        if source_kind:
+            where_sql += " AND source_kind = ?"
+            params.append(source_kind)
+
+        # File-level summary
+        cur = conn.execute(f"""
+            SELECT
+                COUNT(DISTINCT opus_id)         AS opus_count,
+                COUNT(DISTINCT target_language) AS lang_count,
+                COUNT(*)                        AS row_count,
+                MIN(first_seen)                 AS first_seen,
+                MAX(first_seen)                 AS last_added,
+                COALESCE(MAX(NULLIF(source_file_path, '')), '') AS source_file_path
+            FROM opus_index WHERE {where_sql}
+        """, params)
+        summary = dict(cur.fetchone() or {})
+
+        # 该文件下每个 opus_id：以 logical_key 为聚合键拿一行
+        cur = conn.execute(f"""
+            SELECT
+                opus_id, logical_key,
+                COUNT(DISTINCT target_language) AS lang_count,
+                MAX(first_seen)                 AS last_added,
+                MAX(source_text)                AS source_text
+            FROM opus_index WHERE {where_sql}
+            GROUP BY opus_id
+            ORDER BY last_added DESC
+            LIMIT ?
+        """, params + [samples_limit])
+        opus_rows = [dict(r) for r in cur.fetchall()]
+
+        return {
+            "project_id": project_id,
+            "alias": alias,
+            "path_hash": path_hash,
+            "source_kind": source_kind or "",
+            "summary": summary,
+            "opus_ids": opus_rows,
+        }
+
+
+def md5_path(relative_path: str) -> str:
+    """计算 ``RingCentral.{alias}.{md5}.{logical}`` 中段 md5，跟 Tranzor 的
+    LegacyTranslationKey.ts ``createHash('md5').update(sourceRelativePath)``
+    完全等价。供反查工具用。"""
+    import hashlib
+    if not relative_path:
+        return ""
+    return hashlib.md5(relative_path.encode("utf-8")).hexdigest()
+
+
+def lookup_path_hash(path_hash: str, db_path: str | None = None) -> list[dict]:
+    """反查：给一个 path_hash → 返回本地缓存里所有用它的 (project, alias)
+    分组及其 opus_id 数、可能的 source_file_path（如果同步过）。
+
+    用户输入 path_hash 后立刻能看到："这个 hash 对应 web/bui 的某文件，
+    在那里产生了 421 个 opus_id" —— 配合 LOC-24722 这类 hash 漂移调查。
+    """
+    init_db(db_path)
+    if not path_hash:
+        return []
+    with _connect(db_path) as conn:
+        cur = conn.execute("""
+            SELECT
+                project_id, alias, source_kind,
+                COUNT(DISTINCT opus_id) AS opus_count,
+                COUNT(DISTINCT target_language) AS lang_count,
+                MAX(first_seen) AS last_added,
+                COALESCE(MAX(NULLIF(source_file_path, '')), '') AS source_file_path
+            FROM opus_index
+            WHERE path_hash = ?
+            GROUP BY project_id, alias, source_kind
+            ORDER BY opus_count DESC
+        """, (path_hash,))
+        return [dict(r) for r in cur.fetchall()]
+
+
+def lookup_path_string(
+    relative_path: str,
+    db_path: str | None = None,
+) -> dict:
+    """正向：给一个文件相对路径 → 算 md5 → 查本地缓存。
+
+    Returns:
+        {
+          "input_path": str,
+          "path_hash": str,
+          "matches": [{project_id, alias, opus_count, ...}, ...]
+        }
+    """
+    h = md5_path(relative_path)
+    return {
+        "input_path": relative_path,
+        "path_hash": h,
+        "matches": lookup_path_hash(h, db_path=db_path),
+    }
 
 
 def get_opus_detail(opus_id: str, db_path: str | None = None) -> dict:
@@ -1073,5 +1192,9 @@ __all__ = [
     "get_recent_additions",
     "get_project_detail",
     "get_opus_detail",
+    "get_file_detail",
     "get_anomaly_stats",
+    "lookup_path_hash",
+    "lookup_path_string",
+    "md5_path",
 ]
