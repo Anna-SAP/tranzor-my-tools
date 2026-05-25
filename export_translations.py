@@ -1319,10 +1319,28 @@ def save_file(rows, filename, label, fmt, bridge_info=None, open_after=True):
         in the user's default browser. The GUI sets this to False because
         its _on_done callback already handles auto-open — avoids the
         duplicate-tab bug.
+
+    fmt 支持 "html" / "xlsx" / "json"。json 走 export_json 透视为
+    {key, en-US, de-DE, ...} 供翻译 QA Skill 直接消费；单文件输出，
+    不按语言分页（QA 工具期望整体 schema）。
     """
     from collections import OrderedDict
 
     base, ext = os.path.splitext(filename)
+
+    # JSON：单文件、无浏览器、无分页（始终输出整份给 QA 工具消费）
+    if fmt == "json":
+        import export_json
+        save_path = filename
+        for attempt in range(100):
+            try:
+                export_json.write_translations_json(rows, save_path)
+                return
+            except PermissionError:
+                attempt_num = attempt + 1
+                save_path = f"{base}_{attempt_num}{ext}"
+                print(f"  文件被占用，尝试保存为: {save_path}")
+        return
 
     # HTML 大数据集自动分页
     if fmt == "html" and len(rows) > PAGE_SIZE:

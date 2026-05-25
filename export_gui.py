@@ -144,6 +144,7 @@ STRINGS = {
         "output_fmt_label":   "Output Format",
         "output_fmt_html":    "HTML (Filters / TMX Export)",
         "output_fmt_xlsx":    "Excel",
+        "output_fmt_json":    "JSON (for QA Audit)",
         "btn_run":            "▶  Start Export",
         "btn_open":           "📂  Open Report",
         "status_ready":       "Ready",
@@ -267,6 +268,7 @@ STRINGS = {
         "output_fmt_label":   "输出格式",
         "output_fmt_html":    "HTML（含筛选/TMX 导出）",
         "output_fmt_xlsx":    "Excel",
+        "output_fmt_json":    "JSON（用于 QA 审计）",
         "btn_run":            "▶  开始导出",
         "btn_open":           "📂  打开报告",
         "status_ready":       "就绪",
@@ -970,7 +972,12 @@ class ExportApp:
         self.rb_xlsx = ttk.Radiobutton(row2, text="",
                          variable=self.fmt_var, value="xlsx",
                          style="Card.TRadiobutton")
-        self.rb_xlsx.pack(side="left")
+        self.rb_xlsx.pack(side="left", padx=(0, 16))
+        # JSON 选项：透视为 {key, en-US, de-DE, ...} 供翻译 QA Skill 直接消费
+        self.rb_json = ttk.Radiobutton(row2, text="",
+                         variable=self.fmt_var, value="json",
+                         style="Card.TRadiobutton")
+        self.rb_json.pack(side="left")
 
         # ── Button Area ──
         btn_frame = ttk.Frame(left, style="App.TFrame")
@@ -1170,6 +1177,7 @@ class ExportApp:
         self.lbl_fmt.configure(text=self._t("output_fmt_label"))
         self.rb_html.configure(text=self._t("output_fmt_html"))
         self.rb_xlsx.configure(text=self._t("output_fmt_xlsx"))
+        self.rb_json.configure(text=self._t("output_fmt_json"))
         self.btn_run.configure(text=self._t("btn_run"))
         self.btn_open.configure(text=self._t("btn_open"))
         self.lbl_log_header.configure(text=self._t("log_header"))
@@ -1536,7 +1544,7 @@ class ExportApp:
                 return
 
             fmt = self.fmt_var.get()
-            ext = ".xlsx" if fmt == "xlsx" else ".html"
+            ext = {"xlsx": ".xlsx", "json": ".json"}.get(fmt, ".html")
             today_str = date.today().isoformat()
 
             if export_type == "translations":
