@@ -104,7 +104,9 @@ CREATE TABLE IF NOT EXISTS opus_index (
     project_id       TEXT,
     release          TEXT,
     source_text      TEXT,
-    source_kind      TEXT NOT NULL,   -- 'mr' or 'scan'
+    translated_text  TEXT,            -- 译文，详情对话框展示用
+    source_file_path TEXT,            -- 真实源文件相对路径（path_hash 的明文，debug 极有用）
+    source_kind      TEXT NOT NULL,   -- 'mr' or 'scan' or 'file'
     mr_iid           INTEGER,
     task_created_at  TEXT,
     first_seen       TEXT NOT NULL,
@@ -125,9 +127,23 @@ CREATE TABLE IF NOT EXISTS sync_meta (
 
 
 def init_db(db_path: str | None = None) -> None:
-    """创建表与索引（首次运行 / 升级都安全）。"""
+    """创建表与索引（首次运行 / 升级都安全）。
+
+    schema 演化：用 ``ALTER TABLE ... ADD COLUMN`` 而不是 DROP/recreate，
+    保留用户已经攒下来的本地缓存。SQLite 不支持 ``IF NOT EXISTS`` 给
+    ADD COLUMN，所以我们自己查 PRAGMA table_info 后再决定加不加。
+    """
     with _connect(db_path) as conn:
         conn.executescript(_SCHEMA)
+        # 增量列：早期版本没有这俩，老用户升级时补齐
+        cur = conn.execute("PRAGMA table_info(opus_index)")
+        existing = {row["name"] for row in cur.fetchall()}
+        if "translated_text" not in existing:
+            conn.execute(
+                "ALTER TABLE opus_index ADD COLUMN translated_text TEXT")
+        if "source_file_path" not in existing:
+            conn.execute(
+                "ALTER TABLE opus_index ADD COLUMN source_file_path TEXT")
 
 
 # ---------------------------------------------------------------------------
@@ -212,6 +228,8 @@ def _bulk_upsert(
             t.get("project_id") or default_project_id or "",
             t.get("release") or default_release or "",
             (t.get("source_text") or "")[:8192],  # 防长文本爆缓存
+            (t.get("translated_text") or "")[:8192],  # 译文同样限长
+            t.get("source_file_path") or "",  # 真实源路径（path_hash 的明文）
             source_kind,
             t.get("mr_iid") if t.get("mr_iid") is not None else default_mr_iid,
             task_created_at,
@@ -228,8 +246,9 @@ def _bulk_upsert(
             opus_id, target_language, task_id,
             alias, path_hash, logical_key,
             project_id, release, source_text,
+            translated_text, source_file_path,
             source_kind, mr_iid, task_created_at, first_seen
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         rows,
     )
@@ -529,11 +548,15 @@ def _sync_legacy_tasks(
             entries = legacy_api.fetch_all_translations(task_id)
         except Exception:
             raise
-        # 转译字段名让 _bulk_upsert 能直接用
+        # 转译字段名让 _bulk_upsert 能直接用。translated_text 和
+        # source_file_path 同样带过来：详情对话框要展示译文 + 真实路径。
         translations = [{
             "opus_id": e.get("opus_id") or "",
             "target_language": e.get("target_language") or "",
             "source_text": e.get("source_text") or "",
+            "translated_text": e.get("translated_text") or "",
+            "source_file_path": (e.get("source_file_path")
+                                  or e.get("source_relative_path") or ""),
             "task_id": str(task_id),
         } for e in entries]
         return {"translations": translations}
@@ -804,7 +827,14 @@ def get_project_detail(
 
 
 def get_opus_detail(opus_id: str, db_path: str | None = None) -> dict:
-    """点击 "Recently added" 某一行后展示的 opus_id 详情。"""
+    """点击 "Recently added" 某一行后展示的 opus_id 详情。
+
+    返回字段在 v3 扩展为：
+      - ``source_file_path``：path_hash 的明文，是 debug "为什么 ID 变了"
+        的关键证据，比 32 位 hex 直观一个量级。
+      - ``target_languages[i].translated_text``：每个目标语言的最新译文，
+        让用户在监控面板里就能预览翻译，不必跳到 Tranzor 平台。
+    """
     init_db(db_path)
     with _connect(db_path) as conn:
         cur = conn.execute(
@@ -812,7 +842,8 @@ def get_opus_detail(opus_id: str, db_path: str | None = None) -> dict:
             SELECT
                 opus_id, alias, path_hash, logical_key,
                 project_id, source_kind, release, mr_iid,
-                target_language, source_text, task_id,
+                target_language, source_text, translated_text,
+                source_file_path, task_id,
                 task_created_at, first_seen
             FROM opus_index
             WHERE opus_id = ?
@@ -823,6 +854,11 @@ def get_opus_detail(opus_id: str, db_path: str | None = None) -> dict:
             return {"opus_id": opus_id, "found": False, "rows": []}
         # 顶层共用字段（取第一行就行 —— 同一 opus_id 的元数据相同）
         head = rows[0]
+        # source_file_path 偶尔可能某些行没填（早期数据 / API 未返回），
+        # 用 max(...) 取第一个非空，避免误把"该 ID 没路径信息"展示给用户
+        path = next(
+            (r["source_file_path"] for r in rows if r["source_file_path"]),
+            "")
         return {
             "opus_id": opus_id,
             "found": True,
@@ -837,9 +873,11 @@ def get_opus_detail(opus_id: str, db_path: str | None = None) -> dict:
             "task_created_at": head["task_created_at"],
             "first_seen": head["first_seen"],
             "source_text": head["source_text"],
+            "source_file_path": path,
             "target_languages": [
                 {"target_language": r["target_language"],
-                 "first_seen": r["first_seen"]}
+                 "first_seen": r["first_seen"],
+                 "translated_text": r["translated_text"] or ""}
                 for r in rows
             ],
         }
@@ -977,35 +1015,38 @@ def get_anomaly_stats(
 
 
 def get_recent_additions(
-    limit: int = 50,
+    days: int = 7,
+    hard_limit: int = 1000,
     db_path: str | None = None,
 ) -> list[dict]:
-    """最近 N 个首次出现的 opus_id（按 first_seen 倒序）。"""
+    """近 N 天内首次出现的 opus_id（按 first_seen 倒序，去重）。
+
+    Args:
+        days: 时间窗口（天）。默认 7 天 —— 用户想看一周内的全部新增。
+        hard_limit: 防爆：哪怕这周突然涌进几万个 opus_id，
+            UI 也只渲染前 ``hard_limit`` 行避免 Tk 卡死。
+    """
     init_db(db_path)
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(
+        timespec="seconds")
     with _connect(db_path) as conn:
+        # 内层窗口函数：每个 opus_id 取 first_seen 最早的一行，
+        # 避免同 opus_id 多语言展开重复，又能保留正确的 first_seen 排序。
         cur = conn.execute(
             """
             SELECT
                 opus_id, alias, path_hash, logical_key,
                 project_id, target_language, source_kind, mr_iid,
-                first_seen
+                source_file_path, MIN(first_seen) AS first_seen
             FROM opus_index
+            WHERE first_seen >= ?
+            GROUP BY opus_id
             ORDER BY first_seen DESC
             LIMIT ?
             """,
-            (limit,),
+            (cutoff, hard_limit),
         )
-        # 同 opus_id 多语言会展开多行，去重保留首条
-        seen: set[str] = set()
-        out: list[dict] = []
-        for r in cur.fetchall():
-            if r["opus_id"] in seen:
-                continue
-            seen.add(r["opus_id"])
-            out.append(dict(r))
-            if len(out) >= limit:
-                break
-        return out
+        return [dict(r) for r in cur.fetchall()]
 
 
 # ---------------------------------------------------------------------------
