@@ -113,6 +113,21 @@ STRINGS = {
         "opus_breakdown_search_ph": "🔍 Filter by project / alias…",
         "opus_breakdown_search_clear": "✕",
         "opus_breakdown_filter_hint": "{shown}/{total} rows shown",
+        "opus_breakdown_source_label": "Source:",
+        "opus_breakdown_source_any":   "(any)",
+        # Sync delta dialog (post-sync new-OPUS-ID popup)
+        "opus_delta_title":           "Sync result · {n} new OPUS ID(s)",
+        "opus_delta_header":          (
+            "Added since last sync ({since}). Showing {shown} of {total} new OPUS IDs."),
+        "opus_delta_header_first":    (
+            "First-time sync — every row is new. Showing {shown} of {total} OPUS IDs."),
+        "opus_delta_col_time":        "First seen",
+        "opus_delta_col_source":      "Source",
+        "opus_delta_col_project":     "Project",
+        "opus_delta_col_alias":       "Alias",
+        "opus_delta_col_opus":        "OPUS ID",
+        "opus_delta_close":           "Close",
+        "opus_delta_empty":           "No new OPUS IDs since last sync.",
         # OpusDetailDialog new fields
         "opus_dlg_opus_path":       "Source file path (debug-friendly plaintext of path hash)",
         "opus_dlg_opus_path_missing": "— (not synced; re-run Full re-sync to populate)",
@@ -129,17 +144,6 @@ STRINGS = {
             "userscript is installed."),
         "opus_dlg_send_setup_wizard": "Run setup wizard…",
         "opus_dlg_send_pending": "⏳ Pushed · waiting for Tranzor browser tab to pull…",
-        # Anomaly line below the cards
-        "opus_anomaly_normal":      (
-            "📊 30-day avg ~{avg}/day · today +{today} · "
-            "{ratio}× baseline · within normal range"),
-        "opus_anomaly_warning":     (
-            "🟡 30-day avg ~{avg}/day · today +{today} · "
-            "{ratio}× baseline — above {threshold}× warning threshold"),
-        "opus_anomaly_critical":    (
-            "🔴 30-day avg ~{avg}/day · today +{today} · "
-            "{ratio}× baseline — above {threshold}× critical threshold!"),
-        "opus_anomaly_no_data":     "📊 No baseline yet — sync first to see anomaly detection",
         # Send-to-Tranzor button on OpusDetailDialog
         "opus_dlg_send":            "↗ Send to Tranzor",
         "opus_dlg_send_ok":         "✓ Sent to Tranzor browser tab",
@@ -286,6 +290,21 @@ STRINGS = {
         "opus_breakdown_search_ph": "🔍 按项目 / Alias 过滤…",
         "opus_breakdown_search_clear": "✕",
         "opus_breakdown_filter_hint": "显示 {shown}/{total} 行",
+        "opus_breakdown_source_label": "来源:",
+        "opus_breakdown_source_any":   "(全部)",
+        # Sync 完成后的增量详情对话框
+        "opus_delta_title":           "同步结果 · 本次新增 {n} 条 OPUS ID",
+        "opus_delta_header":          (
+            "上次同步（{since}）之后新增。共 {total} 条，展示其中 {shown} 条。"),
+        "opus_delta_header_first":    (
+            "首次同步 —— 全部 OPUS ID 都计为新增。共 {total} 条，展示其中 {shown} 条。"),
+        "opus_delta_col_time":        "首次出现",
+        "opus_delta_col_source":      "来源",
+        "opus_delta_col_project":     "项目",
+        "opus_delta_col_alias":       "Alias",
+        "opus_delta_col_opus":        "OPUS ID",
+        "opus_delta_close":           "关闭",
+        "opus_delta_empty":           "本次同步无新增 OPUS ID。",
         # OpusDetailDialog 新字段
         "opus_dlg_opus_path":       "源文件路径（path hash 的明文，debug 必看）",
         "opus_dlg_opus_path_missing": "— （未同步；点「全量重建」补齐）",
@@ -302,17 +321,6 @@ STRINGS = {
             "userscript 已安装并启用。"),
         "opus_dlg_send_setup_wizard": "启动配置向导…",
         "opus_dlg_send_pending": "⏳ 已推送 · 等待 Tranzor 浏览器 tab 拉取…",
-        # 异常侦测
-        "opus_anomaly_normal":      (
-            "📊 30 天日均 ~{avg}/天 · 今日 +{today} · "
-            "{ratio}× 均值 · 在正常区间"),
-        "opus_anomaly_warning":     (
-            "🟡 30 天日均 ~{avg}/天 · 今日 +{today} · "
-            "{ratio}× 均值 — 超过 {threshold}× 告警阈值"),
-        "opus_anomaly_critical":    (
-            "🔴 30 天日均 ~{avg}/天 · 今日 +{today} · "
-            "{ratio}× 均值 — 超过 {threshold}× 红色阈值！"),
-        "opus_anomaly_no_data":     "📊 暂无基线数据 — 先点同步以启用异常侦测",
         # 详情对话框 Send-to-Tranzor 按钮
         "opus_dlg_send":            "↗ 发送到 Tranzor",
         "opus_dlg_send_ok":         "✓ 已发送到 Tranzor 浏览器 tab",
@@ -568,15 +576,9 @@ class OpusIdMonitorTab:
         self.card_new = _SummaryCard(cards_row, color="#8E44AD")
         self.card_new.pack(side="left", expand=True, fill="x", padx=(6, 0))
 
-        # ── Anomaly line ── one-line "baseline vs today"早期预警
-        # 颜色随告警级别变（normal=灰、warning=黄、critical=红），把"今天
-        # 突然多了 N 倍"这种异常推到用户视野最显眼的位置。
-        self.lbl_anomaly = tk.Label(
-            content, text="",
-            bg="#16213e", fg="#9aa0b0",
-            font=(FONT_FAMILY, 10), anchor="w", justify="left",
-        )
-        self.lbl_anomaly.pack(fill="x", pady=(0, 10))
+        # 异常侦测一行已下线 (v0.6) —— 首次 Full re-sync 时 today=完整库存、
+        # baseline=0，必然触发 critical 告警，用户每次都得无视它，纯噪音。
+        # 趋势异常的语义已由"近 7 天 / 近 30 天"卡片副标题覆盖。
 
         # ── Main body: left = breakdown table, right = trend + recent ──
         body = ttk.Frame(content, style="App.TFrame")
@@ -597,6 +599,21 @@ class OpusIdMonitorTab:
         # 项目多了之后必备：18+ 个项目时全屏滚动很烦躁。
         search_row = ttk.Frame(left, style="App.TFrame")
         search_row.pack(fill="x", pady=(0, 4))
+
+        # Source 筛选下拉 —— 让用户只看某一类来源的项目。与 Tranzor Checks
+        # 面板的 Source 下拉保持同一份枚举值 + 同款标签翻译，跨 tab 体感一致。
+        self.lbl_bd_source = ttk.Label(
+            search_row, text="", style="Status.TLabel")
+        self.lbl_bd_source.pack(side="left")
+        self.bd_source_var = tk.StringVar()
+        self.cmb_bd_source = ttk.Combobox(
+            search_row, textvariable=self.bd_source_var,
+            width=8, state="readonly")
+        self.cmb_bd_source.pack(side="left", padx=(4, 8))
+        self.cmb_bd_source.bind(
+            "<<ComboboxSelected>>",
+            lambda _e: self._render_breakdown())
+
         self.bd_search_var = tk.StringVar()
         self.ent_bd_search = tk.Entry(
             search_row, textvariable=self.bd_search_var,
@@ -743,6 +760,10 @@ class OpusIdMonitorTab:
         self.lbl_breakdown.configure(text=t("opus_breakdown_title"))
         self.lbl_trend.configure(text=t("opus_trend_title"))
         self.lbl_recent.configure(text=t("opus_recent_title"))
+        # Source 过滤下拉的标签 + 重建选项（label 跟着语言切换）
+        if hasattr(self, "lbl_bd_source"):
+            self.lbl_bd_source.configure(text=t("opus_breakdown_source_label"))
+        self._refresh_source_combo()
         for c, key in (
             ("project", "opus_col_project"),
             ("alias", "opus_col_alias"),
@@ -770,16 +791,43 @@ class OpusIdMonitorTab:
         self._refresh_from_cache()
 
     # ------------------------------------------------------------------
+    # Source 筛选下拉：根据当前 i18n 重建选项 + 维护 label → source_kind 映射
+    # ------------------------------------------------------------------
+    def _refresh_source_combo(self):
+        """重新生成 Source 下拉的 label 列表，保留用户当前选择。
+
+        label 跟语言走（"文件" vs "File"），但 source_kind 本身是稳定的原值
+        （"mr"/"scan"/"file"），过滤逻辑读 ``_bd_source_label_map`` 反查。
+        """
+        if not hasattr(self, "cmb_bd_source"):
+            return
+        t = self._t
+        any_label = t("opus_breakdown_source_any")
+        kinds = (("", any_label),
+                 ("mr",   t("opus_src_mr")),
+                 ("scan", t("opus_src_scan")),
+                 ("file", t("opus_src_file")))
+        labels = [lbl for _k, lbl in kinds]
+        self._bd_source_label_map = {lbl: (k or None) for k, lbl in kinds}
+        cur = self.bd_source_var.get()
+        self.cmb_bd_source["values"] = labels
+        # 当前选项还在新 label 列表里就保留，否则回退到 "全部"
+        if cur not in labels:
+            self.bd_source_var.set(any_label)
+
+    # ------------------------------------------------------------------
     # 渲染：从本地 SQLite 拉数据填面板
     # ------------------------------------------------------------------
     def _refresh_from_cache(self):
+        # 首次进入 tab 时 refresh_text 还没跑过，确保 Source 下拉至少有
+        # "(全部)/MR/Scan/文件" 四个选项；之后每次 refresh_text 都会再调一次。
+        self._refresh_source_combo()
         try:
             summary = om.get_summary()
             breakdown = om.get_per_project_breakdown()
             trend = om.get_daily_trend(days=30)
             # 7 天滚动窗口：用户要求"展示一周内的全部新增内容"
             recent = om.get_recent_additions(days=7, hard_limit=1000)
-            anomaly = om.get_anomaly_stats()
         except Exception as e:
             self.lbl_status.configure(
                 text=self._t("opus_status_failed").format(error=str(e)[:60]))
@@ -804,9 +852,6 @@ class OpusIdMonitorTab:
         self._last_sync_iso = summary.get("last_sync_at")
         self._render_last_sync_label()
 
-        # 异常侦测一行：根据偏离度切换颜色，让大尖刺一眼就能看见
-        self._render_anomaly_line(anomaly)
-
         # 表格 + 图
         self._breakdown_data = breakdown
         self._render_breakdown()
@@ -824,14 +869,20 @@ class OpusIdMonitorTab:
             "langs": "lang_count",
             "last_added": "last_added",
         }.get(col, "opus_count")
-        # 1) 先应用搜索过滤
+        # 1) 先应用搜索过滤 + Source 过滤
         q = (self.bd_search_var.get() or "").strip().lower()
-        if q:
-            filtered = [r for r in self._breakdown_data
-                        if q in (r.get("project_id") or "").lower()
-                           or q in (r.get("alias") or "").lower()]
-        else:
-            filtered = list(self._breakdown_data)
+        # source 下拉的 label 经 i18n 翻译，先把它映射回 source_kind 原值。
+        src_label = (self.bd_source_var.get() or "").strip() \
+            if hasattr(self, "bd_source_var") else ""
+        src_kind = getattr(self, "_bd_source_label_map", {}).get(src_label)
+        filtered = []
+        for r in self._breakdown_data:
+            if q and q not in (r.get("project_id") or "").lower() \
+                    and q not in (r.get("alias") or "").lower():
+                continue
+            if src_kind and (r.get("source_kind") or "") != src_kind:
+                continue
+            filtered.append(r)
         # 2) 再排序
         rows = sorted(
             filtered,
@@ -917,42 +968,6 @@ class OpusIdMonitorTab:
 
     # ------------------------------------------------------------------
     # 异常侦测一行 —— 30 天日均 vs 今日，自动配色
-    # ------------------------------------------------------------------
-    # 颜色按级别走，和卡片配色保持一致；不要随意改值，否则色盲用户也会
-    # 跟着倒霉（normal 浅灰、warning 琥珀、critical 鲜红）。
-    _ANOMALY_COLORS = {
-        "normal":   ("#16213e", "#9aa0b0"),  # 与背景近，弱化呈现
-        "warning":  ("#3a2d10", "#f1c40f"),  # 琥珀
-        "critical": ("#3d1212", "#ff6b6b"),  # 红
-    }
-
-    def _render_anomaly_line(self, anomaly: dict):
-        """把 get_anomaly_stats 的结果渲染成一行带颜色的提示。"""
-        t = self._t
-        level = anomaly.get("level", "normal")
-        today = anomaly.get("today_new", 0)
-        avg = anomaly.get("daily_avg", 0)
-        ratio = anomaly.get("ratio", 0)
-
-        # 还没基线：友好提示用户先同步
-        if avg < 1 and today == 0:
-            text = t("opus_anomaly_no_data")
-            bg, fg = self._ANOMALY_COLORS["normal"]
-        else:
-            if level == "warning":
-                text = t("opus_anomaly_warning").format(
-                    avg=avg, today=f"{today:,}", ratio=ratio,
-                    threshold=anomaly.get("warning_ratio", 3))
-            elif level == "critical":
-                text = t("opus_anomaly_critical").format(
-                    avg=avg, today=f"{today:,}", ratio=ratio,
-                    threshold=anomaly.get("critical_ratio", 10))
-            else:
-                text = t("opus_anomaly_normal").format(
-                    avg=avg, today=f"{today:,}", ratio=ratio)
-            bg, fg = self._ANOMALY_COLORS[level]
-        self.lbl_anomaly.configure(text=text, bg=bg, fg=fg)
-
     def _draw_trend(self):
         cv = self.canvas_trend
         cv.delete("all")
@@ -1024,6 +1039,16 @@ class OpusIdMonitorTab:
         self.lbl_status.configure(
             text=self._t("opus_status_syncing").format(
                 stage="init", cur=0, total=0))
+        # 捕获本次 sync 的"新增基线" —— sync 完成后用它查 first_seen > 基线
+        # 的所有 opus_id，弹窗展示。**必须在 sync 启动前**记录，否则 sync 自己
+        # 写入的新行也会满足"> 新基线"条件，全部行都被当成"本次新增"。
+        # 用 last_sync_at（上次 sync 落地时间戳）作为 cutoff；首次 sync 时为
+        # None，data layer 会把它解释成"全部都算新增"。
+        try:
+            prev_summary = om.get_summary()
+            self._sync_baseline_iso = prev_summary.get("last_sync_at")
+        except Exception:
+            self._sync_baseline_iso = None
         self._sync_thread = threading.Thread(
             target=self._run_sync, args=(full,), daemon=True)
         self._sync_thread.start()
@@ -1173,6 +1198,13 @@ class OpusIdMonitorTab:
                     0, lambda: self.lbl_status.configure(
                         text=self._t("opus_status_done").format(
                             mr=mr_rows, scan=scan_rows, legacy=legacy_rows)))
+                # 完成后弹增量详情对话框：查 first_seen > 同步前基线的
+                # 全部 distinct opus_id。**只在用户主动取消之外的成功路径**
+                # 触发，避免取消时还弹一个"看上去成功了"的窗口造成误解。
+                baseline = getattr(self, "_sync_baseline_iso", None)
+                self.parent.after(
+                    150,
+                    lambda b=baseline: self._show_sync_delta_dialog(b))
         except Exception as e:
             err = str(e)[:80]
             self.parent.after(0, lambda: self.lbl_status.configure(
@@ -1181,6 +1213,24 @@ class OpusIdMonitorTab:
             self.parent.after(0, lambda: self._set_sync_buttons(running=False))
             # 同步完了刷新一次面板
             self.parent.after(100, self._refresh_from_cache)
+
+    def _show_sync_delta_dialog(self, baseline_iso: str | None):
+        """弹模态对话框展示本次 sync 期间新落库的所有 opus_id。
+
+        - 0 新增：不弹窗（status 行已显示"Sync done · 0 rows" 足够）
+        - 1+ 新增：弹 ``SyncDeltaDialog``；超过 hard_limit 会在对话框头部
+          注明"仅展示前 N 条"
+        """
+        try:
+            additions = om.get_additions_since(baseline_iso)
+        except Exception as e:
+            # 数据查询失败不能影响主面板；status 行提示即可
+            self.lbl_status.configure(
+                text=self._t("opus_status_failed").format(error=str(e)[:60]))
+            return
+        if not additions:
+            return  # 0 新增，不打扰用户
+        SyncDeltaDialog(self.parent, self.app, additions, baseline_iso)
 
 
 # ---------------------------------------------------------------------------
@@ -1219,6 +1269,110 @@ class _SummaryCard(tk.Frame):
 
     def set_subtitle(self, text: str):
         self._subtitle.configure(text=text)
+
+
+# ---------------------------------------------------------------------------
+# Sync 增量详情对话框 —— 点 "Sync now" 完成后自动弹，展示本次新增明细
+# ---------------------------------------------------------------------------
+class SyncDeltaDialog(tk.Toplevel):
+    """同步完成后弹出的"本次新增 OPUS ID"列表。
+
+    设计要点：
+      - 非阻塞 Toplevel（用户可继续点主面板），点关闭即销毁
+      - 渲染上限 = 5000 行；超出在头部告知"展示 5000 of N"，避免 Tk 卡死
+      - 列与 OPUS Monitor 主面板的"最近新增"风格一致，降低视觉认知成本
+    """
+
+    _HARD_RENDER_LIMIT = 5000
+
+    def __init__(self, parent, app, additions: list[dict],
+                  baseline_iso: str | None):
+        super().__init__(parent)
+        self.app = app
+        t = app._t
+        total = len(additions)
+        self.title(t("opus_delta_title").format(n=total))
+        self.configure(bg="#16213e")
+        self.geometry("780x520")
+
+        outer = ttk.Frame(self, style="App.TFrame")
+        outer.pack(fill="both", expand=True, padx=16, pady=12)
+
+        # 头部一行说明：是否首次、共多少新增、当前渲染了多少
+        shown = min(total, self._HARD_RENDER_LIMIT)
+        if not baseline_iso:
+            header = t("opus_delta_header_first").format(
+                shown=f"{shown:,}", total=f"{total:,}")
+        else:
+            header = t("opus_delta_header").format(
+                since=_fmt_iso_short(baseline_iso),
+                shown=f"{shown:,}", total=f"{total:,}")
+        tk.Label(outer, text=header, bg="#16213e", fg="#ccc",
+                  font=(FONT_FAMILY, 10), justify="left",
+                  anchor="w").pack(fill="x", pady=(0, 8))
+
+        # 列表 —— 复用主面板的源色配色 / 列布局
+        tbl_frame = ttk.Frame(outer, style="App.TFrame")
+        tbl_frame.pack(fill="both", expand=True)
+        cols = ("time", "source", "project", "alias", "opus")
+        tree = ttk.Treeview(
+            tbl_frame, columns=cols, show="headings",
+            style="Summary.Treeview", selectmode="browse")
+        widths = {"time": 110, "source": 60, "project": 200,
+                  "alias": 90, "opus": 280}
+        anchors = {"time": "center", "source": "center",
+                    "project": "w", "alias": "center", "opus": "w"}
+        for c in cols:
+            tree.column(c, width=widths[c], anchor=anchors[c])
+        tree.heading("time",    text=t("opus_delta_col_time"))
+        tree.heading("source",  text=t("opus_delta_col_source"))
+        tree.heading("project", text=t("opus_delta_col_project"))
+        tree.heading("alias",   text=t("opus_delta_col_alias"))
+        tree.heading("opus",    text=t("opus_delta_col_opus"))
+
+        sb = ttk.Scrollbar(tbl_frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=sb.set)
+        tree.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+
+        # 源色配色 —— 与主面板保持视觉一致
+        _SRC_BG = {"src_mr": "#1b2c44", "src_scan": "#1f3a2b",
+                   "src_file": "#3a2e1f", "src_unknown": "#1a1a2e"}
+        _SRC_FG = {"src_mr": "#cfe1ff", "src_scan": "#caf0d3",
+                   "src_file": "#f0d9b8", "src_unknown": "#ccc"}
+        for tag, bg in _SRC_BG.items():
+            tree.tag_configure(tag, background=bg, foreground=_SRC_FG[tag])
+
+        for r in additions[: self._HARD_RENDER_LIMIT]:
+            opus = r.get("opus_id", "")
+            # 长 opus_id 做软截断以免列宽爆掉
+            opus_disp = opus if len(opus) <= 80 \
+                else opus[:40] + "…" + opus[-30:]
+            source = r.get("source_kind", "")
+            tree.insert("", "end", values=(
+                _fmt_iso_short(r.get("first_seen", "")),
+                _source_label(source, t),
+                r.get("project_id", "") or "—",
+                r.get("alias", "") or "—",
+                opus_disp,
+            ), tags=(_source_tag(source),))
+
+        # Close 按钮
+        btn_row = ttk.Frame(outer, style="App.TFrame")
+        btn_row.pack(fill="x", pady=(10, 0))
+        btn_close = tk.Button(
+            btn_row, text=t("opus_delta_close"),
+            command=self.destroy,
+            font=(FONT_FAMILY, 10),
+            bg="#0f3460", fg="#fff",
+            activebackground="#1a3a6a", activeforeground="#fff",
+            relief="flat", padx=18, pady=4, cursor="hand2")
+        btn_close.pack(side="right")
+
+        # Esc 也能关闭
+        self.bind("<Escape>", lambda _e: self.destroy())
+        # 主窗口居中显示
+        self.transient(parent)
 
 
 # ---------------------------------------------------------------------------
