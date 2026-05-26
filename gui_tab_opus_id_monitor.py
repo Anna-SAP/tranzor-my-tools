@@ -128,6 +128,12 @@ STRINGS = {
         "opus_delta_col_opus":        "OPUS ID",
         "opus_delta_close":           "Close",
         "opus_delta_empty":           "No new OPUS IDs since last sync.",
+        "opus_delta_copy_all":        "📋 Copy all OPUS IDs",
+        "opus_delta_copy_tip":        (
+            "Copy every new OPUS ID to the clipboard, one per line.\n"
+            "Includes all {n} entries — not limited by the 5,000-row display cap.\n"
+            "Shortcut: Ctrl+C while this dialog is focused."),
+        "opus_delta_copied_n":        "✓ Copied {n} OPUS IDs",
         # OpusDetailDialog new fields
         "opus_dlg_opus_path":       "Source file path (debug-friendly plaintext of path hash)",
         "opus_dlg_opus_path_missing": "— (not synced; re-run Full re-sync to populate)",
@@ -305,6 +311,12 @@ STRINGS = {
         "opus_delta_col_opus":        "OPUS ID",
         "opus_delta_close":           "关闭",
         "opus_delta_empty":           "本次同步无新增 OPUS ID。",
+        "opus_delta_copy_all":        "📋 复制全部 OPUS ID",
+        "opus_delta_copy_tip":        (
+            "把本次新增的全部 OPUS ID 一次性复制到剪贴板，每行一条。\n"
+            "包含全部 {n} 条 —— 不受 5,000 行渲染上限影响。\n"
+            "快捷键：对话框获得焦点时按 Ctrl+C。"),
+        "opus_delta_copied_n":        "✓ 已复制 {n} 条 OPUS ID",
         # OpusDetailDialog 新字段
         "opus_dlg_opus_path":       "源文件路径（path hash 的明文，debug 必看）",
         "opus_dlg_opus_path_missing": "— （未同步；点「全量重建」补齐）",
@@ -1284,6 +1296,9 @@ class SyncDeltaDialog(tk.Toplevel):
     """
 
     _HARD_RENDER_LIMIT = 5000
+    #: 复制反馈在按钮上停留多久后恢复原状（毫秒）。1.5s 够人眼读完
+    #: "已复制 N 条"又不至于让人怀疑按钮卡住。
+    _COPY_FEEDBACK_MS = 1500
 
     def __init__(self, parent, app, additions: list[dict],
                   baseline_iso: str | None):
@@ -1291,6 +1306,14 @@ class SyncDeltaDialog(tk.Toplevel):
         self.app = app
         t = app._t
         total = len(additions)
+        # 保留完整 opus_id 列表 —— 表格里展示的是软截断后的字符串，
+        # 复制必须用原始完整值。同时只保留非空 id，避免脏数据把空行
+        # 塞到剪贴板里。
+        self._all_opus_ids = [
+            (r.get("opus_id") or "").strip()
+            for r in additions
+            if (r.get("opus_id") or "").strip()
+        ]
         self.title(t("opus_delta_title").format(n=total))
         self.configure(bg="#16213e")
         self.geometry("780x520")
@@ -1357,9 +1380,38 @@ class SyncDeltaDialog(tk.Toplevel):
                 opus_disp,
             ), tags=(_source_tag(source),))
 
-        # Close 按钮
+        # 底部按钮栏：左侧"复制全部"，右侧"关闭"
         btn_row = ttk.Frame(outer, style="App.TFrame")
         btn_row.pack(fill="x", pady=(10, 0))
+
+        # 复制全部 OPUS ID —— 左侧，绿色调强调"主要的操作"
+        # 注意：保存按钮原文案，复制反馈结束后用它恢复（不要在每次都
+        # 重新读 i18n，否则用户切语言后会出现 1.5s 内显示错语言的尴尬）。
+        self._copy_default_text = t("opus_delta_copy_all")
+        self.btn_copy_all = tk.Button(
+            btn_row, text=self._copy_default_text,
+            command=self._copy_all_opus_ids,
+            font=(FONT_FAMILY, 10),
+            bg="#27AE60", fg="#fff",
+            activebackground="#2ecc71", activeforeground="#fff",
+            relief="flat", padx=18, pady=4, cursor="hand2")
+        # 没有可复制的 id 时禁用按钮（其实 0 新增时弹窗根本不会出现，
+        # 但全部 id 为空字符串的脏数据场景下保险一手）。
+        if not self._all_opus_ids:
+            self.btn_copy_all.configure(state="disabled")
+        self.btn_copy_all.pack(side="left")
+
+        # tooltip：靠 export_gui 的 Tooltip 类（已在主面板 widget 上使用过）
+        try:
+            from export_gui import Tooltip
+            self._tip_copy_all = Tooltip(
+                self.btn_copy_all,
+                text=t("opus_delta_copy_tip").format(
+                    n=len(self._all_opus_ids)))
+        except Exception:
+            # Tooltip 失败不能让对话框崩 —— 不是核心功能
+            self._tip_copy_all = None
+
         btn_close = tk.Button(
             btn_row, text=t("opus_delta_close"),
             command=self.destroy,
@@ -1369,10 +1421,61 @@ class SyncDeltaDialog(tk.Toplevel):
             relief="flat", padx=18, pady=4, cursor="hand2")
         btn_close.pack(side="right")
 
-        # Esc 也能关闭
+        # 键盘快捷键：
+        #   Ctrl+C  —— 复制全部（Tk Treeview 上 Ctrl+C 默认无行为，
+        #              我们劫持成"全选复制"语义；用户选不选行都触发同一逻辑）
+        #   Esc     —— 关闭
+        # 注意必须 bind 到 self（Toplevel）而不是单个 widget，让对话框
+        # 任何子控件获得焦点时按 Ctrl+C 都生效。
+        self.bind("<Control-c>", lambda _e: self._copy_all_opus_ids())
+        self.bind("<Control-C>", lambda _e: self._copy_all_opus_ids())
         self.bind("<Escape>", lambda _e: self.destroy())
         # 主窗口居中显示
         self.transient(parent)
+
+    # ------------------------------------------------------------------
+    # 复制全部 OPUS ID 到剪贴板
+    # ------------------------------------------------------------------
+    def _copy_all_opus_ids(self):
+        """把 self._all_opus_ids 用换行拼接后塞进剪贴板。
+
+        关键细节：
+          - ``clipboard_clear`` 之后必须 ``clipboard_append`` + ``update``，
+            否则在 Windows 上窗口关闭就会丢失剪贴板内容（Tk 的剪贴板是
+            "owner-based"，进程退出才真正移交给系统）。
+          - 失败时尽量不要让 dialog 崩；按钮恢复原文案让用户能再点一次。
+        """
+        if not self._all_opus_ids:
+            return
+        payload = "\n".join(self._all_opus_ids)
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(payload)
+            # update() 让事件循环把剪贴板真正交给系统 —— 不调用的话用户
+            # 关掉窗口后剪贴板就空了，会显得"按钮没生效"。
+            self.update()
+        except Exception:
+            return  # 罕见，例如剪贴板被其他进程独占；按钮不反馈即可
+        # 临时反馈
+        n = len(self._all_opus_ids)
+        self.btn_copy_all.configure(
+            text=self.app._t("opus_delta_copied_n").format(n=n))
+        # 复制完按钮短暂禁用，避免用户连点产生大量剪贴板争用
+        self.btn_copy_all.configure(state="disabled")
+        self.after(self._COPY_FEEDBACK_MS, self._restore_copy_button)
+
+    def _restore_copy_button(self):
+        """复制反馈结束 → 把按钮恢复为可点击 + 原文案。"""
+        # widget 可能已经被销毁（用户在反馈期间关掉了对话框）—— 不能
+        # 直接访问 btn_copy_all.configure，否则 TclError。winfo_exists()
+        # 检查最稳。
+        try:
+            if not self.btn_copy_all.winfo_exists():
+                return
+        except Exception:
+            return
+        self.btn_copy_all.configure(
+            text=self._copy_default_text, state="normal")
 
 
 # ---------------------------------------------------------------------------
