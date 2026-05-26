@@ -1,0 +1,893 @@
+"""
+Tranzor Checks — 本地 SQLite 缓存 + Tranzor API 增量同步（任务检查/错误聚合视角）
+=============================================================================
+
+为 TranzorExporter 提供"全量 Task Checks 状态 + 细粒度错误关键词"的数据层。
+与 :mod:`opus_id_monitor` 互补：
+
+- opus_id_monitor 关注 **opus_id 层面**的资产盘点；
+- tranzor_checks 关注 **issue 层面**的质量信号 —— 哪条术语、哪个占位符、
+  哪个语种在哪个 task 出错了，让 QA / Language Lead 快速判断"误报"。
+
+为什么独立一张 DB？
+    现有 ``opus_index.db`` 的主键是 (opus_id, target_language, task_id)，
+    每行最多一条记录。但一个 (opus_id, lang, task) 可以同时触发多种 check
+    （Terminology + Parameter Format 都中招），主键模式会把它们挤掉。
+    把 issue 视角放在独立的 ``checks_index.db`` 既不污染既有缓存、又能让
+    schema 自由演化（v0.2 加 ignore_flag / cluster_id 都不影响主线）。
+
+参考 Tranzor 后端 schema（**只读参考**，不可修改）：
+
+- ``app/models/evaluation.py`` — error_category ∈ {Accuracy, Fluency,
+  Terminology, Consistency, Locale Convention, None}，外加 reason 自由文本
+- ``app/evaluation/common_check.py`` — Variable/Number Mismatch 通用检查
+- Tranzor UI 的 "Terminology Inconsistency" / "Parameter Format" 过滤器
+  实际上是基于 error_category + reason 文本启发式推断出的标签
+
+暴露给上层（UI tab）的入口：
+
+    - :func:`init_db` — 创建 schema（幂等）
+    - :func:`sync_full` / :func:`sync_incremental` — 三类任务全/增量同步
+    - :func:`get_summary` — 顶部统计卡数据
+    - :func:`get_aggregated_issues` — 聚合表（按 error_type/lang/keyword）
+    - :func:`get_issues_for_group` — 双击下钻：某一聚合组的全部 issue
+    - :func:`get_issue_detail` — 详情面板单条 issue 的完整字段
+    - :func:`classify_issue` — 独立的分类工具（测试友好）
+"""
+from __future__ import annotations
+
+import os
+import re
+import sqlite3
+import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from typing import Iterable
+
+# 复用既有 HTTP 客户端 —— 不重复造鉴权 / 重试 / Session 池。
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import export_mr_pipeline as mr_api
+
+
+# ---------------------------------------------------------------------------
+# 并行抓取上限 —— 与 opus_id_monitor 保持一致，确保后端不被两个面板
+# 同时同步时打爆。如果未来要把两边合一，调一处即可。
+# ---------------------------------------------------------------------------
+MAX_FETCH_WORKERS = 8
+
+
+# ---------------------------------------------------------------------------
+# 数据库位置 — 用户主目录下独立 DB，与 opus_index.db 解耦
+# ---------------------------------------------------------------------------
+def _default_db_path() -> str:
+    home = os.path.expanduser("~")
+    base = os.path.join(home, ".tranzor_exporter")
+    os.makedirs(base, exist_ok=True)
+    return os.path.join(base, "checks_index.db")
+
+
+@contextmanager
+def _connect(db_path: str | None = None):
+    """SQLite 连接 —— 与 opus_id_monitor._connect 完全相同的并发模型。
+
+    WAL + 无全局锁；多读 + 单写由 SQLite 内核排队；每个调用方独立连接。
+    """
+    path = db_path or _default_db_path()
+    conn = sqlite3.connect(path, timeout=30.0)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    try:
+        yield conn
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Schema —— 两张表：task_checks（任务级摘要）+ check_issues（行级细节）
+# ---------------------------------------------------------------------------
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS task_checks (
+    task_id          TEXT NOT NULL,
+    source_kind      TEXT NOT NULL,    -- 'mr' | 'scan' | 'file'
+    project_id       TEXT,
+    project_name     TEXT,
+    mr_iid           INTEGER,
+    task_name        TEXT,
+    task_status      TEXT,
+    final_score_avg  REAL,
+    total_issues     INTEGER NOT NULL DEFAULT 0,
+    total_rows       INTEGER NOT NULL DEFAULT 0,  -- 该任务行数，便于"通过率"统计
+    task_created_at  TEXT,
+    fetched_at       TEXT NOT NULL,
+    PRIMARY KEY (task_id, source_kind)
+);
+CREATE INDEX IF NOT EXISTS ix_task_checks_kind    ON task_checks(source_kind);
+CREATE INDEX IF NOT EXISTS ix_task_checks_created ON task_checks(task_created_at);
+
+CREATE TABLE IF NOT EXISTS check_issues (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id             TEXT NOT NULL,
+    source_kind         TEXT NOT NULL,
+    opus_id             TEXT,
+    target_language     TEXT,
+    error_type          TEXT NOT NULL,           -- 显示用标签："Terminology Inconsistency" / "Parameter Format" / ...
+    error_category      TEXT,                    -- Tranzor 原始 error_category（归一化）
+    error_keyword       TEXT,                    -- 提取出的关键词："transcript" / "{(runNumber)}" / "(unparsed)"
+    error_keyword_norm  TEXT,                    -- 关键词小写归一化形式，排序/聚合用
+    source_text         TEXT,
+    translated_text     TEXT,
+    final_score         REAL,
+    reason              TEXT,                    -- 完整 eval_reason 文本
+    iteration           INTEGER,
+    fetched_at          TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_issues_task_kind   ON check_issues(task_id, source_kind);
+CREATE INDEX IF NOT EXISTS ix_issues_error_type  ON check_issues(error_type);
+CREATE INDEX IF NOT EXISTS ix_issues_keyword     ON check_issues(error_keyword_norm);
+CREATE INDEX IF NOT EXISTS ix_issues_language    ON check_issues(target_language);
+
+CREATE TABLE IF NOT EXISTS sync_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT
+);
+"""
+
+
+def init_db(db_path: str | None = None) -> None:
+    """创建 schema（幂等 / 升级安全）。"""
+    with _connect(db_path) as conn:
+        conn.executescript(_SCHEMA)
+
+
+# ---------------------------------------------------------------------------
+# 错误分类与关键词提取
+# ---------------------------------------------------------------------------
+# v0.1 的提取规则全部基于截图样本与 Tranzor 后端 reason 文本约定。提取失败
+# 时落 "(unparsed)" 标签 + 保留 reason 全文，方便用户在聚合表里一眼看到
+# "哪些 pattern 还没覆盖到"，作为后续规则迭代的输入。
+_TERM_PATTERNS = (
+    # `Source matched the term "transcript"` —— Tranzor UI Terminology Inconsistency
+    re.compile(r'term[s]?\s+["“‘]([^"”’]{1,80})["”’]', re.IGNORECASE),
+    # `glossary entry "X"` —— 备用
+    re.compile(r'glossary\s+entry\s+["“‘]([^"”’]{1,80})["”’]', re.IGNORECASE),
+)
+# `Spacing issue around \`{(runNumber)}\` -- missing space before at position 12`
+_PARAM_PATTERNS = (
+    re.compile(r"`([^`]{1,80})`"),                # 反引号包裹（截图样式）
+    re.compile(r"(\{\{[^}]{1,60}\}\}|\{[^{}]{1,60}\})"),  # ICU / Mustache 占位符
+    re.compile(r"(%\([^)]{1,40}\)[sdif]|%[sdif])"),       # printf-style
+    re.compile(r"(\{__rc[a-z0-9-]+\})", re.IGNORECASE),   # Tranzor 内部 placeholder 前缀
+)
+# 关键词暗示是 Parameter Format 问题（即便 error_category=Consistency 也归到这一类）
+_PARAM_HINT = re.compile(
+    r"\b(spacing|placeholder|variable|parameter|format|missing\s+space|extra\s+space|"
+    r"number\s+mismatch|url\s+mismatch|email)\b", re.IGNORECASE)
+# 关键词暗示是 Terminology Inconsistency 问题
+_TERM_HINT = re.compile(
+    r"\b(term[s]?\b|glossary|terminology|preferred\s+translation)", re.IGNORECASE)
+
+
+def _norm_category(category) -> str:
+    """归一化 error_category；None / "None" / "" 统一返回 ""。"""
+    if category in (None, "", "None"):
+        return ""
+    return str(category).strip()
+
+
+def classify_issue(error_category, reason, source_text=None) -> tuple[str, str]:
+    """根据 (error_category, reason) 推断 (error_type, error_keyword)。
+
+    Returns:
+        (error_type, error_keyword)
+        - error_type: 显示用的细分标签，与 Tranzor UI 过滤器一致
+        - error_keyword: 用于排序/聚合的关键字，可能是 "(unparsed)"
+
+    设计原则：
+      - 优先匹配最具体的 pattern（先 Parameter Format，再 Terminology）
+      - 任何一条 reason，最多分到一个 error_type；同一行多 issue 在调用方拆分
+      - 失败 fallback 到 ``error_category`` 大类 + "(unparsed)" 关键词
+    """
+    reason_text = str(reason or "")
+    cat = _norm_category(error_category)
+
+    # 1) Parameter Format —— 反引号 / 占位符 / format hint
+    if _PARAM_HINT.search(reason_text) or any(p.search(reason_text) for p in _PARAM_PATTERNS):
+        for pat in _PARAM_PATTERNS:
+            m = pat.search(reason_text)
+            if m:
+                kw = m.group(1) if m.lastindex else m.group(0)
+                return ("Parameter Format", kw.strip()[:120])
+        # hint 命中但没抓到具体关键词
+        return ("Parameter Format", "(unparsed)")
+
+    # 2) Terminology Inconsistency —— 双引号 term 模式
+    if cat in ("Terminology", "Consistency") or _TERM_HINT.search(reason_text):
+        for pat in _TERM_PATTERNS:
+            m = pat.search(reason_text)
+            if m:
+                return ("Terminology Inconsistency", m.group(1).strip()[:120])
+        # 大类是 Terminology 但找不到具体术语，退化为 unparsed
+        return ("Terminology Inconsistency", "(unparsed)")
+
+    # 3) 其他显式大类直接透传
+    if cat:
+        # 截图里没有出现的大类（Accuracy / Fluency / Locale Convention）就用
+        # 原 category 当 error_type；关键词降级到 reason 首 40 字符。
+        snippet = reason_text.strip()[:40]
+        return (cat, snippet or "(unparsed)")
+
+    # 4) 完全没有评估信号 —— 调用方应该提前过滤掉这种行，但兜底也得有
+    return ("Other", "(unparsed)")
+
+
+# ---------------------------------------------------------------------------
+# sync_meta 帮助方法
+# ---------------------------------------------------------------------------
+def _get_meta(conn, key: str, default: str | None = None) -> str | None:
+    cur = conn.execute("SELECT value FROM sync_meta WHERE key = ?", (key,))
+    row = cur.fetchone()
+    return row["value"] if row else default
+
+
+def _set_meta(conn, key: str, value: str) -> None:
+    conn.execute(
+        "INSERT INTO sync_meta(key, value) VALUES(?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (key, value),
+    )
+
+
+def get_last_sync_at() -> str | None:
+    """供 UI 状态条用。"""
+    with _connect() as conn:
+        return _get_meta(conn, "last_sync_at")
+
+
+# ---------------------------------------------------------------------------
+# translation → issue 行 提取
+# ---------------------------------------------------------------------------
+def _translation_has_issue(t: dict) -> bool:
+    """判定一条 translation 是否构成 issue。
+
+    判据（任一命中即视为有问题）：
+      - error_category 非空且非 "None"
+      - reason 非空且不是 "OK" / "Pass" / 空白
+    """
+    cat = _norm_category(t.get("error_category"))
+    if cat:
+        return True
+    reason = str(t.get("reason") or t.get("eval_reason") or "").strip()
+    if not reason:
+        return False
+    return reason.lower() not in {"ok", "pass", "passed", "no error", "n/a", "-"}
+
+
+def _extract_issues(translations: Iterable[dict]) -> list[dict]:
+    """把 translation 列表筛 + 分类成 issue 行。
+
+    一条 translation 在 v0.1 最多产生一条 issue（按主 reason 分类）。
+    后续若 Tranzor 暴露多 issue/translation 的结构（如 issues: [...] 子列表），
+    可以在这里展开循环、保持调用方不变。
+    """
+    out = []
+    for t in translations:
+        if not _translation_has_issue(t):
+            continue
+        reason = t.get("reason") or t.get("eval_reason") or ""
+        cat_raw = t.get("error_category")
+        error_type, keyword = classify_issue(cat_raw, reason, t.get("source_text"))
+        out.append({
+            "opus_id": str(t.get("opus_id") or "").strip(),
+            "target_language": str(t.get("target_language") or "").strip(),
+            "error_type": error_type,
+            "error_category": _norm_category(cat_raw),
+            "error_keyword": keyword,
+            "error_keyword_norm": (keyword or "").lower(),
+            "source_text": (t.get("source_text") or "")[:4096],
+            "translated_text": (t.get("translated_text") or "")[:4096],
+            "final_score": _safe_float(t.get("final_score")),
+            "reason": (reason or "")[:4096],
+            "iteration": _safe_int(t.get("iteration")),
+        })
+    return out
+
+
+def _safe_float(v):
+    if v in (None, ""):
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_int(v):
+    if v in (None, ""):
+        return None
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+# ---------------------------------------------------------------------------
+# 落库：单任务的 task_checks 摘要 + check_issues 明细
+# ---------------------------------------------------------------------------
+def _persist_task_results(
+    conn,
+    *,
+    task: dict,
+    source_kind: str,
+    translations: list[dict],
+) -> tuple[int, int]:
+    """把一个 task 的 results 持久化。
+
+    返回 (rows_total, issues_inserted)。
+    "Zero Tolerance for Missing" 的关键：哪怕 issues=0 也要插入 task_checks，
+    让用户看到"这个任务全部 pass"而不是"没同步"。
+
+    采用先 DELETE 后 INSERT 的方式确保单任务可重入：同步同一个任务两次时，
+    旧 issue 不会与新 issue 并存。task_checks 用 INSERT OR REPLACE。
+    """
+    task_id = str(task.get("task_id") or task.get("id") or "").strip()
+    if not task_id:
+        return (0, 0)
+
+    issues = _extract_issues(translations)
+    rows_total = len(list(translations))
+    now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    # 计算 final_score 平均（仅对有评分的行）
+    scores = [_safe_float(t.get("final_score")) for t in translations]
+    scores = [s for s in scores if s is not None]
+    avg_score = round(sum(scores) / len(scores), 2) if scores else None
+
+    # 任务级状态：MR/legacy/scan API 字段名不一，做容错
+    task_status = (task.get("status")
+                   or task.get("task_status")
+                   or "").lower() or None
+
+    conn.execute(
+        """
+        INSERT INTO task_checks(
+            task_id, source_kind, project_id, project_name, mr_iid, task_name,
+            task_status, final_score_avg, total_issues, total_rows,
+            task_created_at, fetched_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(task_id, source_kind) DO UPDATE SET
+            project_id      = excluded.project_id,
+            project_name    = excluded.project_name,
+            mr_iid          = excluded.mr_iid,
+            task_name       = excluded.task_name,
+            task_status     = excluded.task_status,
+            final_score_avg = excluded.final_score_avg,
+            total_issues    = excluded.total_issues,
+            total_rows      = excluded.total_rows,
+            task_created_at = excluded.task_created_at,
+            fetched_at      = excluded.fetched_at
+        """,
+        (
+            task_id, source_kind,
+            task.get("project_id") or "",
+            task.get("project_name") or task.get("task_name") or "",
+            _safe_int(task.get("merge_request_iid")),
+            task.get("task_name") or "",
+            task_status,
+            avg_score,
+            len(issues),
+            rows_total,
+            task.get("created_at") or "",
+            now_iso,
+        ),
+    )
+
+    # check_issues 重新写入：先删后插。issues 列表可能为空（全部 pass）。
+    conn.execute(
+        "DELETE FROM check_issues WHERE task_id = ? AND source_kind = ?",
+        (task_id, source_kind),
+    )
+    if issues:
+        conn.executemany(
+            """
+            INSERT INTO check_issues(
+                task_id, source_kind, opus_id, target_language,
+                error_type, error_category, error_keyword, error_keyword_norm,
+                source_text, translated_text, final_score, reason,
+                iteration, fetched_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    task_id, source_kind,
+                    i["opus_id"], i["target_language"],
+                    i["error_type"], i["error_category"],
+                    i["error_keyword"], i["error_keyword_norm"],
+                    i["source_text"], i["translated_text"],
+                    i["final_score"], i["reason"],
+                    i["iteration"], now_iso,
+                )
+                for i in issues
+            ],
+        )
+
+    return (rows_total, len(issues))
+
+
+# ---------------------------------------------------------------------------
+# 并行抓取共享逻辑 —— 与 opus_id_monitor._drain_results_into_db 同构
+# ---------------------------------------------------------------------------
+def _drain_results_into_db(
+    tasks: list[dict],
+    *,
+    fetch_fn,
+    conn,
+    source_kind: str,
+    log,
+    log_stage: str,
+    cancel_event: threading.Event | None,
+    stats: dict,
+) -> None:
+    """HTTP 走线程池、SQLite 写入留在主线程的成熟模式（详见 opus_id_monitor）。"""
+    if not tasks:
+        return
+
+    total = len(tasks)
+    completed = 0
+
+    def _worker(task):
+        if cancel_event and cancel_event.is_set():
+            return task, None
+        try:
+            return task, fetch_fn(task)
+        except Exception as e:
+            return task, e
+
+    pool = ThreadPoolExecutor(
+        max_workers=MAX_FETCH_WORKERS,
+        thread_name_prefix=f"checks-{source_kind}",
+    )
+    try:
+        futures = [pool.submit(_worker, t) for t in tasks]
+        for future in as_completed(futures):
+            if cancel_event and cancel_event.is_set():
+                break
+
+            try:
+                task, results = future.result()
+            except Exception as e:
+                log(f"{log_stage}_error", completed, total, error=str(e))
+                continue
+
+            if results is None:
+                continue
+
+            try:
+                task_id = str(task.get("task_id") or task.get("id") or "").strip()
+                if isinstance(results, Exception):
+                    log(f"{log_stage}_error", completed + 1, total,
+                        task_id=task_id, error=str(results))
+                    completed += 1
+                    continue
+
+                # results shape：MR/Scan 是 {translations: [...]}, legacy 直接是列表
+                if isinstance(results, dict):
+                    translations = results.get("translations") or []
+                elif isinstance(results, list):
+                    translations = results
+                else:
+                    translations = []
+
+                rows, issues = _persist_task_results(
+                    conn,
+                    task=task,
+                    source_kind=source_kind,
+                    translations=translations,
+                )
+                stats["tasks_seen"] += 1
+                stats["rows_total"] += rows
+                stats["issues_inserted"] += issues
+                completed += 1
+                conn.commit()
+                log(log_stage, completed, total,
+                    task_id=task_id, issues=issues,
+                    rows_total=stats["rows_total"])
+            except Exception as per_task_err:
+                # 单任务任何意外都只 skip，不让整个 sync 死
+                log(f"{log_stage}_error", completed + 1, total,
+                    error=f"per-task-fail: {per_task_err!r}")
+                completed += 1
+                continue
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+# ---------------------------------------------------------------------------
+# MR Pipeline 同步
+# ---------------------------------------------------------------------------
+def _sync_mr_tasks(
+    conn, *, since_iso: str | None, progress_callback=None,
+    cancel_event: threading.Event | None = None,
+) -> dict:
+    log = progress_callback or (lambda *a, **kw: None)
+    stats = {"tasks_seen": 0, "rows_total": 0, "issues_inserted": 0}
+
+    log("mr_list", 0, 0)
+    all_tasks: list[dict] = []
+    offset = 0
+    page_size = 100
+    while True:
+        if cancel_event and cancel_event.is_set():
+            return stats
+        total, batch = mr_api.fetch_mr_tasks(
+            status="completed", limit=page_size, offset=offset)
+        if not batch:
+            break
+        for t in batch:
+            created = t.get("created_at") or ""
+            if since_iso and created and created < since_iso:
+                continue
+            all_tasks.append(t)
+        if offset + page_size >= total:
+            break
+        offset += page_size
+        log("mr_list", len(all_tasks), total)
+
+    log("mr_results", 0, len(all_tasks))
+    _drain_results_into_db(
+        all_tasks,
+        fetch_fn=lambda t: mr_api.fetch_mr_results(
+            t.get("task_id") or t.get("id") or ""),
+        conn=conn,
+        source_kind="mr",
+        log=log,
+        log_stage="mr_results",
+        cancel_event=cancel_event,
+        stats=stats,
+    )
+    return stats
+
+
+# ---------------------------------------------------------------------------
+# Scan 同步
+# ---------------------------------------------------------------------------
+def _sync_scan_tasks(
+    conn, *, since_iso: str | None, progress_callback=None,
+    cancel_event: threading.Event | None = None,
+) -> dict:
+    log = progress_callback or (lambda *a, **kw: None)
+    stats = {"tasks_seen": 0, "rows_total": 0, "issues_inserted": 0}
+
+    log("scan_list", 0, 0)
+    all_tasks: list[dict] = []
+    offset = 0
+    page_size = 100
+    while True:
+        if cancel_event and cancel_event.is_set():
+            return stats
+        try:
+            total, batch = mr_api.fetch_scan_tasks(
+                status="completed", limit=page_size, offset=offset)
+        except Exception as e:
+            log("scan_list_error", 0, 0, error=str(e))
+            break
+        if not batch:
+            break
+        for t in batch:
+            created = t.get("created_at") or ""
+            if since_iso and created and created < since_iso:
+                continue
+            all_tasks.append(t)
+        if offset + page_size >= total:
+            break
+        offset += page_size
+        log("scan_list", len(all_tasks), total)
+
+    log("scan_results", 0, len(all_tasks))
+    _drain_results_into_db(
+        all_tasks,
+        fetch_fn=lambda t: mr_api.fetch_scan_results(
+            t.get("task_id") or t.get("id") or ""),
+        conn=conn,
+        source_kind="scan",
+        log=log,
+        log_stage="scan_results",
+        cancel_event=cancel_event,
+        stats=stats,
+    )
+    return stats
+
+
+# ---------------------------------------------------------------------------
+# File Translation (legacy) 同步
+# ---------------------------------------------------------------------------
+def _sync_legacy_tasks(
+    conn, *, since_iso: str | None, progress_callback=None,
+    cancel_event: threading.Event | None = None,
+) -> dict:
+    """File Translation 用 ``/legacy/tasks`` + ``/legacy/tasks/{id}/translations``。
+
+    legacy API 的 fetch_legacy_translations_quality 一次只返回一页，
+    全量需要分页累积；为了让 _drain_results_into_db 透明，封装成
+    list[translation] 返回。
+    """
+    log = progress_callback or (lambda *a, **kw: None)
+    stats = {"tasks_seen": 0, "rows_total": 0, "issues_inserted": 0}
+
+    log("legacy_list", 0, 0)
+    try:
+        all_tasks_raw = mr_api.fetch_all_legacy_tasks_for_quality(
+            status="Completed")
+    except Exception as e:
+        log("legacy_list_error", 0, 0, error=str(e))
+        return stats
+
+    all_tasks = []
+    for t in all_tasks_raw:
+        created = t.get("created_at") or ""
+        if since_iso and created and created < since_iso:
+            continue
+        # legacy 的 id 字段名是 ``task_id``（部分接口也用 id）
+        if not (t.get("task_id") or t.get("id")):
+            continue
+        all_tasks.append(t)
+
+    log("legacy_results", 0, len(all_tasks))
+
+    def _fetch_legacy(task):
+        tid = str(task.get("task_id") or task.get("id") or "").strip()
+        # 全量分页
+        entries: list = []
+        offset = 0
+        page_size = 200
+        while True:
+            page, total = mr_api.fetch_legacy_translations_quality(
+                tid, limit=page_size, offset=offset)
+            entries.extend(page or [])
+            if not page or offset + len(page) >= total:
+                break
+            offset += len(page)
+            if offset > 100_000:    # 防御性：服务端 total 不准时的兜底
+                break
+        return entries
+
+    _drain_results_into_db(
+        all_tasks,
+        fetch_fn=_fetch_legacy,
+        conn=conn,
+        source_kind="file",
+        log=log,
+        log_stage="legacy_results",
+        cancel_event=cancel_event,
+        stats=stats,
+    )
+    return stats
+
+
+# ---------------------------------------------------------------------------
+# 对外：sync_full / sync_incremental
+# ---------------------------------------------------------------------------
+def sync_full(progress_callback=None,
+              cancel_event: threading.Event | None = None) -> dict:
+    """重新拉全部 completed 任务 + issues。
+
+    用于首次同步或确认缓存漂移时。耗时 5-10 分钟级别（取决于后端任务量）。
+    """
+    init_db()
+    overall = {"mr": {}, "scan": {}, "file": {}}
+    with _connect() as conn:
+        overall["mr"] = _sync_mr_tasks(
+            conn, since_iso=None,
+            progress_callback=progress_callback,
+            cancel_event=cancel_event)
+        if cancel_event and cancel_event.is_set():
+            return overall
+        overall["scan"] = _sync_scan_tasks(
+            conn, since_iso=None,
+            progress_callback=progress_callback,
+            cancel_event=cancel_event)
+        if cancel_event and cancel_event.is_set():
+            return overall
+        overall["file"] = _sync_legacy_tasks(
+            conn, since_iso=None,
+            progress_callback=progress_callback,
+            cancel_event=cancel_event)
+        _set_meta(conn, "last_sync_at",
+                  datetime.now(timezone.utc).isoformat(timespec="seconds"))
+    return overall
+
+
+def sync_incremental(progress_callback=None,
+                     cancel_event: threading.Event | None = None) -> dict:
+    """只拉自 ``last_sync_at`` 之后创建的任务。秒级 - 分钟级别。"""
+    init_db()
+    overall = {"mr": {}, "scan": {}, "file": {}}
+    with _connect() as conn:
+        since_iso = _get_meta(conn, "last_sync_at")
+        overall["mr"] = _sync_mr_tasks(
+            conn, since_iso=since_iso,
+            progress_callback=progress_callback,
+            cancel_event=cancel_event)
+        if cancel_event and cancel_event.is_set():
+            return overall
+        overall["scan"] = _sync_scan_tasks(
+            conn, since_iso=since_iso,
+            progress_callback=progress_callback,
+            cancel_event=cancel_event)
+        if cancel_event and cancel_event.is_set():
+            return overall
+        overall["file"] = _sync_legacy_tasks(
+            conn, since_iso=since_iso,
+            progress_callback=progress_callback,
+            cancel_event=cancel_event)
+        _set_meta(conn, "last_sync_at",
+                  datetime.now(timezone.utc).isoformat(timespec="seconds"))
+    return overall
+
+
+# ---------------------------------------------------------------------------
+# 查询：顶部统计卡
+# ---------------------------------------------------------------------------
+def get_summary() -> dict:
+    """返回顶部 4 卡数据 + 上次同步时间。
+
+    所有数字都允许为 0（首次没同步时）。UI 端不要因为 None / 0 而崩。
+    """
+    init_db()
+    with _connect() as conn:
+        row_t = conn.execute(
+            "SELECT COUNT(*) AS n FROM task_checks").fetchone()
+        row_i = conn.execute(
+            "SELECT COUNT(*) AS n FROM check_issues").fetchone()
+        row_et = conn.execute(
+            "SELECT COUNT(DISTINCT error_type) AS n FROM check_issues").fetchone()
+        row_lang = conn.execute(
+            "SELECT COUNT(DISTINCT target_language) AS n "
+            "FROM check_issues WHERE target_language <> ''").fetchone()
+        last_sync = _get_meta(conn, "last_sync_at")
+        # 任务通过率（issues=0 视为通过）
+        row_pass = conn.execute(
+            "SELECT COUNT(*) AS n FROM task_checks WHERE total_issues = 0"
+        ).fetchone()
+    return {
+        "total_tasks": row_t["n"] if row_t else 0,
+        "tasks_clean": row_pass["n"] if row_pass else 0,
+        "total_issues": row_i["n"] if row_i else 0,
+        "error_types": row_et["n"] if row_et else 0,
+        "languages": row_lang["n"] if row_lang else 0,
+        "last_sync_at": last_sync,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 查询：聚合表（核心 UI 数据）
+# ---------------------------------------------------------------------------
+def get_aggregated_issues(
+    *,
+    error_type: str | None = None,
+    language: str | None = None,
+    source_kind: str | None = None,
+    keyword_substring: str | None = None,
+    limit: int = 5000,
+) -> list[dict]:
+    """按 (error_type, language, keyword) 三维聚合，每行带 count + tasks_affected。
+
+    返回字典字段：
+      - error_type / language / error_keyword
+      - count           : 命中条数
+      - tasks_affected  : distinct task 个数
+      - source_kinds    : "mr,scan" 这种逗号串，便于一眼看到散布
+
+    排序由 UI 层 Treeview 完成，这里只做查询。limit 兜底防止极大数据集
+    一次塞爆 GUI。
+    """
+    init_db()
+    where = ["1=1"]
+    params: list = []
+    if error_type:
+        where.append("error_type = ?")
+        params.append(error_type)
+    if language:
+        where.append("target_language = ?")
+        params.append(language)
+    if source_kind:
+        where.append("source_kind = ?")
+        params.append(source_kind)
+    if keyword_substring:
+        where.append("error_keyword_norm LIKE ?")
+        params.append(f"%{keyword_substring.lower()}%")
+
+    sql = f"""
+        SELECT
+            error_type,
+            target_language AS language,
+            error_keyword,
+            COUNT(*) AS count,
+            COUNT(DISTINCT task_id || ':' || source_kind) AS tasks_affected,
+            GROUP_CONCAT(DISTINCT source_kind) AS source_kinds
+        FROM check_issues
+        WHERE {' AND '.join(where)}
+        GROUP BY error_type, target_language, error_keyword
+        ORDER BY count DESC
+        LIMIT ?
+    """
+    params.append(limit)
+    with _connect() as conn:
+        rows = conn.execute(sql, params).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# 查询：聚合组下钻 —— 选中一行后看到具体的 issue 列表
+# ---------------------------------------------------------------------------
+def get_issues_for_group(
+    *,
+    error_type: str,
+    language: str | None,
+    error_keyword: str | None,
+    limit: int = 500,
+) -> list[dict]:
+    """返回某 (error_type, language, keyword) 组合下的全部 issue 行。"""
+    init_db()
+    where = ["error_type = ?"]
+    params: list = [error_type]
+    if language is not None:
+        where.append("target_language = ?")
+        params.append(language)
+    if error_keyword is not None:
+        where.append("error_keyword = ?")
+        params.append(error_keyword)
+    sql = f"""
+        SELECT i.*, t.project_id, t.project_name, t.mr_iid, t.task_name
+        FROM check_issues i
+        LEFT JOIN task_checks t
+            ON t.task_id = i.task_id AND t.source_kind = i.source_kind
+        WHERE {' AND '.join(where)}
+        ORDER BY i.final_score ASC, i.task_id
+        LIMIT ?
+    """
+    params.append(limit)
+    with _connect() as conn:
+        rows = conn.execute(sql, params).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_issue_detail(issue_id: int) -> dict | None:
+    """单条 issue 的完整字段（用于详情面板）。"""
+    init_db()
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT i.*, t.project_id, t.project_name, t.mr_iid, t.task_name,
+                   t.task_created_at, t.task_status
+            FROM check_issues i
+            LEFT JOIN task_checks t
+                ON t.task_id = i.task_id AND t.source_kind = i.source_kind
+            WHERE i.id = ?
+            """,
+            (issue_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+# ---------------------------------------------------------------------------
+# 查询：错误类型 / 语言下拉框可选值
+# ---------------------------------------------------------------------------
+def get_filter_options() -> dict:
+    """UI 顶部筛选器的下拉框选项。"""
+    init_db()
+    with _connect() as conn:
+        types = [r["error_type"] for r in conn.execute(
+            "SELECT DISTINCT error_type FROM check_issues "
+            "ORDER BY error_type").fetchall()]
+        langs = [r["target_language"] for r in conn.execute(
+            "SELECT DISTINCT target_language FROM check_issues "
+            "WHERE target_language <> '' "
+            "ORDER BY target_language").fetchall()]
+        kinds = [r["source_kind"] for r in conn.execute(
+            "SELECT DISTINCT source_kind FROM check_issues "
+            "ORDER BY source_kind").fetchall()]
+    return {"error_types": types, "languages": langs, "source_kinds": kinds}
