@@ -189,6 +189,17 @@ except Exception as _opus_e:  # pragma: no cover
 else:
     _opus_import_error = None
 
+# Optional: Tranzor Checks tab — issue-level aggregation of task check
+# results (Terminology Inconsistency / Parameter Format / …) with sortable
+# keyword column, designed to help QA spot false positives at a glance.
+try:
+    import gui_tab_tranzor_checks as _tc_tab_mod
+except Exception as _tc_e:  # pragma: no cover
+    _tc_tab_mod = None
+    _tc_import_error = _tc_e
+else:
+    _tc_import_error = None
+
 # ---------------------------------------------------------------------------
 # Tranzor API config (reuse from export_changes)
 # ---------------------------------------------------------------------------
@@ -496,6 +507,14 @@ if _tci_tab_mod is not None:
 if _opus_tab_mod is not None:
     try:
         for _lang_code, _extra in _opus_tab_mod.STRINGS.items():
+            STRINGS.setdefault(_lang_code, {}).update(_extra)
+    except Exception:
+        pass
+
+# Merge in strings from the optional Tranzor Checks tab.
+if _tc_tab_mod is not None:
+    try:
+        for _lang_code, _extra in _tc_tab_mod.STRINGS.items():
             STRINGS.setdefault(_lang_code, {}).update(_extra)
     except Exception:
         pass
@@ -996,6 +1015,21 @@ class ExportApp:
                 print(f"[OPUS ID Monitor tab] init failed: {_e}")
                 self.opus_tab = None
 
+        # --- Tab 10: Tranzor Checks (optional, pure additive) ---
+        # 全量任务 Checks 状态 + 错误关键词聚合，让 QA 一眼归类 Terminology /
+        # Parameter Format 等问题，识别误报；本地 SQLite 缓存，首屏纯本地读。
+        self.tc_tab = None
+        self._tc_tab_index = None
+        if _tc_tab_mod is not None:
+            try:
+                tab_tc = ttk.Frame(self.notebook, style="App.TFrame")
+                self.notebook.add(tab_tc, text="")
+                self.tc_tab = _tc_tab_mod.TranzorChecksTab(tab_tc, self)
+                self._tc_tab_index = self.notebook.index(tab_tc)
+            except Exception as _e:
+                print(f"[Tranzor Checks tab] init failed: {_e}")
+                self.tc_tab = None
+
         # ═══════════════════════════════════════════
         # TAB 1 CONTENTS (File Translation — preserved)
         # ═══════════════════════════════════════════
@@ -1317,6 +1351,12 @@ class ExportApp:
             try:
                 self.notebook.tab(self._opus_tab_index, text=self._t("tab_opus_monitor"))
                 self.opus_tab.refresh_text()
+            except Exception:
+                pass
+        if self.tc_tab is not None and self._tc_tab_index is not None:
+            try:
+                self.notebook.tab(self._tc_tab_index, text=self._t("tab_tranzor_checks"))
+                self.tc_tab.refresh_text()
             except Exception:
                 pass
 
