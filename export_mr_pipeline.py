@@ -19,6 +19,7 @@ from collections import OrderedDict
 from datetime import date
 
 import terminology_highlight as th
+from tranzor_truncation import hydrate_truncated_entries
 
 
 def _tokenize(text):
@@ -923,6 +924,18 @@ def fetch_all_legacy_translations_quality(task_id, page_size=200,
         offset += len(items)
         if offset >= total or not items:
             break
+        # 防御性兜底：服务端 total 不准时避免无限循环
+        if offset > 100_000:
+            break
+
+    # UNS 长文本任务的列表 entry 返回的是 500 字符 preview；导出/质检/同步
+    # 需要 DB 中的完整内容（见 closed bug TRAN-161）。
+    hydrate_truncated_entries(
+        all_items,
+        api_base=LEGACY_API,
+        task_id=task_id,
+        session=_session,
+    )
     return all_items
 
 
