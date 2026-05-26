@@ -850,6 +850,7 @@ def get_aggregated_issues(
     language: str | None = None,
     source_kind: str | None = None,
     keyword_substring: str | None = None,
+    task_id: str | None = None,
     limit: int = 5000,
 ) -> list[dict]:
     """按 (error_type, language, keyword) 三维聚合，每组返回最新发生时间与
@@ -863,6 +864,13 @@ def get_aggregated_issues(
       - latest_seen     : 该分组里最新的 task_created_at（缺省时回退到 fetched_at）
       - latest_task_name / latest_mr_iid / latest_task_id / latest_source_kind:
         最新那条 task 的元信息，UI 直接拿来渲染"Latest task"列
+
+    Args:
+        task_id: 用 substring LIKE 过滤 ``check_issues.task_id``。设计上
+            兼容两种使用方式：
+              - 用户从群通知复制完整 UUID（36 字符精确匹配）
+              - 用户只记得前几位（如 "48e17681"），前缀也能命中
+            空串 / None 视为不过滤。
 
     SQL 技巧：用 ``MAX(timestamp || \\x1f || other_fields)`` 让 SQLite 在
     GROUP BY 时同时携带"时间最新那一行"的所有元字段，避免上层 N+1 查询，
@@ -883,6 +891,9 @@ def get_aggregated_issues(
     if keyword_substring:
         where.append("i.error_keyword_norm LIKE ?")
         params.append(f"%{keyword_substring.lower()}%")
+    if task_id and task_id.strip():
+        where.append("i.task_id LIKE ?")
+        params.append(f"%{task_id.strip()}%")
 
     sep = _LATEST_SEP
     # 用 SQL 参数传 sep（避免 f-string 里转义混乱），下方 placeholder 用 ?。
@@ -938,18 +949,26 @@ def get_issues_for_group(
     error_type: str,
     language: str | None,
     error_keyword: str | None,
+    task_id: str | None = None,
     limit: int = 500,
 ) -> list[dict]:
-    """返回某 (error_type, language, keyword) 组合下的全部 issue 行。"""
+    """返回某 (error_type, language, keyword) 组合下的全部 issue 行。
+
+    ``task_id`` 与 :func:`get_aggregated_issues` 同义 —— substring LIKE，
+    用来让"先按 task 过滤、再选某分组下钻"的工作流保持过滤一致性。
+    """
     init_db()
-    where = ["error_type = ?"]
+    where = ["i.error_type = ?"]
     params: list = [error_type]
     if language is not None:
-        where.append("target_language = ?")
+        where.append("i.target_language = ?")
         params.append(language)
     if error_keyword is not None:
-        where.append("error_keyword = ?")
+        where.append("i.error_keyword = ?")
         params.append(error_keyword)
+    if task_id and task_id.strip():
+        where.append("i.task_id LIKE ?")
+        params.append(f"%{task_id.strip()}%")
     sql = f"""
         SELECT i.*, t.project_id, t.project_name, t.mr_iid, t.task_name
         FROM check_issues i
@@ -981,6 +1000,122 @@ def get_issue_detail(issue_id: int) -> dict | None:
             (issue_id,),
         ).fetchone()
     return dict(row) if row else None
+
+
+# ---------------------------------------------------------------------------
+# 查询：单任务汇总（按通知格式渲染）
+# ---------------------------------------------------------------------------
+def get_task_summary(task_id: str) -> dict | None:
+    """对应"用户从群通知拿到 task UUID → 想看汇总和明细"的工作流。
+
+    输入是 ``check_issues.task_id``（substring LIKE 兼容前缀），返回结构
+    刻意与 Tranzor Bot 推送的通知格式对齐 —— 这样 UI 端弹出对话框时
+    用户能一眼把"Checks: 16 Variable/Number Mismatch · 15 Terminology
+    Inconsistency"对上号。
+
+    Returns:
+        None  —— 本地缓存里查无此 task（提示用户先 Sync）
+        dict  —— 命中，字段：
+          - task_id (完整 UUID，可能在前缀输入下被解析成第一个匹配)
+          - source_kind / project_id / project_name / task_name / mr_iid
+          - task_status / final_score_avg / task_created_at / fetched_at
+          - total_rows / total_issues          —— 与 task_checks 表对齐
+          - error_type_counts : OrderedDict[error_type → count]
+              （按 count 倒序，便于 UI 直接拼 "16 X · 15 Y" 字符串）
+          - issues            : list[dict]  —— 该 task 的全部 issue 行
+              （字段同 ``get_issues_for_group`` 的输出）
+    """
+    if not task_id or not task_id.strip():
+        return None
+    init_db()
+    tid_like = f"%{task_id.strip()}%"
+
+    with _connect() as conn:
+        # 1) 先在 task_checks 表里找到唯一匹配；substring 模式下有多个
+        #    候选时取 fetched_at 最新的一个（最近一次同步该 task 的记录）。
+        meta_row = conn.execute(
+            """
+            SELECT * FROM task_checks
+            WHERE task_id LIKE ?
+            ORDER BY fetched_at DESC
+            LIMIT 1
+            """,
+            (tid_like,),
+        ).fetchone()
+
+        if meta_row is None:
+            # task_checks 表里没有，但兜底再去 check_issues 看一眼 ——
+            # 极端情况下任务级摘要丢了但 issues 还在，能给用户看一些总比
+            # 完全说"找不到"友好。
+            cnt = conn.execute(
+                "SELECT COUNT(*) AS n FROM check_issues WHERE task_id LIKE ?",
+                (tid_like,),
+            ).fetchone()
+            if not cnt or cnt["n"] == 0:
+                return None
+            # 构造极简 meta 以让 UI 至少能展示 issues
+            meta = {"task_id": task_id.strip(), "source_kind": "",
+                    "project_id": "", "project_name": "", "task_name": "",
+                    "mr_iid": None, "task_status": None,
+                    "final_score_avg": None, "task_created_at": "",
+                    "fetched_at": "", "total_rows": 0,
+                    "total_issues": int(cnt["n"])}
+        else:
+            meta = dict(meta_row)
+
+        # 解出真实 task_id（如果用户输的是前缀）
+        real_tid = meta["task_id"]
+        real_src = meta.get("source_kind") or ""
+
+        # 2) 该 task 下按 error_type 的计数 —— 与通知"Checks: ..."一行对齐
+        ct_rows = conn.execute(
+            """
+            SELECT error_type, COUNT(*) AS n
+            FROM check_issues
+            WHERE task_id = ? AND (? = '' OR source_kind = ?)
+            GROUP BY error_type
+            ORDER BY n DESC, error_type
+            """,
+            (real_tid, real_src, real_src),
+        ).fetchall()
+        from collections import OrderedDict
+        error_type_counts = OrderedDict(
+            (r["error_type"], int(r["n"])) for r in ct_rows)
+
+        # 3) 完整 issue 列表（JOIN task_checks 拿任务元字段，与
+        #    get_issues_for_group 的形状一致）
+        issue_rows = conn.execute(
+            """
+            SELECT i.*, t.project_id AS t_project_id,
+                   t.project_name AS t_project_name,
+                   t.mr_iid AS t_mr_iid,
+                   t.task_name AS t_task_name
+            FROM check_issues i
+            LEFT JOIN task_checks t
+                ON t.task_id = i.task_id AND t.source_kind = i.source_kind
+            WHERE i.task_id = ? AND (? = '' OR i.source_kind = ?)
+            ORDER BY i.error_type, i.final_score ASC, i.target_language
+            """,
+            (real_tid, real_src, real_src),
+        ).fetchall()
+        issues = [dict(r) for r in issue_rows]
+
+    meta["error_type_counts"] = error_type_counts
+    meta["issues"] = issues
+    return meta
+
+
+def format_checks_line(error_type_counts: dict) -> str:
+    """把 ``{error_type: count}`` 渲染成与 Tranzor Bot 通知一致的一行字符串。
+
+    例: ``{"Variable/Number Mismatch": 16, "Terminology Inconsistency": 15}``
+    →   ``"16 Variable/Number Mismatch · 15 Terminology Inconsistency"``
+
+    没有 issue（全通过）时返回空串，调用方可以渲染 "Pass" 之类的占位。
+    """
+    if not error_type_counts:
+        return ""
+    return " · ".join(f"{n} {et}" for et, n in error_type_counts.items())
 
 
 # ---------------------------------------------------------------------------

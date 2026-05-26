@@ -101,6 +101,31 @@ STRINGS = {
             "pick up rule improvements without re-running Full re-sync."),
         "tc_reclassify_running":     "♻ Re-classifying… {cur}/{total}",
         "tc_reclassify_done":        "✓ Re-classify done · {updated} issue(s) updated",
+        # Notification → Checks bridge (task UUID lookup)
+        "tc_filter_task":            "Task ID:",
+        "tc_task_paste":             "📋 Paste",
+        "tc_task_paste_tip":         (
+            "Paste a Task UUID from the Tranzor Bot chat notification.\n"
+            "The aggregation below will instantly filter to this task only."),
+        "tc_task_summary_btn":       "🔎 Task summary",
+        "tc_task_summary_tip":       (
+            "Open a dialog that shows this task's full check summary in the\n"
+            "same shape as the chat notification (e.g. \"16 Variable/Number\n"
+            "Mismatch · 15 Terminology Inconsistency\") plus every issue row."),
+        "tc_task_filter_no_match":   "task {tid}… (no matching rows in cache)",
+        "tc_task_not_found":         "Task {tid}… not in local cache — run Sync first.",
+        # Task summary dialog
+        "tc_summary_title":          "Task summary · {label}",
+        "tc_summary_meta":           (
+            "Project: {project}\nTask name: {task_name}\nTask ID: {task_id}\n"
+            "Status: {status}  ·  Avg score: {score}  ·  Created: {created}"),
+        "tc_summary_checks_label":   "Checks:",
+        "tc_summary_checks_pass":    "Pass · all {rows} translation(s) clean",
+        "tc_summary_issues_title":   "Issues ({n})",
+        "tc_summary_copy_ids":       "📋 Copy OPUS IDs",
+        "tc_summary_copy_done":      "✓ Copied {n} OPUS IDs",
+        "tc_summary_open_tranzor":   "Open in Tranzor ↗",
+        "tc_summary_close":          "Close",
     },
     "zh": {
         "tab_tranzor_checks":        "🩺 Tranzor 检查",
@@ -168,6 +193,31 @@ STRINGS = {
             "点这里几秒即可享受新规则。"),
         "tc_reclassify_running":     "♻ 重新分类中… {cur}/{total}",
         "tc_reclassify_done":        "✓ 重新分类完成 · 更新 {updated} 条",
+        # 通知 → Checks 桥接（task UUID 入口）
+        "tc_filter_task":            "任务 ID：",
+        "tc_task_paste":             "📋 粘贴",
+        "tc_task_paste_tip":         (
+            "从 Tranzor Bot 群通知里复制 Task UUID 后点这里。\n"
+            "下方聚合表会立即过滤为只显示这个任务的 issue。"),
+        "tc_task_summary_btn":       "🔎 任务汇总",
+        "tc_task_summary_tip":       (
+            "弹出对话框：以与群通知一致的格式（如\"16 Variable/Number\n"
+            "Mismatch · 15 Terminology Inconsistency\"）展示当前任务的\n"
+            "完整 checks 汇总 + 全部 issue 明细。"),
+        "tc_task_filter_no_match":   "任务 {tid}…（缓存中无匹配行）",
+        "tc_task_not_found":         "任务 {tid}… 不在本地缓存 —— 请先点同步。",
+        # 任务汇总对话框
+        "tc_summary_title":          "任务汇总 · {label}",
+        "tc_summary_meta":           (
+            "项目：{project}\n任务名：{task_name}\n任务 ID：{task_id}\n"
+            "状态：{status}  ·  平均分：{score}  ·  创建：{created}"),
+        "tc_summary_checks_label":   "Checks：",
+        "tc_summary_checks_pass":    "Pass · 全部 {rows} 条翻译均无 issue",
+        "tc_summary_issues_title":   "Issue 明细（{n} 条）",
+        "tc_summary_copy_ids":       "📋 复制 OPUS ID",
+        "tc_summary_copy_done":      "✓ 已复制 {n} 条 OPUS ID",
+        "tc_summary_open_tranzor":   "在 Tranzor 打开 ↗",
+        "tc_summary_close":          "关闭",
     },
 }
 
@@ -387,6 +437,60 @@ class TranzorChecksTab:
             cursor="hand2")
         self.btn_flt_reset.pack(side="left")
 
+        # ── Filter row 2: Task ID lookup (notification → checks bridge) ──
+        # 群通知里能拿到的最唯一标识就是 task UUID。专门给它一行入口，让
+        # "群里 Ctrl+C → 来这里 Ctrl+V" 工作流一目了然。粘贴按钮自动从
+        # 剪贴板读 UUID，省得用户在两个窗口之间反复切。
+        fi2 = ttk.Frame(filt, style="Card.TFrame")
+        fi2.pack(fill="x", padx=10, pady=(0, 8))
+
+        self.lbl_filter_task = ttk.Label(fi2, text="", style="Card.TLabel")
+        self.lbl_filter_task.pack(side="left")
+        self.flt_task_var = tk.StringVar()
+        self.ent_flt_task = tk.Entry(
+            fi2, textvariable=self.flt_task_var, width=42,
+            font=(FONT_MONO, 10),  # UUID 等宽更易扫
+            bg="#0a0a1a", fg="#fff", insertbackground="#fff", relief="flat")
+        self.ent_flt_task.pack(side="left", padx=(4, 8), ipady=3)
+        # 输入即查（300ms 防抖，同 keyword 字段）
+        self._task_after_id: str | None = None
+        self.flt_task_var.trace_add("write", self._on_task_id_change)
+        # 回车键直接弹任务汇总对话框 —— 用户最快路径："粘贴 → Enter"
+        self.ent_flt_task.bind("<Return>", lambda _e: self._open_task_summary())
+
+        self.btn_paste_task = tk.Button(
+            fi2, text="", command=self._paste_task_id,
+            font=(FONT_FAMILY, 10), relief="flat",
+            bg="#27AE60", fg="#fff", padx=10, pady=2,
+            activebackground="#2ecc71", activeforeground="#fff",
+            cursor="hand2")
+        self.btn_paste_task.pack(side="left", padx=(0, 4))
+
+        self.btn_open_task_summary = tk.Button(
+            fi2, text="", command=self._open_task_summary,
+            font=(FONT_FAMILY, 10), relief="flat",
+            bg="#4472C4", fg="#fff", padx=10, pady=2,
+            activebackground="#5482d4", activeforeground="#fff",
+            cursor="hand2")
+        self.btn_open_task_summary.pack(side="left", padx=(0, 4))
+
+        self.btn_clear_task = tk.Button(
+            fi2, text="✕", command=lambda: self.flt_task_var.set(""),
+            font=(FONT_FAMILY, 10), relief="flat",
+            bg="#0f3460", fg="#ccc", padx=8, pady=2,
+            activebackground="#1a3a6a", activeforeground="#fff",
+            cursor="hand2")
+        self.btn_clear_task.pack(side="left")
+
+        # Tooltip：解释这是给群通知粘贴 UUID 用的
+        try:
+            from export_gui import Tooltip
+            self._tip_paste_task = Tooltip(self.btn_paste_task, text="")
+            self._tip_open_task = Tooltip(self.btn_open_task_summary, text="")
+        except Exception:
+            self._tip_paste_task = None
+            self._tip_open_task = None
+
         # ── Main body: split top (aggregation) / bottom (issues detail) ──
         body = ttk.PanedWindow(content, orient="vertical")
         body.pack(fill="both", expand=True)
@@ -503,6 +607,15 @@ class TranzorChecksTab:
         self.lbl_filter_source.configure(text=t("tc_filter_source"))
         self.lbl_filter_kw.configure(text=t("tc_filter_keyword"))
         self.btn_flt_reset.configure(text=t("tc_filter_reset"))
+        # Filter row 2 (Task ID 入口) i18n
+        if hasattr(self, "lbl_filter_task"):
+            self.lbl_filter_task.configure(text=t("tc_filter_task"))
+            self.btn_paste_task.configure(text=t("tc_task_paste"))
+            self.btn_open_task_summary.configure(text=t("tc_task_summary_btn"))
+            if self._tip_paste_task:
+                self._tip_paste_task.set_text(t("tc_task_paste_tip"))
+            if self._tip_open_task:
+                self._tip_open_task.set_text(t("tc_task_summary_tip"))
         # 主表标题与列头
         self.lbl_agg.configure(text=t("tc_agg_title"))
         for c, key in (
@@ -603,6 +716,8 @@ class TranzorChecksTab:
         lang = self.flt_lang_var.get() or any_label
         src_label = self.flt_source_var.get() or any_label
         kw = (self.flt_kw_var.get() or "").strip()
+        tid = (self.flt_task_var.get() or "").strip() \
+            if hasattr(self, "flt_task_var") else ""
         src = getattr(self, "_source_label_map", {}).get(src_label)
 
         try:
@@ -611,6 +726,7 @@ class TranzorChecksTab:
                 language=None if lang == any_label else lang,
                 source_kind=src,
                 keyword_substring=kw or None,
+                task_id=tid or None,
             )
         except Exception as e:
             self.lbl_status.configure(
@@ -622,6 +738,37 @@ class TranzorChecksTab:
         self._issues_data = []
         self._render_issues_table()
         self.lbl_detail.configure(text=t("tc_detail_empty"))
+        # 主表标题追加 task 上下文提示，让用户随时看到"我现在过滤的是哪个任务"
+        self._update_agg_title_with_task_context(tid)
+
+    def _update_agg_title_with_task_context(self, tid: str):
+        """有 task_id 过滤时，在主表标题后追加 "· 任务 <短> / MR #N" 标签。
+
+        信息来自第一条聚合行的 latest_task_name / latest_mr_iid（属同一 task），
+        让用户能马上确认自己粘进来的 UUID 到底是哪个任务。
+        """
+        t = self._t
+        base = t("tc_agg_title")
+        if not tid:
+            self.lbl_agg.configure(text=base)
+            return
+        # 从已加载的聚合数据里拿一条 task 元信息
+        ctx = ""
+        if self._agg_data:
+            first = self._agg_data[0]
+            name = first.get("latest_task_name") or ""
+            mr = first.get("latest_mr_iid") or ""
+            short_tid = tid[:8] if len(tid) >= 8 else tid
+            parts = [f"task {short_tid}…"]
+            if mr:
+                parts.append(f"MR #{mr}")
+            elif name:
+                parts.append(name[:30])
+            ctx = " · " + " / ".join(parts)
+        else:
+            short_tid = tid[:8] if len(tid) >= 8 else tid
+            ctx = " · " + t("tc_task_filter_no_match").format(tid=short_tid)
+        self.lbl_agg.configure(text=base + ctx)
 
     def _render_agg_table(self):
         col, desc = self._agg_sort
@@ -699,11 +846,16 @@ class TranzorChecksTab:
         row = self._agg_row_keys.get(sel[0])
         if not row:
             return
+        # 下钻必须沿用主表上的 task_id 过滤，否则用户"先按 task 过滤、
+        # 再点某分组"会看到该 keyword 下所有 task 的 issue，与上层视图不一致。
+        tid = (self.flt_task_var.get() or "").strip() \
+            if hasattr(self, "flt_task_var") else ""
         try:
             issues = tc.get_issues_for_group(
                 error_type=row["error_type"],
                 language=row.get("language") or None,
                 error_keyword=row.get("error_keyword"),
+                task_id=tid or None,
                 limit=500,
             )
         except Exception as e:
@@ -787,13 +939,68 @@ class TranzorChecksTab:
                 pass
         self._kw_after_id = self.parent.after(300, self._refresh_aggregation)
 
+    def _on_task_id_change(self, *_):
+        if self._task_after_id is not None:
+            try:
+                self.parent.after_cancel(self._task_after_id)
+            except Exception:
+                pass
+        self._task_after_id = self.parent.after(300, self._refresh_aggregation)
+
     def _reset_filters(self):
         any_label = self._t("tc_filter_any")
         self.flt_type_var.set(any_label)
         self.flt_lang_var.set(any_label)
         self.flt_source_var.set(any_label)
         self.flt_kw_var.set("")
+        if hasattr(self, "flt_task_var"):
+            self.flt_task_var.set("")
         self._refresh_aggregation()
+
+    # ------------------------------------------------------------------
+    # 通知工作流：从剪贴板粘 UUID + 打开任务汇总对话框
+    # ------------------------------------------------------------------
+    def _paste_task_id(self):
+        """读剪贴板内容，截到第一个空白前的子串（应对用户复制了带前后缀
+        的格式）后填入输入框。trace_add 的写回调会自动触发主表过滤。
+        """
+        try:
+            clip = self.parent.clipboard_get()
+        except Exception:
+            return  # 剪贴板为空或类型不兼容（如复制了图片），无声跳过
+        if not clip:
+            return
+        # 取第一段连续非空白 —— Tranzor Bot 通知里 task UUID 周围有空格/换行，
+        # 用户连带复制时也能干净落地。
+        candidate = clip.strip().split()[0] if clip.strip() else ""
+        if not candidate:
+            return
+        self.flt_task_var.set(candidate)
+        # 立即触发一次（绕过 300ms 防抖，让用户感觉到"粘贴 → 出结果"是瞬时的）
+        if self._task_after_id is not None:
+            try:
+                self.parent.after_cancel(self._task_after_id)
+            except Exception:
+                pass
+        self._refresh_aggregation()
+
+    def _open_task_summary(self):
+        """根据当前 task_id 输入弹出 TaskSummaryDialog；为空则不动作。"""
+        tid = (self.flt_task_var.get() or "").strip()
+        if not tid:
+            return
+        try:
+            summary = tc.get_task_summary(tid)
+        except Exception as e:
+            self.lbl_status.configure(
+                text=self._t("tc_status_failed").format(error=str(e)[:60]))
+            return
+        if summary is None:
+            # 本地缓存没这个 task —— 告诉用户去 Sync
+            self.lbl_status.configure(
+                text=self._t("tc_task_not_found").format(tid=tid[:8]))
+            return
+        TaskSummaryDialog(self.parent, self.app, summary)
 
     # ------------------------------------------------------------------
     # 右键菜单 / 双击：复制 reason · 在 Tranzor 打开
@@ -1068,3 +1275,223 @@ class _SummaryCard(tk.Frame):
 
     def set_subtitle(self, text: str):
         self._subtitle.configure(text=text)
+
+
+# ---------------------------------------------------------------------------
+# 任务汇总对话框 —— 服务"从群通知粘 UUID → 直接看任务全貌"的工作流
+# ---------------------------------------------------------------------------
+class TaskSummaryDialog(tk.Toplevel):
+    """以与 Tranzor Bot 群通知一致的格式展示单任务全貌。
+
+    Layout（从上到下）：
+      - 元数据卡：项目 / 任务名 / Task ID / 状态 / 平均分 / 创建时间
+      - Checks 行：``Checks: 16 Variable/Number Mismatch · 15 Terminology
+        Inconsistency`` —— 视觉上与通知像素级对齐，让用户立即建立映射
+      - issue 明细表：按 error_type 排序，列同主面板下钻表
+      - 底部按钮：复制 OPUS ID / 在 Tranzor 打开 / 关闭
+
+    设计要点：
+      - 非阻塞 Toplevel；点关闭即销毁
+      - issue 表能展示 task 内全部 issue，不再受 500 行下钻限制（任务级
+        天花板通常 < 几百）
+      - "复制 OPUS ID" 只复制该任务的 opus_id 列表，方便用户拿去 grep
+    """
+
+    _COPY_FEEDBACK_MS = 1500
+
+    def __init__(self, parent, app, summary: dict):
+        super().__init__(parent)
+        self.app = app
+        self.summary = summary
+        t = app._t
+
+        # 标题：尽可能精简但能一眼定位 —— "MR #28671" 优先，否则 task_name
+        mr = summary.get("mr_iid")
+        label = (f"MR #{mr}" if mr else
+                 (summary.get("task_name") or "")[:40] or
+                 (summary.get("task_id") or "")[:8] + "…")
+        self.title(t("tc_summary_title").format(label=label))
+        self.configure(bg="#16213e")
+        self.geometry("900x620")
+
+        outer = ttk.Frame(self, style="App.TFrame")
+        outer.pack(fill="both", expand=True, padx=16, pady=12)
+
+        # ── 元数据卡 ──
+        score = summary.get("final_score_avg")
+        score_disp = f"{score:.1f}" if isinstance(score, (int, float)) else "—"
+        meta_text = t("tc_summary_meta").format(
+            project=summary.get("project_id") or "—",
+            task_name=summary.get("task_name") or "—",
+            task_id=summary.get("task_id") or "—",
+            status=summary.get("task_status") or "—",
+            score=score_disp,
+            created=_fmt_iso_short(summary.get("task_created_at") or ""),
+        )
+        tk.Label(
+            outer, text=meta_text,
+            bg="#16213e", fg="#ccc",
+            font=(FONT_FAMILY, 10), justify="left", anchor="w",
+        ).pack(fill="x", pady=(0, 10))
+
+        # ── Checks 行：与通知格式一致 ──
+        counts = summary.get("error_type_counts") or {}
+        checks_line = tc.format_checks_line(counts)
+        if not checks_line:
+            checks_line = t("tc_summary_checks_pass").format(
+                rows=summary.get("total_rows", 0))
+            checks_color = "#27AE60"   # 全通过用绿色
+        else:
+            checks_color = "#E74C3C"   # 有 issue 用警示红
+        checks_frame = ttk.Frame(outer, style="App.TFrame")
+        checks_frame.pack(fill="x", pady=(0, 10))
+        tk.Label(checks_frame, text=t("tc_summary_checks_label"),
+                  bg="#16213e", fg="#9aa0b0",
+                  font=(FONT_FAMILY, 11, "bold")).pack(side="left")
+        tk.Label(checks_frame, text=" " + checks_line,
+                  bg="#16213e", fg=checks_color,
+                  font=(FONT_FAMILY, 11, "bold"),
+                  justify="left", wraplength=820, anchor="w"
+                  ).pack(side="left", fill="x", expand=True)
+
+        # ── Issue 明细表 ──
+        issues = summary.get("issues") or []
+        ttk.Label(outer,
+                  text=t("tc_summary_issues_title").format(n=len(issues)),
+                  style="CardBold.TLabel").pack(anchor="w", pady=(0, 4))
+
+        tbl_frame = ttk.Frame(outer, style="App.TFrame")
+        tbl_frame.pack(fill="both", expand=True)
+        cols = ("error_type", "language", "opus", "score",
+                "source_text", "translation", "reason")
+        tree = ttk.Treeview(
+            tbl_frame, columns=cols, show="headings",
+            style="Summary.Treeview", selectmode="browse")
+        widths = {"error_type": 160, "language": 60, "opus": 200,
+                  "score": 50, "source_text": 180, "translation": 180,
+                  "reason": 220}
+        for c in cols:
+            anchor = "w" if c in ("error_type", "opus", "source_text",
+                                    "translation", "reason") else "center"
+            tree.column(c, width=widths[c], anchor=anchor)
+        tree.heading("error_type",  text=t("tc_col_error_type"))
+        tree.heading("language",    text=t("tc_col_language"))
+        tree.heading("opus",        text=t("tc_col_opus"))
+        tree.heading("score",       text=t("tc_col_score"))
+        tree.heading("source_text", text=t("tc_col_source_text"))
+        tree.heading("translation", text=t("tc_col_translation"))
+        tree.heading("reason",      text=t("tc_col_reason"))
+
+        sb = ttk.Scrollbar(tbl_frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=sb.set)
+        tree.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+
+        for r in issues:
+            sc = r.get("final_score")
+            sc_disp = f"{sc:.1f}" if isinstance(sc, (int, float)) else "—"
+            tree.insert("", "end", values=(
+                r.get("error_type", ""),
+                r.get("target_language") or "—",
+                _short(r.get("opus_id") or "", 50),
+                sc_disp,
+                _short(r.get("source_text") or "", 50),
+                _short(r.get("translated_text") or "", 50),
+                _short(r.get("reason") or "", 60),
+            ))
+
+        # ── 底部按钮 ──
+        btn_row = ttk.Frame(outer, style="App.TFrame")
+        btn_row.pack(fill="x", pady=(10, 0))
+
+        # 收集全部 opus_id，复制用
+        self._all_opus_ids = [
+            (r.get("opus_id") or "").strip()
+            for r in issues
+            if (r.get("opus_id") or "").strip()
+        ]
+        self._copy_default_text = t("tc_summary_copy_ids")
+        self.btn_copy = tk.Button(
+            btn_row, text=self._copy_default_text,
+            command=self._copy_opus_ids,
+            font=(FONT_FAMILY, 10),
+            bg="#27AE60", fg="#fff",
+            activebackground="#2ecc71", activeforeground="#fff",
+            relief="flat", padx=14, pady=4, cursor="hand2")
+        if not self._all_opus_ids:
+            self.btn_copy.configure(state="disabled")
+        self.btn_copy.pack(side="left")
+
+        self.btn_open_tranzor = tk.Button(
+            btn_row, text=t("tc_summary_open_tranzor"),
+            command=self._open_in_tranzor,
+            font=(FONT_FAMILY, 10),
+            bg="#4472C4", fg="#fff",
+            activebackground="#5482d4", activeforeground="#fff",
+            relief="flat", padx=14, pady=4, cursor="hand2")
+        self.btn_open_tranzor.pack(side="left", padx=(8, 0))
+
+        tk.Button(
+            btn_row, text=t("tc_summary_close"),
+            command=self.destroy,
+            font=(FONT_FAMILY, 10),
+            bg="#0f3460", fg="#fff",
+            activebackground="#1a3a6a", activeforeground="#fff",
+            relief="flat", padx=18, pady=4, cursor="hand2"
+        ).pack(side="right")
+
+        # Ctrl+C 复制全部 opus_id（与 SyncDeltaDialog 一致的快捷键语义）
+        self.bind("<Control-c>", lambda _e: self._copy_opus_ids())
+        self.bind("<Control-C>", lambda _e: self._copy_opus_ids())
+        self.bind("<Escape>", lambda _e: self.destroy())
+        self.transient(parent)
+
+    def _copy_opus_ids(self):
+        if not self._all_opus_ids:
+            return
+        try:
+            self.clipboard_clear()
+            self.clipboard_append("\n".join(self._all_opus_ids))
+            self.update()
+        except Exception:
+            return
+        n = len(self._all_opus_ids)
+        self.btn_copy.configure(
+            text=self.app._t("tc_summary_copy_done").format(n=n),
+            state="disabled")
+        self.after(self._COPY_FEEDBACK_MS, self._restore_copy)
+
+    def _restore_copy(self):
+        try:
+            if not self.btn_copy.winfo_exists():
+                return
+        except Exception:
+            return
+        self.btn_copy.configure(text=self._copy_default_text, state="normal")
+
+    def _open_in_tranzor(self):
+        """跳转到 Tranzor 平台上对应任务的静态页。URL 形式与
+        gui_tab_tranzor_checks._open_selected_issue_in_tranzor 保持一致。
+        """
+        base = getattr(mr_api, "TRANZOR_URL", "")
+        if not base:
+            return
+        kind = (self.summary.get("source_kind") or "").lower()
+        task_id = self.summary.get("task_id") or ""
+        project_id = self.summary.get("project_id") or ""
+        mr_iid = self.summary.get("mr_iid")
+        url = ""
+        if kind == "mr" and project_id and mr_iid:
+            from urllib.parse import quote
+            url = f"{base}/static/?project_id={quote(project_id)}&mr_id={mr_iid}"
+        elif kind == "file":
+            url = f"{base}/static/legacy/tasks/{task_id}"
+        elif kind == "scan":
+            url = f"{base}/static/scans/{task_id}"
+        if not url:
+            return
+        try:
+            import webbrowser
+            webbrowser.open(url)
+        except Exception:
+            pass
