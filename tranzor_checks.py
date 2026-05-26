@@ -144,31 +144,45 @@ def init_db(db_path: str | None = None) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 错误分类与关键词提取
+# 错误分类与关键词提取（v0.2 规则）
 # ---------------------------------------------------------------------------
-# v0.1 的提取规则全部基于截图样本与 Tranzor 后端 reason 文本约定。提取失败
-# 时落 "(unparsed)" 标签 + 保留 reason 全文，方便用户在聚合表里一眼看到
-# "哪些 pattern 还没覆盖到"，作为后续规则迭代的输入。
-_TERM_PATTERNS = (
-    # `Source matched the term "transcript"` —— Tranzor UI Terminology Inconsistency
-    re.compile(r'term[s]?\s+["“‘]([^"”’]{1,80})["”’]', re.IGNORECASE),
-    # `glossary entry "X"` —— 备用
-    re.compile(r'glossary\s+entry\s+["“‘]([^"”’]{1,80})["”’]', re.IGNORECASE),
+# v0.1 用启发式 regex 抽具体 token，结果在真实数据上大量落 "(unparsed)"
+# —— Tranzor 的 reason 文本表达远比截图样本里那两种模板灵活。
+#
+# v0.2 改成用户给出的更稳健的规则：
+#   - Terminology Inconsistency: 取描述里**第一次出现的双引号片段**。这条
+#     规则同时覆盖了 "Source matched the term \"X\""（term 名）和 "the
+#     product feature name \"X\""（产品名）两种自由表达，几乎不漏。
+#   - Parameter Format: 直接把**完整 Eval Reason 文本**当关键字。reason 本身
+#     就很短（"Missing named parameter: '$Brand_ShortName'" 一类），整段
+#     当聚合 key 既保留全部上下文、又让相同/相似的 reason 自然落到同一组，
+#     方便用户一眼扫到"同一参数反复出错"。
+#
+# 占位符 / 反引号的细粒度 token 抽取仍保留下来 —— 在分类决策（"是否归到
+# Parameter Format"）里继续有用，只是不再作为最终的 error_keyword。
+_FIRST_QUOTED = re.compile(
+    # 兼容直引号 "..."、弯引号 “...”、单弯引号 ‘...’
+    r'["“‘]([^"”’]{1,200})["”’]'
 )
-# `Spacing issue around \`{(runNumber)}\` -- missing space before at position 12`
 _PARAM_PATTERNS = (
-    re.compile(r"`([^`]{1,80})`"),                # 反引号包裹（截图样式）
-    re.compile(r"(\{\{[^}]{1,60}\}\}|\{[^{}]{1,60}\})"),  # ICU / Mustache 占位符
-    re.compile(r"(%\([^)]{1,40}\)[sdif]|%[sdif])"),       # printf-style
-    re.compile(r"(\{__rc[a-z0-9-]+\})", re.IGNORECASE),   # Tranzor 内部 placeholder 前缀
+    re.compile(r"`([^`]{1,80})`"),
+    re.compile(r"(\{\{[^}]{1,60}\}\}|\{[^{}]{1,60}\})"),
+    re.compile(r"(%\([^)]{1,40}\)[sdif]|%[sdif])"),
+    re.compile(r"(\{__rc[a-z0-9-]+\})", re.IGNORECASE),
 )
 # 关键词暗示是 Parameter Format 问题（即便 error_category=Consistency 也归到这一类）
 _PARAM_HINT = re.compile(
     r"\b(spacing|placeholder|variable|parameter|format|missing\s+space|extra\s+space|"
-    r"number\s+mismatch|url\s+mismatch|email)\b", re.IGNORECASE)
+    r"missing\s+named\s+parameter|number\s+mismatch|url\s+mismatch|email)\b",
+    re.IGNORECASE)
 # 关键词暗示是 Terminology Inconsistency 问题
 _TERM_HINT = re.compile(
-    r"\b(term[s]?\b|glossary|terminology|preferred\s+translation)", re.IGNORECASE)
+    r"\b(term[s]?\b|glossary|terminolog\w*|preferred\s+translation|product\s+feature\s+name)",
+    re.IGNORECASE)
+
+# error_keyword 在 DB 里的硬上限 —— 既给 SQLite 留缓存空间、也让 GROUP BY
+# 不至于因为一条几 KB 的 reason 把整个聚合表撑爆。
+_MAX_KEYWORD_LEN = 240
 
 
 def _norm_category(category) -> str:
@@ -178,49 +192,60 @@ def _norm_category(category) -> str:
     return str(category).strip()
 
 
+def _first_quoted_phrase(reason_text: str) -> str | None:
+    """从 reason 中抽第一对双引号包裹的内容，去首尾空白后返回。"""
+    m = _FIRST_QUOTED.search(reason_text)
+    if not m:
+        return None
+    phrase = (m.group(1) or "").strip()
+    return phrase or None
+
+
 def classify_issue(error_category, reason, source_text=None) -> tuple[str, str]:
     """根据 (error_category, reason) 推断 (error_type, error_keyword)。
 
     Returns:
         (error_type, error_keyword)
         - error_type: 显示用的细分标签，与 Tranzor UI 过滤器一致
-        - error_keyword: 用于排序/聚合的关键字，可能是 "(unparsed)"
+        - error_keyword: 用于排序/聚合的关键字
 
-    设计原则：
-      - 优先匹配最具体的 pattern（先 Parameter Format，再 Terminology）
-      - 任何一条 reason，最多分到一个 error_type；同一行多 issue 在调用方拆分
-      - 失败 fallback 到 ``error_category`` 大类 + "(unparsed)" 关键词
+    决策顺序（与 v0.1 一致）：
+      1. Parameter Format —— hint 词 / 反引号 / 占位符任一命中即归入此类；
+         关键词 = 完整 reason 文本（截断至 ``_MAX_KEYWORD_LEN``）
+      2. Terminology Inconsistency —— cat ∈ (Terminology, Consistency) 或
+         TERM_HINT 命中；关键词 = reason 中第一对双引号包裹的片段；
+         若 reason 没有任何双引号，退化为 reason 前 80 字符（仍可读、可聚合）
+      3. 其他显式 category 透传；关键词 = reason 前 80 字符
+      4. 完全无评估信号 —— "Other" + "(unparsed)"（调用方应已过滤）
     """
     reason_text = str(reason or "")
     cat = _norm_category(error_category)
+    reason_stripped = reason_text.strip()
 
-    # 1) Parameter Format —— 反引号 / 占位符 / format hint
-    if _PARAM_HINT.search(reason_text) or any(p.search(reason_text) for p in _PARAM_PATTERNS):
-        for pat in _PARAM_PATTERNS:
-            m = pat.search(reason_text)
-            if m:
-                kw = m.group(1) if m.lastindex else m.group(0)
-                return ("Parameter Format", kw.strip()[:120])
-        # hint 命中但没抓到具体关键词
-        return ("Parameter Format", "(unparsed)")
+    # 1) Parameter Format —— hint 或 placeholder 任一命中
+    if _PARAM_HINT.search(reason_text) or any(
+            p.search(reason_text) for p in _PARAM_PATTERNS):
+        # 用户偏好：关键字 = 完整 Eval Reason；让相同 reason 自然聚合到同组
+        kw = reason_stripped[:_MAX_KEYWORD_LEN] if reason_stripped else "(unparsed)"
+        return ("Parameter Format", kw)
 
-    # 2) Terminology Inconsistency —— 双引号 term 模式
+    # 2) Terminology Inconsistency —— cat 或 hint 任一命中
     if cat in ("Terminology", "Consistency") or _TERM_HINT.search(reason_text):
-        for pat in _TERM_PATTERNS:
-            m = pat.search(reason_text)
-            if m:
-                return ("Terminology Inconsistency", m.group(1).strip()[:120])
-        # 大类是 Terminology 但找不到具体术语，退化为 unparsed
-        return ("Terminology Inconsistency", "(unparsed)")
+        phrase = _first_quoted_phrase(reason_text)
+        if phrase:
+            return ("Terminology Inconsistency", phrase[:_MAX_KEYWORD_LEN])
+        # reason 完全没有双引号时退化为 reason 前 80 字符 —— 仍比 "(unparsed)"
+        # 信息量大得多，便于人工识别真实情形（如"术语缺失"这类无引用 reason）。
+        fallback = reason_stripped[:80]
+        return ("Terminology Inconsistency",
+                fallback if fallback else "(unparsed)")
 
-    # 3) 其他显式大类直接透传
+    # 3) 其他显式大类透传
     if cat:
-        # 截图里没有出现的大类（Accuracy / Fluency / Locale Convention）就用
-        # 原 category 当 error_type；关键词降级到 reason 首 40 字符。
-        snippet = reason_text.strip()[:40]
+        snippet = reason_stripped[:80]
         return (cat, snippet or "(unparsed)")
 
-    # 4) 完全没有评估信号 —— 调用方应该提前过滤掉这种行，但兜底也得有
+    # 4) 完全无评估信号
     return ("Other", "(unparsed)")
 
 
@@ -700,6 +725,61 @@ def sync_full(progress_callback=None,
     return overall
 
 
+def reclassify_existing_issues(progress_callback=None,
+                                batch_size: int = 2000) -> dict:
+    """对本地 check_issues 表里所有行**重跑 classify_issue**，原地更新
+    error_type / error_keyword / error_keyword_norm，**不重新调 Tranzor API**。
+
+    诞生背景：v0.1 的关键词提取规则在真实数据上漏抓很多，留下大量
+    "(unparsed)" 标签。v0.2 规则升级后，与其逼用户再花数小时跑一次
+    Full re-sync，不如在本地直接刷一遍 —— 几秒到几十秒搞定。
+
+    Args:
+        progress_callback: callable(stage, current, total, **kw)
+        batch_size: 每批读 / 写多少行，权衡内存与 commit 频率。
+
+    Returns:
+        {"updated": <int>, "total": <int>}
+    """
+    log = progress_callback or (lambda *a, **kw: None)
+    init_db()
+    updated = 0
+    total = 0
+    with _connect() as conn:
+        total_row = conn.execute(
+            "SELECT COUNT(*) AS n FROM check_issues").fetchone()
+        total = int(total_row["n"]) if total_row else 0
+        log("reclassify", 0, total)
+
+        offset = 0
+        while True:
+            rows = conn.execute(
+                "SELECT id, error_category, reason FROM check_issues "
+                "ORDER BY id LIMIT ? OFFSET ?",
+                (batch_size, offset),
+            ).fetchall()
+            if not rows:
+                break
+
+            updates = []
+            for r in rows:
+                et, kw = classify_issue(r["error_category"], r["reason"])
+                updates.append((et, kw, (kw or "").lower(), r["id"]))
+
+            conn.executemany(
+                "UPDATE check_issues SET error_type=?, error_keyword=?, "
+                "error_keyword_norm=? WHERE id=?",
+                updates,
+            )
+            conn.commit()
+
+            updated += len(updates)
+            offset += len(rows)
+            log("reclassify", updated, total)
+
+    return {"updated": updated, "total": total}
+
+
 def sync_incremental(progress_callback=None,
                      cancel_event: threading.Event | None = None) -> dict:
     """只拉自 ``last_sync_at`` 之后创建的任务。秒级 - 分钟级别。"""
@@ -765,6 +845,12 @@ def get_summary() -> dict:
 # ---------------------------------------------------------------------------
 # 查询：聚合表（核心 UI 数据）
 # ---------------------------------------------------------------------------
+#: 把"分组里时间最新的那条 task 信息"沿 MAX() 透传出来的分隔符。
+#: 用 ASCII 31（Unit Separator）—— 不可能在正常 task_name / reason 里出现，
+#: split() 之后能稳定还原 5 段字段。
+_LATEST_SEP = "\x1f"
+
+
 def get_aggregated_issues(
     *,
     error_type: str | None = None,
@@ -773,51 +859,82 @@ def get_aggregated_issues(
     keyword_substring: str | None = None,
     limit: int = 5000,
 ) -> list[dict]:
-    """按 (error_type, language, keyword) 三维聚合，每行带 count + tasks_affected。
+    """按 (error_type, language, keyword) 三维聚合，每组返回最新发生时间与
+    最新任务信息，便于 UI 默认"按最新检查时间倒序"展示。
 
     返回字典字段：
       - error_type / language / error_keyword
       - count           : 命中条数
       - tasks_affected  : distinct task 个数
-      - source_kinds    : "mr,scan" 这种逗号串，便于一眼看到散布
+      - source_kinds    : "mr,scan" 这种逗号串
+      - latest_seen     : 该分组里最新的 task_created_at（缺省时回退到 fetched_at）
+      - latest_task_name / latest_mr_iid / latest_task_id / latest_source_kind:
+        最新那条 task 的元信息，UI 直接拿来渲染"Latest task"列
 
-    排序由 UI 层 Treeview 完成，这里只做查询。limit 兜底防止极大数据集
-    一次塞爆 GUI。
+    SQL 技巧：用 ``MAX(timestamp || \\x1f || other_fields)`` 让 SQLite 在
+    GROUP BY 时同时携带"时间最新那一行"的所有元字段，避免上层 N+1 查询，
+    也不需要 SQLite 3.25+ 的窗口函数。
     """
     init_db()
     where = ["1=1"]
     params: list = []
     if error_type:
-        where.append("error_type = ?")
+        where.append("i.error_type = ?")
         params.append(error_type)
     if language:
-        where.append("target_language = ?")
+        where.append("i.target_language = ?")
         params.append(language)
     if source_kind:
-        where.append("source_kind = ?")
+        where.append("i.source_kind = ?")
         params.append(source_kind)
     if keyword_substring:
-        where.append("error_keyword_norm LIKE ?")
+        where.append("i.error_keyword_norm LIKE ?")
         params.append(f"%{keyword_substring.lower()}%")
 
+    sep = _LATEST_SEP
+    # 用 SQL 参数传 sep（避免 f-string 里转义混乱），下方 placeholder 用 ?。
     sql = f"""
         SELECT
-            error_type,
-            target_language AS language,
-            error_keyword,
+            i.error_type,
+            i.target_language AS language,
+            i.error_keyword,
             COUNT(*) AS count,
-            COUNT(DISTINCT task_id || ':' || source_kind) AS tasks_affected,
-            GROUP_CONCAT(DISTINCT source_kind) AS source_kinds
-        FROM check_issues
+            COUNT(DISTINCT i.task_id || ':' || i.source_kind) AS tasks_affected,
+            GROUP_CONCAT(DISTINCT i.source_kind) AS source_kinds,
+            MAX(COALESCE(t.task_created_at, i.fetched_at, '')) AS latest_seen,
+            MAX(
+                COALESCE(t.task_created_at, i.fetched_at, '') || ? ||
+                COALESCE(t.task_name, '') || ? ||
+                COALESCE(CAST(t.mr_iid AS TEXT), '') || ? ||
+                COALESCE(i.task_id, '') || ? ||
+                COALESCE(i.source_kind, '')
+            ) AS _latest_blob
+        FROM check_issues i
+        LEFT JOIN task_checks t
+            ON t.task_id = i.task_id AND t.source_kind = i.source_kind
         WHERE {' AND '.join(where)}
-        GROUP BY error_type, target_language, error_keyword
-        ORDER BY count DESC
+        GROUP BY i.error_type, i.target_language, i.error_keyword
+        ORDER BY latest_seen DESC
         LIMIT ?
     """
-    params.append(limit)
+    # 4 个 sep 占位符在前，原 where 参数中间，limit 在尾。
+    final_params: list = [sep, sep, sep, sep, *params, limit]
     with _connect() as conn:
-        rows = conn.execute(sql, params).fetchall()
-    return [dict(r) for r in rows]
+        rows = conn.execute(sql, final_params).fetchall()
+
+    out: list[dict] = []
+    for r in rows:
+        d = dict(r)
+        blob = d.pop("_latest_blob", None) or ""
+        parts = blob.split(_LATEST_SEP)
+        # parts[0] = latest_seen, parts[1] = task_name, parts[2] = mr_iid,
+        # parts[3] = task_id,     parts[4] = source_kind
+        d["latest_task_name"]   = parts[1] if len(parts) > 1 else ""
+        d["latest_mr_iid"]      = parts[2] if len(parts) > 2 else ""
+        d["latest_task_id"]     = parts[3] if len(parts) > 3 else ""
+        d["latest_source_kind"] = parts[4] if len(parts) > 4 else ""
+        out.append(d)
+    return out
 
 
 # ---------------------------------------------------------------------------
