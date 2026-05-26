@@ -20,6 +20,7 @@ import webbrowser
 from datetime import date
 
 import terminology_highlight as th
+from tranzor_truncation import hydrate_truncated_entries
 
 try:
     import requests
@@ -160,6 +161,18 @@ def fetch_all_translations(task_id):
         for entry in page_results.get(o, []):
             if entry.get("translated_text", ""):
                 all_translations.append(entry)
+
+    # 第 5 步：对 UNS 任务的 truncated preview 拉取完整 source/translated_text
+    # 否则导出文件里只有 ~500 字符的 UI 预览（见 closed bug TRAN-161）
+    hydrated = hydrate_truncated_entries(
+        all_translations,
+        api_base=API,
+        task_id=task_id,
+        session=_session,
+        max_workers=MAX_PAGE_WORKERS,
+    )
+    if hydrated:
+        print(f"    [+] 已为 {hydrated} 条 UNS 长文本拉取完整内容")
 
     return all_translations
 

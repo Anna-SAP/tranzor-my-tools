@@ -664,20 +664,13 @@ def _sync_legacy_tasks(
 
     def _fetch_legacy(task):
         tid = str(task.get("task_id") or task.get("id") or "").strip()
-        # 全量分页
-        entries: list = []
-        offset = 0
-        page_size = 200
-        while True:
-            page, total = mr_api.fetch_legacy_translations_quality(
-                tid, limit=page_size, offset=offset)
-            entries.extend(page or [])
-            if not page or offset + len(page) >= total:
-                break
-            offset += len(page)
-            if offset > 100_000:    # 防御性：服务端 total 不准时的兜底
-                break
-        return entries
+        # 走 fetch_all_legacy_translations_quality，它内部会自动:
+        #   1) 分页累积
+        #   2) 对 UNS 长文本任务的 truncated preview 拉取完整正文
+        #      （见 tranzor_truncation.hydrate_truncated_entries / TRAN-161）
+        # 注意：fetch_all_legacy_translations_quality 已带 100k 兜底之外的
+        # while-until-total 行为；超大任务由调用方上层并发控制。
+        return mr_api.fetch_all_legacy_translations_quality(tid)
 
     _drain_results_into_db(
         all_tasks,
