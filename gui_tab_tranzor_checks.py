@@ -65,13 +65,15 @@ STRINGS = {
         "tc_filter_keyword":         "Keyword contains…",
         "tc_filter_any":             "(any)",
         "tc_filter_reset":           "Reset",
-        "tc_agg_title":              "📊 Issues by error type · language · keyword — click column to sort",
+        "tc_agg_title":              "📊 Issues by error type · language · keyword — newest first · click column to sort",
         "tc_col_source":             "Source",
         "tc_col_error_type":         "Error type",
         "tc_col_language":           "Lang",
         "tc_col_keyword":            "Error keyword",
         "tc_col_count":              "Count",
         "tc_col_tasks":              "Tasks",
+        "tc_col_latest_task":        "Latest task",
+        "tc_col_latest_seen":        "Checked at",
         "tc_detail_title":           "Selected group — {count} issue(s)",
         "tc_detail_empty":           "Select a row above to see the issues that match.",
         "tc_col_task":               "Task",
@@ -92,6 +94,13 @@ STRINGS = {
         "tc_copy":                   "Copy reason",
         "tc_open_tranzor":           "Open in Tranzor ↗",
         "tc_open_tranzor_tip":       "Open this task in the Tranzor platform (uses the platform URL from export_mr_pipeline).",
+        "tc_reclassify":             "♻ Re-classify cached",
+        "tc_reclassify_tip":         (
+            "Re-apply the latest keyword-extraction rules to all rows already in the\n"
+            "local cache — no network calls. Use this after upgrading my-tools to\n"
+            "pick up rule improvements without re-running Full re-sync."),
+        "tc_reclassify_running":     "♻ Re-classifying… {cur}/{total}",
+        "tc_reclassify_done":        "✓ Re-classify done · {updated} issue(s) updated",
     },
     "zh": {
         "tab_tranzor_checks":        "🩺 Tranzor 检查",
@@ -123,13 +132,15 @@ STRINGS = {
         "tc_filter_keyword":         "关键词包含…",
         "tc_filter_any":             "(全部)",
         "tc_filter_reset":           "重置",
-        "tc_agg_title":              "📊 按错误类型 · 语言 · 关键词聚合 — 点击列头排序",
+        "tc_agg_title":              "📊 按错误类型 · 语言 · 关键词聚合 — 默认最新检查在前 · 点击列头排序",
         "tc_col_source":             "来源",
         "tc_col_error_type":         "错误类型",
         "tc_col_language":           "语言",
         "tc_col_keyword":            "错误关键词",
         "tc_col_count":              "条数",
         "tc_col_tasks":              "影响任务数",
+        "tc_col_latest_task":        "最近任务",
+        "tc_col_latest_seen":        "最近检查时间",
         "tc_detail_title":           "已选分组 — 共 {count} 条 issue",
         "tc_detail_empty":           "在上方选择一行以查看该分组的 issue 明细。",
         "tc_col_task":               "任务",
@@ -150,6 +161,13 @@ STRINGS = {
         "tc_copy":                   "复制理由",
         "tc_open_tranzor":           "在 Tranzor 打开 ↗",
         "tc_open_tranzor_tip":       "在 Tranzor 平台打开此任务（URL 复用 export_mr_pipeline 配置）。",
+        "tc_reclassify":             "♻ 重新分类缓存",
+        "tc_reclassify_tip":         (
+            "用最新的关键词提取规则把本地缓存里现有的所有 issue 重新分类，\n"
+            "不调用任何网络接口。升级 my-tools 后无需重跑 Full re-sync，\n"
+            "点这里几秒即可享受新规则。"),
+        "tc_reclassify_running":     "♻ 重新分类中… {cur}/{total}",
+        "tc_reclassify_done":        "✓ 重新分类完成 · 更新 {updated} 条",
     },
 }
 
@@ -233,10 +251,13 @@ class TranzorChecksTab:
         self.app = app
         self.parent = parent
         self._sync_thread: threading.Thread | None = None
+        self._reclassify_thread: threading.Thread | None = None
         self._cancel_event = threading.Event()
         # 当前聚合 / 下钻数据持有，避免每次排序都重查 DB
         self._agg_data: list[dict] = []
-        self._agg_sort = ("count", True)  # (col, desc)
+        # 默认排序：按最新检查时间倒序 —— 没选具体错误类型时这是最有用的视图
+        # （刚被检测到的问题先暴露，旧的归档在下面）。
+        self._agg_sort = ("latest_seen", True)  # (col, desc)
         self._agg_row_keys: dict[str, dict] = {}
         self._issues_data: list[dict] = []
         self._issues_sort = ("score", False)  # (col, desc)
@@ -284,6 +305,16 @@ class TranzorChecksTab:
             bg="#0f3460", fg="#ccc", padx=14, pady=4, state="disabled")
         self.btn_sync_cancel.pack(side="left", padx=(8, 0))
         self._tip_sync_cancel = Tooltip(self.btn_sync_cancel, text="")
+
+        # 重新分类按钮 —— 给"v0.1 留下大量 (unparsed)"的用户一条不重跑
+        # Full re-sync 的快速通路；只在本地 SQLite 上重跑 classify_issue。
+        self.btn_reclassify = self.app._create_button(
+            topbar, text="", command=self._on_reclassify,
+            style_name="SecondarySmall",
+            font=(FONT_FAMILY, 10),
+            bg="#3a2e5e", fg="#dcd0ff", padx=14, pady=4)
+        self.btn_reclassify.pack(side="left", padx=(8, 0))
+        self._tip_reclassify = Tooltip(self.btn_reclassify, text="")
 
         self.lbl_last_sync = ttk.Label(topbar, text="", style="Status.TLabel")
         self.lbl_last_sync.pack(side="left", padx=(16, 0))
@@ -369,15 +400,21 @@ class TranzorChecksTab:
 
         agg_frame = ttk.Frame(top_pane, style="App.TFrame")
         agg_frame.pack(fill="both", expand=True)
+        # 列顺序：来源 → 错误类型 → 语言 → 关键词 → 条数 → 任务数 → 最近任务 → 最近检查时间
+        # "最近检查时间" 放最后，是因为 GUI 用户的扫视方向是从左到右，
+        # 错误内容在前、时间戳在后符合阅读直觉；同时它也是默认排序键，
+        # 列头点击能立刻反向排序。
         self._agg_cols = ("source", "error_type", "language", "keyword",
-                          "count", "tasks")
+                          "count", "tasks", "latest_task", "latest_seen")
         self.tree_agg = ttk.Treeview(
             agg_frame, columns=self._agg_cols, show="headings",
             style="Summary.Treeview", selectmode="browse", height=12)
-        widths = {"source": 70, "error_type": 200, "language": 70,
-                  "keyword": 260, "count": 70, "tasks": 80}
+        widths = {"source": 70, "error_type": 180, "language": 60,
+                  "keyword": 240, "count": 60, "tasks": 60,
+                  "latest_task": 140, "latest_seen": 120}
         for c in self._agg_cols:
-            anchor = "w" if c in ("error_type", "keyword") else "center"
+            anchor = "w" if c in ("error_type", "keyword",
+                                    "latest_task") else "center"
             self.tree_agg.column(c, width=widths.get(c, 80), anchor=anchor)
             self.tree_agg.heading(
                 c, text="", command=lambda col=c: self._sort_agg(col))
@@ -453,6 +490,8 @@ class TranzorChecksTab:
         self._tip_sync_full.set_text(t("tc_sync_full_tip"))
         self.btn_sync_cancel.configure(text=t("tc_sync_cancel"))
         self._tip_sync_cancel.set_text(t("tc_sync_cancel_tip"))
+        self.btn_reclassify.configure(text=t("tc_reclassify"))
+        self._tip_reclassify.set_text(t("tc_reclassify_tip"))
         # 卡片标题
         self.card_tasks.set_title(t("tc_card_tasks"))
         self.card_clean.set_title(t("tc_card_clean"))
@@ -473,6 +512,8 @@ class TranzorChecksTab:
             ("keyword", "tc_col_keyword"),
             ("count", "tc_col_count"),
             ("tasks", "tc_col_tasks"),
+            ("latest_task", "tc_col_latest_task"),
+            ("latest_seen", "tc_col_latest_seen"),
         ):
             self.tree_agg.heading(
                 c, text=t(key),
@@ -585,13 +626,15 @@ class TranzorChecksTab:
     def _render_agg_table(self):
         col, desc = self._agg_sort
         key = {
-            "source": "source_kinds",
-            "error_type": "error_type",
-            "language": "language",
-            "keyword": "error_keyword",
-            "count": "count",
-            "tasks": "tasks_affected",
-        }.get(col, "count")
+            "source":      "source_kinds",
+            "error_type":  "error_type",
+            "language":    "language",
+            "keyword":     "error_keyword",
+            "count":       "count",
+            "tasks":       "tasks_affected",
+            "latest_task": "latest_task_name",
+            "latest_seen": "latest_seen",
+        }.get(col, "latest_seen")
         numeric = col in ("count", "tasks")
 
         def _k(row):
@@ -614,6 +657,19 @@ class TranzorChecksTab:
             main_src = src_kinds[0] if src_kinds else ""
             src_disp = " / ".join(
                 _source_label(k, t) for k in src_kinds if k)
+            # 最近任务列：优先 "MR #1066"（有 mr_iid 时最直观），其次任务名，
+            # 最后是 task_id 前 12 字符。完整 task_id 在选中后下钻面板可见。
+            latest_mr = r.get("latest_mr_iid") or ""
+            latest_name = r.get("latest_task_name") or ""
+            latest_tid = r.get("latest_task_id") or ""
+            if latest_mr:
+                latest_task_disp = f"MR #{latest_mr}"
+            elif latest_name:
+                latest_task_disp = _short(latest_name, 30)
+            elif latest_tid:
+                latest_task_disp = _short(latest_tid, 14)
+            else:
+                latest_task_disp = "—"
             iid = self.tree_agg.insert("", "end", values=(
                 src_disp or "—",
                 r.get("error_type", ""),
@@ -621,6 +677,8 @@ class TranzorChecksTab:
                 _short(r.get("error_keyword") or "", 60),
                 f"{r.get('count', 0):,}",
                 f"{r.get('tasks_affected', 0):,}",
+                latest_task_disp,
+                _fmt_iso_short(r.get("latest_seen") or ""),
             ), tags=(_source_tag(main_src),))
             self._agg_row_keys[iid] = r
 
@@ -629,9 +687,9 @@ class TranzorChecksTab:
         if col == cur_col:
             self._agg_sort = (col, not cur_desc)
         else:
-            # 数值列默认降序、文本列默认升序
+            # 数值列默认降序、时间列默认降序（最新在前）、文本列默认升序
             self._agg_sort = (
-                col, col in ("count", "tasks"))
+                col, col in ("count", "tasks", "latest_seen"))
         self._render_agg_table()
 
     def _on_agg_selected(self):
@@ -861,12 +919,51 @@ class TranzorChecksTab:
             self.btn_sync.state(running_state)
             self.btn_sync_full.state(running_state)
             self.btn_sync_cancel.state(cancel_state)
+            self.btn_reclassify.state(running_state)
         else:
             s = "disabled" if running else "normal"
             cs = "normal" if running else "disabled"
             self.btn_sync.configure(state=s)
             self.btn_sync_full.configure(state=s)
             self.btn_sync_cancel.configure(state=cs)
+            self.btn_reclassify.configure(state=s)
+
+    # ------------------------------------------------------------------
+    # 重新分类（不联网） —— 把新的提取规则跑到现有缓存上
+    # ------------------------------------------------------------------
+    def _on_reclassify(self):
+        # 防并发：同步进行中、或已经在跑 reclassify 就直接吞掉
+        if self._sync_thread and self._sync_thread.is_alive():
+            return
+        if self._reclassify_thread and self._reclassify_thread.is_alive():
+            return
+        self._set_sync_buttons(running=True)
+        self.lbl_status.configure(
+            text=self._t("tc_reclassify_running").format(cur=0, total=0))
+        self._reclassify_thread = threading.Thread(
+            target=self._run_reclassify, daemon=True)
+        self._reclassify_thread.start()
+
+    def _run_reclassify(self):
+        t = self._t
+        try:
+            def progress(stage, cur, total, **kw):
+                self.parent.after(
+                    0,
+                    lambda c=cur, tt=total: self.lbl_status.configure(
+                        text=t("tc_reclassify_running").format(cur=c, total=tt)))
+            result = tc.reclassify_existing_issues(progress_callback=progress)
+            self.parent.after(0, lambda: self.lbl_status.configure(
+                text=t("tc_reclassify_done").format(
+                    updated=result.get("updated", 0))))
+        except Exception as e:
+            err = str(e)[:80]
+            self.parent.after(0, lambda: self.lbl_status.configure(
+                text=t("tc_status_failed").format(error=err)))
+        finally:
+            self.parent.after(0, lambda: self._set_sync_buttons(running=False))
+            # 让聚合表立刻反映新分类结果
+            self.parent.after(100, self._refresh_from_cache)
 
     def _run_sync(self, full: bool):
         try:
