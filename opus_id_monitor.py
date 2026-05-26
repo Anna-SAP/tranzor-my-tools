@@ -1258,6 +1258,47 @@ def get_anomaly_stats(
     }
 
 
+def get_additions_since(
+    since_iso: str | None,
+    *,
+    hard_limit: int = 50_000,
+    db_path: str | None = None,
+) -> list[dict]:
+    """返回 ``first_seen > since_iso`` 的全部 opus_id（去重至 distinct opus_id）。
+
+    给 GUI 的"Sync 完成后弹增量详情"用：用户点 Sync now 之前的 last_sync_at
+    就是 since_iso，sync 结束后用本函数把这次新增的 opus_id 一次性拉出来。
+
+    与 ``get_recent_additions`` 的区别：
+      - get_recent_additions 用"天数窗口"（days=7 等），适合"最近一周面板"
+      - get_additions_since 用"具体 ISO 时间戳"，适合"本次 sync 增量"
+
+    Args:
+        since_iso: ISO 形如 ``"2026-05-26T07:16:00+00:00"``。``None`` 或空串
+            表示"从未同步过" → 把数据库里全部 opus_id 都视为新增，避免遗漏。
+        hard_limit: 防御性上限 —— 首次 Full re-sync 可能有 ~3-5 万行，
+            默认 50000 足够覆盖；超出仅截断展示。
+    """
+    init_db(db_path)
+    cutoff = (since_iso or "").strip() or "0"  # 空串 → 比所有 ISO 都小的字符串
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            """
+            SELECT
+                opus_id, alias, path_hash, logical_key,
+                project_id, target_language, source_kind, mr_iid,
+                source_file_path, MIN(first_seen) AS first_seen
+            FROM opus_index
+            WHERE first_seen > ?
+            GROUP BY opus_id
+            ORDER BY first_seen DESC
+            LIMIT ?
+            """,
+            (cutoff, hard_limit),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
 def get_recent_additions(
     days: int = 7,
     hard_limit: int = 1000,
