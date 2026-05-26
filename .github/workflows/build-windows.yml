@@ -4,28 +4,25 @@ on:
   workflow_dispatch:  # 手动触发 — 在 GitHub Actions 页面点击 Run workflow
   push:
     branches: [master]
-    # 只有核心源文件 / 构建脚本变动才触发 — 避免文档改动浪费 runner 分钟数。
-    paths:
-      - 'TranzorExporter.spec'
-      - 'export_gui.py'
-      - 'export_changes.py'
-      - 'export_translations.py'
-      - 'export_full_translations.py'
-      - 'export_mr_pipeline.py'
-      - 'quality_overview.py'
-      - 'gui_tabs.py'
-      - 'gui_tab_full_translations.py'
-      - 'gui_tab_human_revisions.py'
-      - 'gui_tab_scan_tasks.py'
-      - 'gui_tab_term_watchtower.py'
-      - 'terminology_highlight.py'
-      - 'terminology_watchtower.py'
-      - 'tranzor_terminology.py'
-      - 'tranzor_bridge.py'
-      - 'gitlab_client.py'
-      - 'pyi_rth_tkinter_fix.py'
-      - 'pyinstaller_hooks/**'
-      - '.github/workflows/build-windows.yml'
+    # 用「黑名单」而不是「白名单」：默认所有代码改动都触发构建，只显式
+    # 排除明确不影响 EXE 的路径。
+    #
+    # 历史上这里是一份白名单（``paths:``），列出"已知"的源文件。问题是
+    # 每加一个新 *.py（如 gui_tab_tranzor_checks.py / opus_id_monitor.py
+    # 等等）都得记得追加这份清单 —— 一旦遗漏，对应 PR 合到 master 后就
+    # **不会触发自动构建**，用户必须手动点 Run workflow，与"代码变更
+    # 自动出包"的预期不符。
+    #
+    # 改成 ``paths-ignore`` 后，新增任何 *.py 自动纳入触发集；只有改文档 /
+    # userscript / Mac 专属文件时才安静跳过。
+    paths-ignore:
+      - '**.md'                              # 全部 markdown 文档
+      - 'userscript/**'                      # Tampermonkey 用户脚本（不打包到 EXE）
+      - 'build_mac.command'                  # Mac 专属构建脚本
+      - 'TranzorExporter_mac.spec'           # Mac 构建 spec
+      - '.github/workflows/build-mac.yml'    # Mac 构建配置改动不需要重跑 Windows
+      - 'LICENSE'
+      - '.gitignore'
 
 jobs:
   build:
