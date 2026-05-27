@@ -6,30 +6,27 @@ a = Analysis(
     ['export_gui.py'],
     pathex=[],
     binaries=[],
-    datas=[
-        ('export_changes.py', '.'),
-        ('export_translations.py', '.'),
-        ('tranzor_bridge.py', '.'),
-        ('export_mr_pipeline.py', '.'),
-        ('quality_overview.py', '.'),
-        ('gui_tabs.py', '.'),
-        ('export_full_translations.py', '.'),
-        ('gui_tab_full_translations.py', '.'),
-        ('gui_tab_human_revisions.py', '.'),
-        ('gui_tab_scan_tasks.py', '.'),
-        ('gui_tab_term_watchtower.py', '.'),
-        ('terminology_highlight.py', '.'),
-        ('terminology_watchtower.py', '.'),
-        ('tranzor_terminology.py', '.'),
-        ('gitlab_client.py', '.'),
-    ],
+    # NOTE: source `.py` modules used to be duplicated here as `datas` on top of
+    # `hiddenimports`. PyInstaller already embeds them in the PYZ — the duplicate
+    # copies only inflated the .app bundle and slowed the first launch. Keep
+    # `datas` for genuine resource files only.
+    datas=[],
+    # Sync with TranzorExporter.spec — see the note there about why every
+    # optional ``try: import x`` target needs to be listed explicitly now
+    # that we no longer mirror them as ``datas`` source copies.
     hiddenimports=[
         'tranzor_bridge',
+        'bridge_setup_wizard',
         'export_full_translations',
         'gui_tab_full_translations',
         'gui_tab_human_revisions',
         'gui_tab_scan_tasks',
         'gui_tab_term_watchtower',
+        'gui_tab_tm_context_insight',
+        'gui_tab_opus_id_monitor',
+        'gui_tab_tranzor_checks',
+        'opus_id_monitor',
+        'tranzor_checks',
         'terminology_highlight',
         'terminology_watchtower',
         'tranzor_terminology',

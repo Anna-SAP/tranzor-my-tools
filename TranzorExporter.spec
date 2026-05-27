@@ -38,34 +38,35 @@ a = Analysis(
     ['export_gui.py'],
     pathex=[],
     binaries=tk_binaries,
+    # NOTE: source `.py` modules used to be duplicated here as `datas` on top of
+    # being declared in `hiddenimports`. PyInstaller already embeds them into
+    # the PYZ archive, so the duplicate copies in `datas` only made the bundle
+    # larger and slowed the onefile unpack on every launch. Keep `datas` for
+    # genuine resources only (Tcl/Tk runtime files, etc.).
     datas=[
-        ('export_changes.py', '.'),
-        ('export_translations.py', '.'),
-        ('tranzor_bridge.py', '.'),
-        ('export_mr_pipeline.py', '.'),
-        ('quality_overview.py', '.'),
-        ('gui_tabs.py', '.'),
-        ('export_full_translations.py', '.'),
-        ('gui_tab_full_translations.py', '.'),
-        ('gui_tab_human_revisions.py', '.'),
-        ('gui_tab_scan_tasks.py', '.'),
-        ('gui_tab_term_watchtower.py', '.'),
-        ('terminology_highlight.py', '.'),
-        ('terminology_watchtower.py', '.'),
-        ('tranzor_terminology.py', '.'),
-        ('gitlab_client.py', '.'),
-        ('pyi_rth_tkinter_fix.py', '.'),
         *tk_datas,
     ],
+    # Every sibling module that is optional / wrapped in ``try: import x except``
+    # at the top of ``export_gui.py`` (or pulled in transitively by such a tab)
+    # is listed here. PyInstaller's static analyzer normally finds them anyway,
+    # but the duplicate ``datas`` entries used to mask any analyzer miss. Now
+    # that ``datas`` no longer carries source .py copies, the safety net lives
+    # entirely in this list — keep it in sync when adding new tabs.
     hiddenimports=[
         '_tkinter',
         'tkinter',
         'tranzor_bridge',
+        'bridge_setup_wizard',
         'export_full_translations',
         'gui_tab_full_translations',
         'gui_tab_human_revisions',
         'gui_tab_scan_tasks',
         'gui_tab_term_watchtower',
+        'gui_tab_tm_context_insight',
+        'gui_tab_opus_id_monitor',
+        'gui_tab_tranzor_checks',
+        'opus_id_monitor',
+        'tranzor_checks',
         'terminology_highlight',
         'terminology_watchtower',
         'tranzor_terminology',
@@ -94,7 +95,12 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    # UPX disabled on purpose. In onefile mode the bootloader has to UPX-decompress
+    # every binary into %TEMP%\_MEIxxxxx\ on each launch — that decompression is
+    # CPU-bound and dominates cold-start cost. As the bundle has grown past 25 MB
+    # (10 tabs, OPUS / Checks SQLite layers, terminology highlighting, etc.) the
+    # extra ~10 MB on disk is well worth the ~30-60% startup-time win.
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,
