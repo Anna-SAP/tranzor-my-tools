@@ -75,10 +75,31 @@ a = Analysis(
     hookspath=['pyinstaller_hooks'],
     hooksconfig={},
     runtime_hooks=['pyi_rth_tkinter_fix.py'],
+    # Trim modules we know are dead weight for this app. Each entry here drops
+    # one or more files from the bundle, which directly reduces the number of
+    # .pyd/.dll files the PyInstaller onefile bootloader must extract into
+    # %TEMP%\_MEIxxxxx\ on every launch — fewer files means less Defender
+    # scanning during cold-start. Only exclude modules we are SURE the GUI does
+    # not need at runtime.
     excludes=[
         '81d243bd2c585b0f4821__mypyc',
         'charset_normalizer.md',
         'charset_normalizer.cd',
+        # We never run unittest from inside the GUI. Drops ~25 .pyc files.
+        'unittest',
+        # pydoc pulls in tkinter docs viewer; we have our own help text.
+        'pydoc',
+        # xmlrpc client/server — unused.
+        'xmlrpc',
+        # Standard-library test packages PyInstaller sometimes grabs.
+        'test',
+        'tests',
+        # setuptools / pkg_resources are the biggest single drop on Windows —
+        # they alone account for a hundred+ files we never call into.
+        'setuptools',
+        'pkg_resources',
+        # Distutils is gone in 3.12 anyway; explicit exclude silences a warning.
+        'distutils',
     ],
     noarchive=False,
     optimize=0,
@@ -86,44 +107,39 @@ a = Analysis(
 pyz = PYZ(a.pure)
 
 # ---------------------------------------------------------------------------
-# onedir layout — was onefile, switched to onedir for startup speed
+# onefile layout — back from a brief onedir detour
 # ---------------------------------------------------------------------------
-# Background: in onefile mode the PyInstaller bootloader has to extract every
-# bundled .pyd / .dll into %TEMP%\_MEIxxxxx\ on every single launch (50+ files
-# for a Tk + requests + sqlite + 10-tab GUI). Each newly-written executable
-# triggers a Windows Defender real-time scan, which serialises behind every
-# file write. Empirically this pushed cold-start to ~60 s on a Defender-enabled
-# laptop even after upx=False and the datas cleanup.
+# PR #64 switched this build to onedir to dodge per-file Defender scans during
+# the onefile bootloader's %TEMP% unpack. That worked, but the .zip /
+# folder distribution model broke users in practice:
 #
-# Onedir lays the same files out in dist/TranzorExporter/_internal/ at build
-# time, Defender scans them once at install / unzip time, and subsequent cold
-# starts are O(load DLLs into memory) instead of O(write + scan every file).
-# The trade-off is that we now ship a folder (zipped by the CI artifact step)
-# instead of a single .exe — small inconvenience for a 10-20x speedup.
+#   - 7-Zip / Windows zip viewer happily run TranzorExporter.exe straight from
+#     the .zip without ever materialising _internal\, then the EXE crashes
+#     with "Failed to load python312.dll". Reproduced even after wrapping the
+#     bundle in a top-level TranzorExporter/ folder and adding a README.
+#   - Users expect a single .exe and find the folder layout confusing.
+#
+# Onefile is the right shape for this tool. Cold-start speed is now tackled by
+# trimming `excludes` above (fewer files to scan) plus the per-stage timing
+# log added in #64 (~/.tranzor_exporter/startup.log) — so if it is still slow
+# the next iteration has real data to point at, not a guessed root cause.
 exe = EXE(
     pyz,
     a.scripts,
+    a.binaries,
+    a.datas,
     [],
-    exclude_binaries=True,   # binaries go to COLLECT (onedir), not the EXE
     name='TranzorExporter',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
+    upx_exclude=[],
+    runtime_tmpdir=None,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-)
-
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.datas,
-    strip=False,
-    upx=False,
-    upx_exclude=[],
-    name='TranzorExporter',
 )
