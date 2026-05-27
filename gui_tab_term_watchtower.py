@@ -141,6 +141,7 @@ STRINGS = {
         "tw_tt_col_scope":           "Scope",
         "tw_tt_col_locales":         "Locales",
         "tw_tt_col_dnt":             "DNT",
+        "tw_tt_col_updated":         "Last Updated",
         "tw_tt_severity":            "Severity",
         "tw_tt_run":                 "Run Scan with Selected ({n})…",
         "tw_tt_no_selection":        "Select at least one term.",
@@ -323,6 +324,7 @@ STRINGS = {
         "tw_tt_col_scope":           "Scope",
         "tw_tt_col_locales":         "语种数",
         "tw_tt_col_dnt":             "DNT",
+        "tw_tt_col_updated":         "最后更新",
         "tw_tt_severity":            "严重度",
         "tw_tt_run":                 "对所选术语运行扫描 ({n})…",
         "tw_tt_no_selection":        "至少勾选一个术语。",
@@ -1902,7 +1904,7 @@ class _TranzorTerminologyDialog(tk.Toplevel):
         # ── Term list ──
         tree_wrap = ttk.Frame(body)
         tree_wrap.pack(fill="both", expand=True)
-        cols = ("check", "name", "scope", "locales", "dnt")
+        cols = ("check", "name", "scope", "locales", "dnt", "updated_at")
         self.tree = ttk.Treeview(tree_wrap, columns=cols, show="headings",
                                  height=22, selectmode="none")
         self.tree.heading("check", text="")
@@ -1910,11 +1912,14 @@ class _TranzorTerminologyDialog(tk.Toplevel):
         self.tree.heading("scope", text=tab._t("tw_tt_col_scope"))
         self.tree.heading("locales", text=tab._t("tw_tt_col_locales"))
         self.tree.heading("dnt", text=tab._t("tw_tt_col_dnt"))
+        self.tree.heading("updated_at", text=tab._t("tw_tt_col_updated"))
         self.tree.column("check", width=36, anchor="center", stretch=False)
         self.tree.column("name", width=420, anchor="w", stretch=True)
         self.tree.column("scope", width=110, anchor="w", stretch=False)
         self.tree.column("locales", width=80, anchor="e", stretch=False)
         self.tree.column("dnt", width=60, anchor="center", stretch=False)
+        self.tree.column("updated_at", width=140, anchor="center",
+                         stretch=False)
         self.tree.pack(side="left", fill="both", expand=True)
         vsb = ttk.Scrollbar(tree_wrap, orient="vertical",
                             command=self.tree.yview)
@@ -2013,6 +2018,9 @@ class _TranzorTerminologyDialog(tk.Toplevel):
                         t.get("scope") or "",
                         t.get("translation_count") or 0,
                         "Yes" if t.get("dnt") else "",
+                        _TermDetailDialog._format_updated_at(
+                            t.get("updated_at")
+                        ),
                     ),
                 )
         # Filter by name+scope substring AND by DNT classifier
