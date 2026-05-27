@@ -45,16 +45,25 @@ jobs:
         run: |
           pyinstaller TranzorExporter.spec --clean
 
-      - name: Verify EXE exists
+      - name: Verify build output exists
         shell: pwsh
         run: |
-          $exe = Get-Item "dist\TranzorExporter.exe" -ErrorAction Stop
-          $sizeMB = [math]::Round($exe.Length / 1MB, 2)
-          Write-Host "Built EXE: $($exe.FullName) ($sizeMB MB)"
+          # Onedir layout: dist/TranzorExporter/TranzorExporter.exe + _internal/
+          $exe = Get-Item "dist\TranzorExporter\TranzorExporter.exe" -ErrorAction Stop
+          $exeMB = [math]::Round($exe.Length / 1MB, 2)
+          $bundle = Get-ChildItem "dist\TranzorExporter" -Recurse | Measure-Object -Property Length -Sum
+          $bundleMB = [math]::Round($bundle.Sum / 1MB, 2)
+          Write-Host "EXE:    $($exe.FullName) ($exeMB MB)"
+          Write-Host "Bundle: dist\TranzorExporter\ ($bundleMB MB total, $($bundle.Count) files)"
 
-      - name: Upload TranzorExporter EXE
+      - name: Upload TranzorExporter bundle (zipped by Actions automatically)
         uses: actions/upload-artifact@v4
         with:
           name: TranzorExporter-Windows
-          path: dist/TranzorExporter.exe
+          # Upload the whole onedir folder. actions/upload-artifact@v4 zips it
+          # automatically, so users download a single .zip and unpack it once.
+          # That single unpack lets Windows Defender scan all .pyd / .dll files
+          # in advance — subsequent launches skip the per-file scan that made
+          # onefile cold-start ~60 s.
+          path: dist/TranzorExporter/
           retention-days: 90

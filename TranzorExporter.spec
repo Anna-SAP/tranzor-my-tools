@@ -85,28 +85,45 @@ a = Analysis(
 )
 pyz = PYZ(a.pure)
 
+# ---------------------------------------------------------------------------
+# onedir layout — was onefile, switched to onedir for startup speed
+# ---------------------------------------------------------------------------
+# Background: in onefile mode the PyInstaller bootloader has to extract every
+# bundled .pyd / .dll into %TEMP%\_MEIxxxxx\ on every single launch (50+ files
+# for a Tk + requests + sqlite + 10-tab GUI). Each newly-written executable
+# triggers a Windows Defender real-time scan, which serialises behind every
+# file write. Empirically this pushed cold-start to ~60 s on a Defender-enabled
+# laptop even after upx=False and the datas cleanup.
+#
+# Onedir lays the same files out in dist/TranzorExporter/_internal/ at build
+# time, Defender scans them once at install / unzip time, and subsequent cold
+# starts are O(load DLLs into memory) instead of O(write + scan every file).
+# The trade-off is that we now ship a folder (zipped by the CI artifact step)
+# instead of a single .exe — small inconvenience for a 10-20x speedup.
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,   # binaries go to COLLECT (onedir), not the EXE
     name='TranzorExporter',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    # UPX disabled on purpose. In onefile mode the bootloader has to UPX-decompress
-    # every binary into %TEMP%\_MEIxxxxx\ on each launch — that decompression is
-    # CPU-bound and dominates cold-start cost. As the bundle has grown past 25 MB
-    # (10 tabs, OPUS / Checks SQLite layers, terminology highlighting, etc.) the
-    # extra ~10 MB on disk is well worth the ~30-60% startup-time win.
     upx=False,
-    upx_exclude=[],
-    runtime_tmpdir=None,
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name='TranzorExporter',
 )
