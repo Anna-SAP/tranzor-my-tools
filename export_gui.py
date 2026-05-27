@@ -5,6 +5,29 @@ Uses Python built-in tkinter, zero extra dependencies.
 Supports English / Chinese interface language toggle.
 """
 
+# ---------------------------------------------------------------------------
+# Startup instrumentation
+# ---------------------------------------------------------------------------
+# Cold-start has been a moving target — onefile UPX, onedir without UPX,
+# Defender scans, etc. Always record per-stage timestamps to a local log so
+# the next "EXE takes forever to open" complaint has data to look at instead
+# of guesswork. Cost: 4-5 lines per launch in a tiny text file. The first
+# entry below intentionally fires at module-import time, before any heavy
+# subordinate imports — diff against later entries to see where the time
+# actually goes.
+import time as _time_for_boot
+_BOOT_T0 = _time_for_boot.perf_counter()
+_BOOT_STAGES: "list[tuple[str, float]]" = []
+
+def _boot_mark(label: str) -> None:
+    """Record a startup-stage timestamp (best-effort, never raises)."""
+    try:
+        _BOOT_STAGES.append((label, _time_for_boot.perf_counter() - _BOOT_T0))
+    except Exception:
+        pass
+
+_boot_mark("module_import_start")
+
 import os
 import re
 import sys
@@ -16,6 +39,8 @@ import subprocess
 import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import date
+
+_boot_mark("stdlib_imports_done")
 
 # ---------------------------------------------------------------------------
 # 跨平台字体适配 — Mac 使用系统内置字体，Windows 使用 Segoe UI / Consolas
@@ -102,11 +127,15 @@ try:
 except ImportError:
     requests = None
 
+_boot_mark("requests_import_done")
+
 # Ensure sibling modules are importable
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import export_changes
 import export_translations
 import gui_tabs
+
+_boot_mark("core_siblings_imported")
 
 # Optional: Tranzor Bridge (loopback HTTP server that hands the HTML report's
 # selections off to a Tampermonkey userscript on the Tranzor Platform tab).
@@ -199,6 +228,8 @@ except Exception as _tc_e:  # pragma: no cover
     _tc_import_error = _tc_e
 else:
     _tc_import_error = None
+
+_boot_mark("optional_tabs_imported")
 
 # ---------------------------------------------------------------------------
 # Tranzor API config (reuse from export_changes)
@@ -706,9 +737,13 @@ class ExportApp:
         self.summary_resize_job = None
 
         # Setup
+        _boot_mark("ExportApp_init_start")
         self._setup_styles()
+        _boot_mark("styles_done")
         self._build_ui()
+        _boot_mark("build_ui_done")
         self._refresh_ui_text()
+        _boot_mark("refresh_text_done")
         # Bridge boot moved off the main thread — port scanning + atomic
         # writes to ~/.tranzor_bridge/port.json used to cost ~100-300ms in
         # __init__ before the window could draw. The watchdog below already
@@ -1902,13 +1937,57 @@ class ExportApp:
 # ============================================================
 # Entry point
 # ============================================================
+def _flush_boot_log() -> None:
+    """Persist per-stage startup timestamps so we can diagnose slow launches
+    after the fact. Best-effort: any failure here is silently swallowed —
+    diagnostics must never become the reason the GUI didn't open.
+
+    File: ``~/.tranzor_exporter/startup.log`` (rotates by simple truncation
+    when it grows past 64 KB so it can't balloon over time)."""
+    try:
+        base = os.path.join(os.path.expanduser("~"), ".tranzor_exporter")
+        os.makedirs(base, exist_ok=True)
+        path = os.path.join(base, "startup.log")
+        # Truncate if too big — we only need the last few launches to debug.
+        try:
+            if os.path.getsize(path) > 64 * 1024:
+                with open(path, "w", encoding="utf-8") as _trunc:
+                    _trunc.write("")
+        except OSError:
+            pass
+        with open(path, "a", encoding="utf-8") as f:
+            import datetime as _dt
+            stamp = _dt.datetime.now().isoformat(timespec="seconds")
+            f.write(f"--- launch {stamp} pid={os.getpid()} ---\n")
+            last = 0.0
+            for label, t in _BOOT_STAGES:
+                f.write(f"  {t*1000:7.0f}ms  (+{(t-last)*1000:6.0f}ms)  {label}\n")
+                last = t
+            f.write("\n")
+    except Exception:
+        pass
+
+
 def main():
+    _boot_mark("main_entry")
     root = tk.Tk()
+    _boot_mark("tk_Tk_done")
     try:
         root.iconbitmap(default="")
     except Exception:
         pass
     app = ExportApp(root)
+    _boot_mark("ExportApp_constructed")
+    # Drain Tk's idle queue so the first frame is actually on screen before
+    # we record the "ready" timestamp — otherwise we measure to "mainloop
+    # entered" which can be 100-300 ms before the user sees anything.
+    try:
+        root.update_idletasks()
+        root.update()
+    except Exception:
+        pass
+    _boot_mark("first_frame_visible")
+    _flush_boot_log()
     root.mainloop()
 
 
