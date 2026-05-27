@@ -709,7 +709,11 @@ class ExportApp:
         self._setup_styles()
         self._build_ui()
         self._refresh_ui_text()
-        self._start_bridge()
+        # Bridge boot moved off the main thread — port scanning + atomic
+        # writes to ~/.tranzor_bridge/port.json used to cost ~100-300ms in
+        # __init__ before the window could draw. The watchdog below already
+        # tolerates self.bridge=None during the brief async startup window.
+        self._start_bridge_async()
         # Bridge-setup auto-trigger: per-session "already prompted" guard
         # so a dismissed wizard doesn't re-pop on every poll within the same
         # session. Cross-session re-trigger is decided by the heuristic in
@@ -1766,16 +1770,31 @@ class ExportApp:
     # ------------------------------------------------------------------
     # Tranzor Bridge integration
     # ------------------------------------------------------------------
-    def _start_bridge(self):
-        """Boot the loopback bridge so generated reports can hand selections
-        off to the Tranzor Platform tab. Failures degrade gracefully — the
-        Export TMX flow stays usable, and reports fall back to clipboard /
-        URL-hash transport on the JS side."""
+    def _start_bridge_async(self):
+        """Boot the loopback bridge on a background thread so the main window
+        can draw without waiting for port scans / file I/O. Until the thread
+        finishes, ``self.bridge`` stays ``None`` and consumers (export flow,
+        watchdog) already handle that case as the "no bridge yet" fallback.
+        """
         if tranzor_bridge is None:
             self.bridge_error = f"bridge module unavailable: {_bridge_import_error!r}"
             print(f"[bridge] disabled: {self.bridge_error}")
             return
-        bridge, err = tranzor_bridge.try_start_bridge()
+        threading.Thread(
+            target=self._start_bridge_worker, daemon=True, name="bridge-startup"
+        ).start()
+
+    def _start_bridge_worker(self):
+        """Background worker that actually starts the bridge. Runs at most
+        once per session. Tk state is only touched via ``root.after`` so we
+        stay on the main thread for any UI updates that follow."""
+        try:
+            bridge, err = tranzor_bridge.try_start_bridge()
+        except Exception as exc:  # pragma: no cover — defensive
+            self.bridge = None
+            self.bridge_error = f"unexpected: {exc!r}"
+            print(f"[bridge] startup raised: {exc!r}; Send-to-Tranzor will use clipboard fallback")
+            return
         if err:
             self.bridge = None
             self.bridge_error = err
