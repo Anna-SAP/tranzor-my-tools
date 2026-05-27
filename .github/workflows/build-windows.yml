@@ -45,77 +45,21 @@ jobs:
         run: |
           pyinstaller TranzorExporter.spec --clean
 
-      - name: Verify build output exists
+      - name: Verify EXE exists
         shell: pwsh
         run: |
-          # Onedir layout: dist/TranzorExporter/TranzorExporter.exe + _internal/
-          $exe = Get-Item "dist\TranzorExporter\TranzorExporter.exe" -ErrorAction Stop
-          $exeMB = [math]::Round($exe.Length / 1MB, 2)
-          $bundle = Get-ChildItem "dist\TranzorExporter" -Recurse | Measure-Object -Property Length -Sum
-          $bundleMB = [math]::Round($bundle.Sum / 1MB, 2)
-          Write-Host "EXE:    $($exe.FullName) ($exeMB MB)"
-          Write-Host "Bundle: dist\TranzorExporter\ ($bundleMB MB total, $($bundle.Count) files)"
+          # Onefile layout: dist/TranzorExporter.exe (a single file, no _internal/).
+          # Back from a brief onedir experiment in PR #64 — the folder-based
+          # distribution kept tripping users into double-clicking the .exe
+          # straight out of the .zip viewer, which extracts only the .exe and
+          # then fails to find _internal\python312.dll. Onefile is foolproof.
+          $exe = Get-Item "dist\TranzorExporter.exe" -ErrorAction Stop
+          $sizeMB = [math]::Round($exe.Length / 1MB, 2)
+          Write-Host "Built EXE: $($exe.FullName) ($sizeMB MB)"
 
-      - name: Drop launch-me-first note next to the EXE
-        shell: pwsh
-        run: |
-          # The default Windows zip viewer lets users double-click TranzorExporter.exe
-          # *inside* the .zip without extracting — Windows then drops the .exe alone
-          # into a temp dir, and the EXE crashes with "Failed to load python312.dll"
-          # because _internal\ never came along. This README is the first thing the
-          # user sees when they open the folder; the file name is intentionally noisy
-          # so it sorts to the top and looks like an instruction, not docs.
-          #
-          # Implementation note: PowerShell here-strings would be cleanest here, but
-          # `'@` must sit in column 0 inside a here-string and YAML `run: |` blocks
-          # require >=10-space indentation — the two conventions can't coexist. So
-          # we build the note as a string array instead.
-          $lines = @(
-            '====================================================================',
-            '   先看我!  PLEASE READ FIRST',
-            '====================================================================',
-            '',
-            'This is a "onedir" PyInstaller build. The .exe alone WILL NOT RUN -',
-            'it needs the entire `_internal\` folder next to it.',
-            '',
-            'To launch:',
-            '   1. Extract THIS WHOLE FOLDER somewhere (e.g. C:\Tools\TranzorExporter\).',
-            '      Do NOT double-click TranzorExporter.exe directly from inside the',
-            '      .zip file - Windows will extract only the .exe and the launch',
-            '      will fail with "Failed to load python312.dll".',
-            '   2. Inside the extracted folder, double-click TranzorExporter.exe.',
-            '',
-            'If Windows Defender / SmartScreen warns about an unknown publisher,',
-            'choose "More info" -> "Run anyway" once. Subsequent launches are silent.',
-            '',
-            'Cold-start should be 1-3 seconds. If it ever feels slow again, send',
-            'me ~/.tranzor_exporter/startup.log - it has per-stage timestamps.'
-          )
-          Set-Content -Path "dist\TranzorExporter\LAUNCH-ME-FIRST.txt" -Value $lines -Encoding UTF8
-
-      - name: Stage artifact so the zip has a clear top-level folder
-        shell: pwsh
-        run: |
-          # actions/upload-artifact@v4 zips the *contents* of `path` — if we point
-          # it at dist/TranzorExporter/ directly the zip is flat (exe + _internal/
-          # at the root) and a user who extracts to Downloads\ ends up with a
-          # confusing pile of files mingled with their other downloads. Worse, the
-          # zip viewer can show the bare .exe and tempt people to double-click it
-          # from inside the archive — which is exactly the failure mode we just
-          # debugged. Staging into artifact/TranzorExporter/ makes the zip contain
-          # a single `TranzorExporter\` folder; extracting always yields a clean,
-          # self-contained directory and there is no .exe visible at the root of
-          # the .zip for users to mistakenly run in place.
-          New-Item -ItemType Directory -Path "artifact" -Force | Out-Null
-          Move-Item -Path "dist\TranzorExporter" -Destination "artifact\TranzorExporter"
-
-      - name: Upload TranzorExporter bundle (zipped by Actions automatically)
+      - name: Upload TranzorExporter EXE
         uses: actions/upload-artifact@v4
         with:
           name: TranzorExporter-Windows
-          # `path: artifact` makes the resulting .zip contain a single top-level
-          # `TranzorExporter\` directory. Extracting it anywhere produces a clean
-          # `TranzorExporter\` folder users can drag into Program Files / C:\Tools
-          # / wherever — no chance of mixing the bundle with unrelated files.
-          path: artifact
+          path: dist/TranzorExporter.exe
           retention-days: 90
