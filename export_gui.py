@@ -1331,7 +1331,20 @@ class ExportApp:
 
     # ── i18n: refresh all visible text ──
     def _refresh_ui_text(self):
-        """Update all UI widget texts to the current language."""
+        """Update all UI widget texts to the current language.
+
+        Important: every per-tab ``refresh_text()`` is scheduled via ``after(0, …)``
+        rather than called synchronously. The startup-log evidence from #66
+        showed those nested calls (which re-run ``_refresh_from_cache`` ->
+        SQLite query -> treeview rebuild for OPUS Monitor / Tranzor Checks /
+        TM Context Insight / Term Watchtower) consumed ~15 s on the main
+        thread during ``ExportApp.__init__``, which then blocked the first
+        frame paint for another ~17 s. Deferring them lets the main window
+        draw immediately and lets the tab text refresh ripple through the
+        Tk event loop in the background. Language-toggle UX is unaffected —
+        ``after(0, …)`` fires on the next idle, so flips remain instantaneous
+        from the user's perspective.
+        """
         self.root.title(self._t("window_title"))
         self.lbl_title.configure(text=self._t("title"))
         self.lbl_subtitle.configure(text=self._t("subtitle"))
@@ -1350,14 +1363,25 @@ class ExportApp:
         self.lbl_footer.configure(text=self._t("footer"))
         self.btn_lang.configure(text=self._t("lang_toggle"))
 
-        # Notebook tab titles
+        # Helper: schedule a tab's refresh_text on the next idle tick so it
+        # cannot stall the current frame. Wraps the call in try/except so a
+        # single broken tab can't take the whole batch down.
+        def _async_refresh(tab):
+            def _runner():
+                try:
+                    tab.refresh_text()
+                except Exception as exc:  # pragma: no cover
+                    print(f"[refresh_text] {tab!r} failed: {exc!r}")
+            self.root.after(0, _runner)
+
+        # Notebook tab titles (synchronous — these are cheap, single calls).
         self.notebook.tab(0, text=self._t("tab_file_translation"))
         self.notebook.tab(1, text=self._t("tab_mr_pipeline"))
         self.notebook.tab(2, text=self._t("tab_quality_overview"))
         if self.ft_tab is not None:
             try:
                 self.notebook.tab(3, text=self._t("tab_full_translations"))
-                self.ft_tab.refresh_text()
+                _async_refresh(self.ft_tab)
             except Exception:
                 pass
         if self.hr_tab is not None:
@@ -1365,37 +1389,37 @@ class ExportApp:
                 # HR tab index depends on whether Full Translations tab exists
                 hr_idx = 4 if self.ft_tab is not None else 3
                 self.notebook.tab(hr_idx, text=self._t("tab_human_revisions"))
-                self.hr_tab.refresh_text()
+                _async_refresh(self.hr_tab)
             except Exception:
                 pass
         if self.st_tab is not None and self._st_tab_index is not None:
             try:
                 self.notebook.tab(self._st_tab_index, text=self._t("tab_scan_tasks"))
-                self.st_tab.refresh_text()
+                _async_refresh(self.st_tab)
             except Exception:
                 pass
         if self.tw_tab is not None and self._tw_tab_index is not None:
             try:
                 self.notebook.tab(self._tw_tab_index, text=self._t("tab_term_watchtower"))
-                self.tw_tab.refresh_text()
+                _async_refresh(self.tw_tab)
             except Exception:
                 pass
         if self.tci_tab is not None and self._tci_tab_index is not None:
             try:
                 self.notebook.tab(self._tci_tab_index, text=self._t("tab_tm_context_insight"))
-                self.tci_tab.refresh_text()
+                _async_refresh(self.tci_tab)
             except Exception:
                 pass
         if self.opus_tab is not None and self._opus_tab_index is not None:
             try:
                 self.notebook.tab(self._opus_tab_index, text=self._t("tab_opus_monitor"))
-                self.opus_tab.refresh_text()
+                _async_refresh(self.opus_tab)
             except Exception:
                 pass
         if self.tc_tab is not None and self._tc_tab_index is not None:
             try:
                 self.notebook.tab(self._tc_tab_index, text=self._t("tab_tranzor_checks"))
-                self.tc_tab.refresh_text()
+                _async_refresh(self.tc_tab)
             except Exception:
                 pass
 
@@ -1414,9 +1438,10 @@ class ExportApp:
         self.task_tree.heading("creator", text=self._t("summary_col_creator"))
         self._update_summary_pager()
 
-        # MR Pipeline & Quality Overview tab texts
-        self.mr_tab.refresh_text()
-        self.qa_tab.refresh_text()
+        # MR Pipeline & Quality Overview tab texts — also async for the same
+        # reason: their refresh_text re-renders sidebars / project lists.
+        _async_refresh(self.mr_tab)
+        _async_refresh(self.qa_tab)
 
         # Refresh status label only if not running
         if not self.running:
@@ -1978,16 +2003,16 @@ def main():
         pass
     app = ExportApp(root)
     _boot_mark("ExportApp_constructed")
-    # Drain Tk's idle queue so the first frame is actually on screen before
-    # we record the "ready" timestamp — otherwise we measure to "mainloop
-    # entered" which can be 100-300 ms before the user sees anything.
-    try:
-        root.update_idletasks()
-        root.update()
-    except Exception:
-        pass
-    _boot_mark("first_frame_visible")
-    _flush_boot_log()
+    # Don't force a synchronous root.update() here — when there are 1000+
+    # widgets across 10 tabs, that single call can take 15-20 s while Tk
+    # paints everything. Instead, let mainloop draw the window naturally
+    # and schedule the boot-log flush for the first idle tick inside the
+    # loop. That timestamp ("first_idle_in_mainloop") tells us how long
+    # Tk took to reach "ready to handle input" from the user's POV.
+    def _on_first_idle():
+        _boot_mark("first_idle_in_mainloop")
+        _flush_boot_log()
+    root.after_idle(_on_first_idle)
     root.mainloop()
 
 
