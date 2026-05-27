@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Tranzor — three ways translation work reaches the platform</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Segoe UI', 'Inter', system-ui, -apple-system, sans-serif;
+      background: linear-gradient(135deg, #f8fafc 0%, #eef2ff 100%);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 40px 20px;
+      color: #1f2937;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .container {
+      width: 1100px;
+      max-width: 100%;
+      background: #ffffff;
+      border-radius: 24px;
+      box-shadow:
+        0 20px 60px rgba(15, 23, 42, 0.08),
+        0 4px 16px rgba(15, 23, 42, 0.04);
+      padding: 44px 52px 40px;
+      position: relative;
+      overflow: hidden;
+    }
+    .container::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 4px;
+      background: linear-gradient(90deg, #3b82f6, #8b5cf6, #f59e0b);
+    }
+
+    /* ───── Header ───── */
+    .header { text-align: center; margin-bottom: 32px; }
+    .header h1 {
+      font-size: 30px;
+      font-weight: 800;
+      color: #0f172a;
+      letter-spacing: -0.02em;
+      margin-bottom: 10px;
+      line-height: 1.25;
+    }
+    .header h1 .accent {
+      background: linear-gradient(135deg, #6366f1, #ec4899);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+    .header p {
+      font-size: 14.5px;
+      color: #64748b;
+      font-weight: 500;
+      line-height: 1.5;
+    }
+
+    /* ───── Source cards row ───── */
+    .sources {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 20px;
+      margin-bottom: 6px;
+    }
+    .source-card {
+      background: #fff;
+      border: 2px solid;
+      border-radius: 16px;
+      padding: 22px 22px 20px;
+      transition: transform 0.2s;
+    }
+    .source-card .icon {
+      font-size: 26px;
+      margin-bottom: 14px;
+      display: inline-flex;
+      width: 52px;
+      height: 52px;
+      align-items: center;
+      justify-content: center;
+      border-radius: 14px;
+    }
+    .source-card h3 {
+      font-size: 18px;
+      font-weight: 700;
+      margin-bottom: 8px;
+      color: #0f172a;
+      letter-spacing: -0.01em;
+    }
+    .source-card p {
+      font-size: 13.5px;
+      color: #475569;
+      line-height: 1.55;
+      margin-bottom: 14px;
+    }
+    .source-card .meta {
+      font-size: 12px;
+      color: #64748b;
+      font-family: 'Consolas', 'SF Mono', monospace;
+      background: #f8fafc;
+      padding: 6px 10px;
+      border-radius: 6px;
+      display: inline-block;
+      border: 1px solid #e2e8f0;
+    }
+
+    .source-card.file       { border-color: #bfdbfe; }
+    .source-card.file .icon { background: #dbeafe; }
+    .source-card.mr         { border-color: #ddd6fe; }
+    .source-card.mr   .icon { background: #ede9fe; }
+    .source-card.scan       { border-color: #fed7aa; }
+    .source-card.scan .icon { background: #ffedd5; }
+
+    /* ───── Arrows down into the hub ───── */
+    .arrows {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 20px;
+      text-align: center;
+      padding: 14px 0 6px;
+    }
+    .arrow {
+      font-size: 22px;
+      color: #cbd5e1;
+      font-weight: 300;
+      line-height: 1;
+    }
+
+    /* ───── Hub ───── */
+    .hub {
+      background: linear-gradient(135deg, #0f172a, #1e293b);
+      color: white;
+      border-radius: 18px;
+      padding: 24px 36px 26px;
+      text-align: center;
+      position: relative;
+      margin: 4px 0 14px;
+      box-shadow: 0 12px 32px rgba(15, 23, 42, 0.18);
+      overflow: hidden;
+    }
+    .hub::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 3px;
+      background: linear-gradient(90deg, #3b82f6, #8b5cf6, #f59e0b);
+    }
+    .hub .label {
+      font-size: 10.5px;
+      letter-spacing: 0.18em;
+      color: #94a3b8;
+      text-transform: uppercase;
+      margin-bottom: 4px;
+      font-weight: 600;
+    }
+    .hub-title {
+      font-size: 26px;
+      font-weight: 800;
+      margin-bottom: 14px;
+      letter-spacing: -0.02em;
+    }
+    .hub-features {
+      display: flex;
+      justify-content: center;
+      gap: 26px;
+      font-size: 13.5px;
+      color: #e2e8f0;
+      flex-wrap: wrap;
+    }
+    .feature {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 500;
+    }
+    .feature .dot {
+      width: 6px; height: 6px;
+      background: linear-gradient(135deg, #818cf8, #ec4899);
+      border-radius: 50%;
+    }
+
+    /* ───── Single arrow down to output ───── */
+    .arrow-down {
+      text-align: center;
+      font-size: 22px;
+      color: #cbd5e1;
+      margin: 0 0 8px;
+      line-height: 1;
+    }
+
+    /* ───── Output strip ───── */
+    .output {
+      background: linear-gradient(135deg, #ecfdf5, #f0fdf4);
+      border: 2px solid #a7f3d0;
+      border-radius: 14px;
+      padding: 16px 24px;
+      text-align: center;
+      font-size: 14px;
+      color: #065f46;
+      font-weight: 600;
+      line-height: 1.5;
+    }
+    .output .highlight {
+      color: #047857;
+      font-weight: 800;
+    }
+
+    /* Print / screenshot friendliness */
+    @media print {
+      body { background: #ffffff; padding: 0; }
+      .container { box-shadow: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1><span class="accent">Tranzor</span> — three ways translation work reaches the platform</h1>
+      <p>RingCentral's in-house localization platform · LLM translation · automated QA scoring · L10n reviewer workflow</p>
+    </div>
+
+    <div class="sources">
+      <div class="source-card file">
+        <div class="icon">📁</div>
+        <h3>File Translation</h3>
+        <p>Upload XLIFF / JSON / CSV — full or partial batches, including legacy loki output.</p>
+        <div class="meta">e.g. GWS-18065 fr-CA delta</div>
+      </div>
+
+      <div class="source-card mr">
+        <div class="icon">🔀</div>
+        <h3>MR Pipeline</h3>
+        <p>Auto-triggered from a GitLab MR diff — the everyday incremental flow.</p>
+        <div class="meta">e.g. status-dashboard !444</div>
+      </div>
+
+      <div class="source-card scan">
+        <div class="icon">🔍</div>
+        <h3>Scan Task</h3>
+        <p>On-demand sweep of a repo to surface missing or stale translations.</p>
+        <div class="meta">Manually triggered</div>
+      </div>
+    </div>
+
+    <div class="arrows">
+      <span class="arrow">↓</span>
+      <span class="arrow">↓</span>
+      <span class="arrow">↓</span>
+    </div>
+
+    <div class="hub">
+      <div class="label">PROCESSED BY</div>
+      <div class="hub-title">Tranzor Platform</div>
+      <div class="hub-features">
+        <span class="feature"><span class="dot"></span>LLM translation</span>
+        <span class="feature"><span class="dot"></span>Automated QA scoring</span>
+        <span class="feature"><span class="dot"></span>L10n reviewer workflow</span>
+      </div>
+    </div>
+
+    <div class="arrow-down">↓</div>
+
+    <div class="output">
+      <span class="highlight">Translated output</span> per target language — ready for review, download, or automated write-back to the source repo
+    </div>
+  </div>
+</body>
+</html>
