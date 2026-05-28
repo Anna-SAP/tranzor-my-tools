@@ -18,7 +18,10 @@ from datetime import date, datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import export_mr_pipeline as mr_api
-from export_gui import FONT_FAMILY, IS_MAC, reveal_in_folder, sanitize_for_filename
+from export_gui import (
+    FONT_FAMILY, IS_MAC, format_age_days, reveal_in_folder,
+    sanitize_for_filename,
+)
 
 
 STRINGS = {
@@ -43,6 +46,7 @@ STRINGS = {
         "scan_col_status":       "Status",
         "scan_col_output_mode":  "Output Mode",
         "scan_col_created":      "Created",
+        "scan_col_age":          "Age",
     },
     "zh": {
         "tab_scan_tasks":        "🔎 扫描任务",
@@ -65,6 +69,7 @@ STRINGS = {
         "scan_col_status":       "状态",
         "scan_col_output_mode":  "输出模式",
         "scan_col_created":      "创建时间",
+        "scan_col_age":          "距今",
     },
 }
 
@@ -226,13 +231,17 @@ class ScanTasksTab:
         tree_frame.pack(fill="both", expand=True, pady=(0, 6))
 
         cols = ("idx", "task_name", "project", "base_ref", "head_ref",
-                "status", "output_mode", "created")
+                "status", "output_mode", "created", "age")
         self.scan_tree = ttk.Treeview(tree_frame, columns=cols, show="headings",
                                        style="Summary.Treeview",
                                        height=14, selectmode="browse")
+        # ``age`` 紧跟 ``created`` 之后是刻意的：raw 时间戳和"距今多久"放
+        # 一起读，眼睛不用来回跳 —— 后者本质是前者的人类可读注解，主库
+        # ``DB_SEARCH_EXPIRED_DAYS`` 默认 3650 后，列表里掺杂大量陈年 task
+        # 是常态，必须给出"几年前的"瞬时信号。
         col_widths = {"idx": 35, "task_name": 150, "project": 130,
                       "base_ref": 120, "head_ref": 120, "status": 80,
-                      "output_mode": 100, "created": 140}
+                      "output_mode": 100, "created": 140, "age": 55}
         for c in cols:
             anchor = "w" if c in ("task_name", "project", "base_ref", "head_ref") else "center"
             self.scan_tree.column(c, width=col_widths.get(c, 80), anchor=anchor)
@@ -292,7 +301,7 @@ class ScanTasksTab:
         self.btn_scan_refresh.configure(text=t("summary_refresh"))
 
         for col in ("idx", "task_name", "project", "base_ref", "head_ref",
-                    "status", "output_mode", "created"):
+                    "status", "output_mode", "created", "age"):
             self.scan_tree.heading(col, text=t(f"scan_col_{col}"))
 
         self.lbl_scan_sidebar_title.configure(text=t("scan_sidebar_title"))
@@ -444,7 +453,10 @@ class ScanTasksTab:
 
         for i, t in enumerate(tasks):
             idx = self.scan_page * self.scan_page_size + i + 1
-            created = (t.get("created_at") or "")[:19].replace("T", " ")
+            created_raw = t.get("created_at") or ""
+            created = created_raw[:19].replace("T", " ")
+            # Format age from the *raw* ISO so timezone info isn't dropped.
+            age = format_age_days(created_raw)
             self.scan_tree.insert("", "end", values=(
                 idx,
                 t.get("task_name", ""),
@@ -454,6 +466,7 @@ class ScanTasksTab:
                 t.get("status", ""),
                 t.get("output_mode", ""),
                 created,
+                age,
             ), tags=(t.get("task_id", ""),))
 
         effective_total = filtered_total

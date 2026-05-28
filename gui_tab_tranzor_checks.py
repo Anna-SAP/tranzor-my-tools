@@ -74,6 +74,7 @@ STRINGS = {
         "tc_col_tasks":              "Tasks",
         "tc_col_latest_task":        "Latest task",
         "tc_col_latest_seen":        "Checked at",
+        "tc_col_age":                "Age",
         "tc_detail_title":           "Selected group — {count} issue(s)",
         "tc_detail_empty":           "Select a row above to see the issues that match.",
         "tc_col_task":               "Task",
@@ -166,6 +167,7 @@ STRINGS = {
         "tc_col_tasks":              "影响任务数",
         "tc_col_latest_task":        "最近任务",
         "tc_col_latest_seen":        "最近检查时间",
+        "tc_col_age":                "距今",
         "tc_detail_title":           "已选分组 — 共 {count} 条 issue",
         "tc_detail_empty":           "在上方选择一行以查看该分组的 issue 明细。",
         "tc_col_task":               "任务",
@@ -228,7 +230,7 @@ STRINGS = {
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import tranzor_checks as tc
 import export_mr_pipeline as mr_api  # 仅为 TRANZOR_URL 跳转
-from export_gui import FONT_FAMILY, FONT_MONO, IS_MAC
+from export_gui import FONT_FAMILY, FONT_MONO, IS_MAC, format_age_days
 
 
 # ---------------------------------------------------------------------------
@@ -504,18 +506,20 @@ class TranzorChecksTab:
 
         agg_frame = ttk.Frame(top_pane, style="App.TFrame")
         agg_frame.pack(fill="both", expand=True)
-        # 列顺序：来源 → 错误类型 → 语言 → 关键词 → 条数 → 任务数 → 最近任务 → 最近检查时间
-        # "最近检查时间" 放最后，是因为 GUI 用户的扫视方向是从左到右，
-        # 错误内容在前、时间戳在后符合阅读直觉；同时它也是默认排序键，
-        # 列头点击能立刻反向排序。
+        # 列顺序：来源 → 错误类型 → 语言 → 关键词 → 条数 → 任务数 → 最近任务 → 最近检查时间 → 距今
+        # "最近检查时间" 放在 latest_task 之后保持原顺序；"距今" 紧接其后
+        # 是 raw 时间戳的人类可读注解，挨着读最省眼力。主库
+        # DB_SEARCH_EXPIRED_DAYS 默认 3650 后，聚合表里常掺杂多年前的
+        # 陈年检查，"距今" 一眼能挑出来。
         self._agg_cols = ("source", "error_type", "language", "keyword",
-                          "count", "tasks", "latest_task", "latest_seen")
+                          "count", "tasks", "latest_task", "latest_seen",
+                          "age")
         self.tree_agg = ttk.Treeview(
             agg_frame, columns=self._agg_cols, show="headings",
             style="Summary.Treeview", selectmode="browse", height=12)
         widths = {"source": 70, "error_type": 180, "language": 60,
                   "keyword": 240, "count": 60, "tasks": 60,
-                  "latest_task": 140, "latest_seen": 120}
+                  "latest_task": 140, "latest_seen": 120, "age": 55}
         for c in self._agg_cols:
             anchor = "w" if c in ("error_type", "keyword",
                                     "latest_task") else "center"
@@ -627,6 +631,7 @@ class TranzorChecksTab:
             ("tasks", "tc_col_tasks"),
             ("latest_task", "tc_col_latest_task"),
             ("latest_seen", "tc_col_latest_seen"),
+            ("age", "tc_col_age"),
         ):
             self.tree_agg.heading(
                 c, text=t(key),
@@ -817,6 +822,7 @@ class TranzorChecksTab:
                 latest_task_disp = _short(latest_tid, 14)
             else:
                 latest_task_disp = "—"
+            latest_seen_raw = r.get("latest_seen") or ""
             iid = self.tree_agg.insert("", "end", values=(
                 src_disp or "—",
                 r.get("error_type", ""),
@@ -825,7 +831,8 @@ class TranzorChecksTab:
                 f"{r.get('count', 0):,}",
                 f"{r.get('tasks_affected', 0):,}",
                 latest_task_disp,
-                _fmt_iso_short(r.get("latest_seen") or ""),
+                _fmt_iso_short(latest_seen_raw),
+                format_age_days(latest_seen_raw),
             ), tags=(_source_tag(main_src),))
             self._agg_row_keys[iid] = r
 
@@ -834,9 +841,17 @@ class TranzorChecksTab:
         if col == cur_col:
             self._agg_sort = (col, not cur_desc)
         else:
-            # 数值列默认降序、时间列默认降序（最新在前）、文本列默认升序
+            # 数值列默认降序、时间列默认降序（最新在前）、文本列默认升序。
+            # ``age`` 也走降序：用户点击 age 列头多半想看"最陈年的在前"，
+            # 这正好对应 latest_seen 升序——但因为 age 和 latest_seen 的
+            # 排序键都映射到 latest_seen（见 _render_agg_table），降序在
+            # 这里语义反过来：desc=True → latest_seen 大的在前 → age 小
+            # 的在前。所以 age 应该是 desc=False（升序 latest_seen = 最
+            # 陈年在前）。
             self._agg_sort = (
-                col, col in ("count", "tasks", "latest_seen"))
+                col,
+                col in ("count", "tasks", "latest_seen"),
+            )
         self._render_agg_table()
 
     def _on_agg_selected(self):
