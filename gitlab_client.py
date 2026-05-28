@@ -158,6 +158,64 @@ class GitLabClient:
         labels = mr.get("labels") or []
         return [str(x) for x in labels if x]
 
+    def list_commits(self, project_id, *, ref_name=None, since=None,
+                     until=None, author=None, per_page=100, max_pages=5):
+        """List commits with optional ref / time / author filters.
+
+        Drives BATCH_FIX detection in task_post_edit. We pass through to
+        GitLab's ``GET /projects/:id/repository/commits`` and let the
+        server do as much filtering as it can:
+
+        - ``ref_name`` is **critical** for finding BATCH_FIX commits on
+          MR source branches. Without it the API only returns commits on
+          the project's default branch and feature-branch BATCH_FIX
+          commits are silently invisible.
+        - ``author`` is a server-side filter on author email. Verified
+          against the platform — uses substring match, so passing the
+          full email is precise enough.
+        - ``since`` / ``until`` are ISO-8601 strings.
+
+        Returns the concatenated commit list across pages, capped at
+        ``max_pages`` (default 5 → 500 commits) to keep memory bounded
+        on long-lived branches. The cap is well above realistic
+        BATCH_FIX volume (a project sees ≤ ~10 BATCH_FIX commits a day
+        at peak).
+
+        Cached per parameter tuple for the lifetime of this client
+        instance; consecutive checks against the same branch don't
+        repeat the HTTP round-trip.
+        """
+        key = (
+            str(project_id), ref_name or "", since or "",
+            until or "", author or "",
+        )
+        if not hasattr(self, "_commits_cache"):
+            self._commits_cache = {}
+        if key in self._commits_cache:
+            return self._commits_cache[key]
+
+        url = (f"{self.base_url}/api/v4/projects/"
+               f"{self._encode(project_id)}/repository/commits")
+        out = []
+        for page in range(1, max_pages + 1):
+            params = {"per_page": per_page, "page": page}
+            if ref_name:
+                params["ref_name"] = ref_name
+            if since:
+                params["since"] = since
+            if until:
+                params["until"] = until
+            if author:
+                params["author"] = author
+            r = self._session.get(url, params=params, timeout=self.timeout)
+            r.raise_for_status()
+            batch = r.json() or []
+            out.extend(batch)
+            if len(batch) < per_page:
+                break
+        self._commits_cache[key] = out
+        return out
+
 
 # ---------------------------------------------------------------------------
 # Fix-commit discovery

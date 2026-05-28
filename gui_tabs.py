@@ -609,10 +609,16 @@ class MRPipelineTab:
             task_id = t.get("task_id") or ""
             mr_iid = t.get("merge_request_iid")
             raw_project = t.get("project_id", "")
-            # Synchronous render when we've already cached the answer
-            # — paging back and forth shouldn't re-flicker.
-            cached = (_tpe.get_cache().get("mr", mr_iid)
-                      if mr_iid is not None else None)
+            # Cache key must match what _fetch_mr keys on so the
+            # synchronous-render path doesn't miss a previously-cached
+            # answer — see _fetch_mr in task_post_edit for the tuple
+            # shape ``(project_id, mr_iid)``.
+            cache_key = (
+                (raw_project, mr_iid) if (raw_project and mr_iid is not None)
+                else None
+            )
+            cached = (_tpe.get_cache().get("mr", cache_key)
+                      if cache_key is not None else None)
             display_project = (
                 _tpe.POST_EDIT_PREFIX + raw_project if cached else raw_project
             )
@@ -628,11 +634,10 @@ class MRPipelineTab:
             )
             if task_id:
                 self._mr_row_iid_by_task[task_id] = iid
-                if mr_iid is not None and cached is None:
-                    prefetch_items.append(("mr", mr_iid))
-                    # Stash mr_iid → iid so the callback (which only
-                    # carries mr_iid) can find this row again. We pack
-                    # both directions into the same dict for simplicity.
+                if cache_key is not None and cached is None:
+                    prefetch_items.append(("mr", cache_key))
+                    # Stash mr_iid → iid so the callback (which carries
+                    # mr_iid in the key tuple) can find this row again.
                     self._mr_row_iid_by_task[f"mr:{mr_iid}"] = iid
 
         # Kick off the dashboard-cases fetch for newly-seen MRs. This is
@@ -665,8 +670,17 @@ class MRPipelineTab:
     # Post-edit prefetch callback. The fetcher runs on a worker thread,
     # so we must marshal back to Tk via after() before touching widgets.
     # ------------------------------------------------------------------
-    def _on_post_edit_result(self, kind, mr_iid, has_post_edit):
-        if not has_post_edit or mr_iid is None:
+    def _on_post_edit_result(self, kind, key, has_post_edit):
+        if not has_post_edit:
+            return
+        # ``key`` is the (project_id, mr_iid) tuple we registered above;
+        # ``mr_iid`` is what we use to look the row up. Support the bare-iid
+        # legacy shape too in case some path skipped wiring project_id.
+        if isinstance(key, (tuple, list)) and len(key) == 2:
+            mr_iid = key[1]
+        else:
+            mr_iid = key
+        if mr_iid is None:
             return
         try:
             self.mr_tree.after(
