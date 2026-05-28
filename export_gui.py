@@ -122,6 +122,63 @@ def reveal_in_folder(filepath):
     except Exception as e:
         print(f"[reveal] failed for {abspath!r}: {e!r}")
 
+
+def format_age_days(value, *, now=None) -> str:
+    """Format an ISO-ish datetime as a compact "age" string.
+
+    Returns ``""`` for missing / unparsable input so callers can drop the cell
+    cleanly. Otherwise produces a coarse human-readable bucket:
+
+        same day → ``today``
+        1-30 d   → ``Nd``    (e.g. ``3d``)
+        31-365 d → ``Nmo``   (e.g. ``5mo``)
+        > 365 d  → ``Ny``    (e.g. ``2y``)
+
+    Negative deltas (clock skew → future timestamp) clamp to ``today``.
+
+    Why we surface this at all: Tranzor Platform's ``DB_SEARCH_EXPIRED_DAYS``
+    default moved from 30 → 3650 (≈10 years) in commit ``ad0b263``. Cache-
+    backed views now happily return rows that are years old. A raw timestamp
+    tells you *when*; an Age column tells you *how stale at a glance* —
+    critical for spotting "ancient cache hit vs fresh translation".
+
+    Accepts both naive (``YYYY-MM-DD HH:MM:SS``, ``…T…``) and offset-aware
+    ISO strings, and tolerates a trailing ``Z`` defensively.
+    """
+    if not value:
+        return ""
+    from datetime import datetime
+    text = str(value).strip()
+    if not text:
+        return ""
+    # Common Tranzor shape ``YYYY-MM-DD HH:MM:SS`` is already fromisoformat-
+    # friendly. ISO-with-T is also fine. Only quirk is the optional trailing Z
+    # which stdlib < 3.11 rejects.
+    try:
+        norm = text[:-1] + "+00:00" if text.endswith("Z") else text
+        dt = datetime.fromisoformat(norm)
+        if dt.tzinfo is not None:
+            # Convert to local naive for diffing against datetime.now().
+            dt = dt.astimezone().replace(tzinfo=None)
+        ref = now or datetime.now()
+        delta_days = (ref - dt).days
+    except Exception:
+        return ""
+    if delta_days <= 0:
+        return "today"
+    if delta_days < 31:
+        return f"{delta_days}d"
+    # The 30-day month / 365-day year approximation creates a nasty
+    # boundary near ~360 days: ``days // 365`` is still 0 but ``days // 30``
+    # has already hit 12 — a naive year branch would render "0y". Promote
+    # to years once we've crossed 12 months but floor to ``1y`` to keep
+    # the cell honest.
+    months = delta_days // 30
+    if months >= 12:
+        return f"{max(1, delta_days // 365)}y"
+    return f"{months}mo"
+
+
 try:
     import requests
 except ImportError:

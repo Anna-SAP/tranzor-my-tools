@@ -20,6 +20,7 @@ from datetime import date, timedelta
 
 import export_mr_pipeline as mr_api
 import terminology_highlight as th
+from export_gui import format_age_days
 
 # ---------------------------------------------------------------------------
 # Cross-platform font
@@ -46,6 +47,7 @@ STRINGS = {
         "hr_col_score":         "Score",
         "hr_col_editor":        "Editor",
         "hr_col_date":          "Revised At",
+        "hr_col_age":           "Age",
         "hr_detail_project":    "Project:",
         "hr_export":            "Export Human Revisions",
         "hr_fmt_html":          "HTML",
@@ -73,6 +75,7 @@ STRINGS = {
         "hr_col_score":         "\u5206\u6570",
         "hr_col_editor":        "\u7f16\u8f91\u8005",
         "hr_col_date":          "\u4fee\u8ba2\u65f6\u95f4",
+        "hr_col_age":           "\u8ddd\u4eca",
         "hr_detail_project":    "\u9879\u76ee:",
         "hr_export":            "\u5bfc\u51fa\u4eba\u5de5\u4fee\u8ba2",
         "hr_fmt_html":          "HTML",
@@ -202,7 +205,10 @@ class HumanRevisionsTab:
         mr_frame.pack(fill="both", padx=16, pady=(0, 8))
         mr_frame.configure(borderwidth=1, relief="solid")
 
-        tree_cols = ("project", "language", "key", "score", "editor", "date")
+        # ``age`` 紧贴 ``date`` 之后：raw 时间戳与人类可读的"距今多久"
+        # 是同一信息的两种呈现，挨着读最省眼力。
+        tree_cols = ("project", "language", "key", "score", "editor", "date",
+                     "age")
         self.mr_tree = ttk.Treeview(
             mr_frame, columns=tree_cols, show="headings",
             style="Summary.Treeview", height=10)
@@ -238,13 +244,13 @@ class HumanRevisionsTab:
         # Configure column widths for both trees
         col_widths = {
             "project": 170, "language": 80, "key": 200, "score": 60,
-            "editor": 130, "date": 140,
+            "editor": 130, "date": 140, "age": 55,
         }
         for tree in (self.mr_tree, self.file_tree):
             for c in tree_cols:
                 tree.column(
                     c, width=col_widths.get(c, 100),
-                    anchor="center" if c in ("score", "date") else "w")
+                    anchor="center" if c in ("score", "date", "age") else "w")
 
         # ── Export bar ──
         ebar = ttk.Frame(content, style="App.TFrame")
@@ -304,6 +310,7 @@ class HumanRevisionsTab:
             tree.heading("score", text=self._t("hr_col_score"))
             tree.heading("editor", text=self._t("hr_col_editor"))
             tree.heading("date", text=self._t("hr_col_date"))
+            tree.heading("age", text=self._t("hr_col_age"))
 
         self.rb_html.configure(text=self._t("hr_fmt_html"))
         self.rb_md.configure(text=self._t("hr_fmt_md"))
@@ -404,7 +411,11 @@ class HumanRevisionsTab:
             key = it.get("opus_id", "")
             if len(key) > 32:
                 key = key[:30] + "\u2026"
-            ts = str(it.get("revised_at") or "")[:16].replace("T", " ")
+            raw_ts = it.get("revised_at") or ""
+            ts = str(raw_ts)[:16].replace("T", " ")
+            # Compute age from the *raw* ISO so we don't lose the timezone
+            # suffix the truncation above strips for the visible column.
+            age = format_age_days(raw_ts)
             score = it.get("machine_score")
             score_str = str(score) if score is not None else "-"
             project = it.get("project_id", "") or it.get("task_name", "")
@@ -415,6 +426,7 @@ class HumanRevisionsTab:
                 score_str,
                 it.get("editor", ""),
                 ts,
+                age,
             ))
 
     # ------------------------------------------------------------------
