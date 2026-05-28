@@ -260,6 +260,16 @@ class ScanTasksTab:
             anchor = "w" if c in ("task_name", "project", "base_ref", "head_ref") else "center"
             self.scan_tree.column(c, width=col_widths.get(c, 80), anchor=anchor)
 
+        # Warm gold row-tint applied to tasks the post-edit prefetch
+        # marks. We pair this with the ✏️ prefix (rather than replacing
+        # it) so colour-blind viewers and grey-scale screenshots still
+        # carry the signal. Chosen to harmonise with the dark navy app
+        # palette — vivid enough to spot mid-page, not loud enough to
+        # fight the rest of the row.
+        self.scan_tree.tag_configure(
+            "post_edit", background="#3a2e1f", foreground="#fde68a",
+        )
+
         scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=self.scan_tree.yview)
         self.scan_tree.configure(yscrollcommand=scroll.set)
         self.scan_tree.pack(side="left", fill="both", expand=True)
@@ -489,6 +499,10 @@ class ScanTasksTab:
             display_name = (
                 _tpe.POST_EDIT_PREFIX + raw_name if cached else raw_name
             )
+            # Same row-tint path as the async callback (_apply_post_edit_prefix)
+            # — when paging back to a previously-fetched page, the synchronous
+            # render must produce an identical-looking row, not a plain one.
+            row_tags = (task_id, "post_edit") if cached else (task_id,)
             iid = self.scan_tree.insert(
                 "", "end",
                 iid=task_id or None,
@@ -502,7 +516,7 @@ class ScanTasksTab:
                     created,
                     age,
                 ),
-                tags=(task_id,),
+                tags=row_tags,
             )
             if task_id:
                 self._scan_row_iid_by_task[task_id] = iid
@@ -553,6 +567,7 @@ class ScanTasksTab:
             return
         try:
             vals = list(self.scan_tree.item(iid, "values"))
+            current_tags = list(self.scan_tree.item(iid, "tags") or ())
         except tk.TclError:
             # Row was deleted (user paged or re-searched between fetch
             # firing and callback arriving). Drop silently.
@@ -563,8 +578,15 @@ class ScanTasksTab:
         if name.startswith(_tpe.POST_EDIT_PREFIX):
             return  # already marked
         vals[1] = _tpe.POST_EDIT_PREFIX + name
+        # Append the "post_edit" tag so the row gets the warm gold tint
+        # configured at build time. Tags is an ordered list; existing
+        # tags (e.g. ``task_id`` used as the selection key) must be
+        # preserved at their original positions — ``tree.item(iid,
+        # tags=...)`` REPLACES the tuple, it doesn't append.
+        if "post_edit" not in current_tags:
+            current_tags.append("post_edit")
         try:
-            self.scan_tree.item(iid, values=vals)
+            self.scan_tree.item(iid, values=vals, tags=tuple(current_tags))
         except tk.TclError:
             pass
 

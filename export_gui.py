@@ -1332,6 +1332,14 @@ class ExportApp:
         self.task_tree.column("name", width=200, minwidth=100, stretch=True)
         self.task_tree.column("creator", width=80, minwidth=60, stretch=False)
 
+        # Warm gold tint for tasks the post-edit prefetch marks. The
+        # three task-list tabs share this exact palette so the signal
+        # reads identically across them; see gui_tab_scan_tasks for the
+        # original choice rationale.
+        self.task_tree.tag_configure(
+            "post_edit", background="#3a2e1f", foreground="#fde68a",
+        )
+
         # Scrollbar
         tree_scroll = ttk.Scrollbar(
             self.summary_tree_frame, orient="vertical", command=self.task_tree.yview)
@@ -1643,10 +1651,15 @@ class ExportApp:
             display_name = (
                 _tpe_local.POST_EDIT_PREFIX + tname if cached else tname
             )
+            # Synchronous render must produce the same row tint as the
+            # async callback (_apply_summary_post_edit_prefix) so paging
+            # back doesn't briefly drop the highlight.
+            row_tags = ("post_edit",) if cached else ()
             iid = self.task_tree.insert(
                 "", "end",
                 iid=str(tid) if tid else None,
                 values=(tid, display_name, creator),
+                tags=row_tags,
             )
             if tid:
                 self._summary_row_iid_by_task[str(tid)] = iid
@@ -1682,6 +1695,7 @@ class ExportApp:
             return
         try:
             vals = list(self.task_tree.item(iid, "values"))
+            current_tags = list(self.task_tree.item(iid, "tags") or ())
         except tk.TclError:
             return
         if len(vals) < 2:
@@ -1690,8 +1704,13 @@ class ExportApp:
         if name.startswith(_tpe_local.POST_EDIT_PREFIX):
             return
         vals[1] = _tpe_local.POST_EDIT_PREFIX + name
+        # Append the "post_edit" tag for the warm gold tint configured at
+        # build time. ``tree.item(iid, tags=...)`` REPLACES the tuple, so
+        # we must preserve any existing tags rather than overwriting.
+        if "post_edit" not in current_tags:
+            current_tags.append("post_edit")
         try:
-            self.task_tree.item(iid, values=vals)
+            self.task_tree.item(iid, values=vals, tags=tuple(current_tags))
         except tk.TclError:
             pass
 

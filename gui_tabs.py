@@ -215,6 +215,14 @@ class MRPipelineTab:
         for c in cols:
             self.mr_tree.column(c, width=col_widths.get(c, 80), anchor="center" if c != "project" else "w")
 
+        # Warm gold tint for MRs the post-edit prefetch marks. See
+        # gui_tab_scan_tasks for the colour-rationale; the three tabs
+        # share the same palette intentionally so the signal reads
+        # identically across them.
+        self.mr_tree.tag_configure(
+            "post_edit", background="#3a2e1f", foreground="#fde68a",
+        )
+
         scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=self.mr_tree.yview)
         self.mr_tree.configure(yscrollcommand=scroll.set)
         self.mr_tree.pack(side="left", fill="both", expand=True)
@@ -622,6 +630,10 @@ class MRPipelineTab:
             display_project = (
                 _tpe.POST_EDIT_PREFIX + raw_project if cached else raw_project
             )
+            # Synchronous render must visually match the async callback's
+            # output — see _apply_post_edit_prefix_mr for the tag-replace
+            # caveat.
+            row_tags = (task_id, "post_edit") if cached else (task_id,)
             iid = self.mr_tree.insert(
                 "", "end",
                 iid=task_id or None,
@@ -630,7 +642,7 @@ class MRPipelineTab:
                     t.get("release", ""), t.get("status", ""),
                     avg if avg is not None else "—", created, duration,
                 ),
-                tags=(task_id,),
+                tags=row_tags,
             )
             if task_id:
                 self._mr_row_iid_by_task[task_id] = iid
@@ -695,6 +707,7 @@ class MRPipelineTab:
             return
         try:
             vals = list(self.mr_tree.item(iid, "values"))
+            current_tags = list(self.mr_tree.item(iid, "tags") or ())
         except tk.TclError:
             return
         if len(vals) < 2:
@@ -703,8 +716,12 @@ class MRPipelineTab:
         if project.startswith(_tpe.POST_EDIT_PREFIX):
             return
         vals[1] = _tpe.POST_EDIT_PREFIX + project
+        # Append the "post_edit" tag — see scan_tasks._apply_post_edit_prefix
+        # for the "tags is replaced, not appended" caveat.
+        if "post_edit" not in current_tags:
+            current_tags.append("post_edit")
         try:
-            self.mr_tree.item(iid, values=vals)
+            self.mr_tree.item(iid, values=vals, tags=tuple(current_tags))
         except tk.TclError:
             pass
 
