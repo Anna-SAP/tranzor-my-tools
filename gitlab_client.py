@@ -6,6 +6,9 @@ commit diff 中恢复 Language Lead BATCH_FIX 的 pre-fix 原译文。
 - list_branches(project_id, search)       列分支
 - get_commit(project_id, sha)             取 commit 元数据
 - get_commit_diff(project_id, sha)        取 commit unified diff（含缓存）
+- get_merge_request(project_id, mr_iid)   取 MR 元数据（含 labels）—— 用于
+                                          识别哪些 MR 被打了 ``skip-translate``
+                                          这类阻止 Tranzor 翻译流水线的标签
 
 配置来源（优先级）：
 1. 环境变量 TRANZOR_GITLAB_TOKEN / TRANZOR_GITLAB_BASE_URL
@@ -61,6 +64,7 @@ class GitLabClient:
             self._session.headers["PRIVATE-TOKEN"] = self.token
         self._commit_diff_cache = {}   # sha -> diff list
         self._branches_cache = {}      # (project_id, search) -> branches list
+        self._mr_cache = {}            # (project_id, mr_iid) -> mr dict
 
     def has_token(self):
         return bool(self.token)
@@ -113,6 +117,46 @@ class GitLabClient:
         data = resp.json() or []
         self._commit_diff_cache[sha] = data
         return data
+
+    def get_merge_request(self, project_id, mr_iid):
+        """Fetch full MR metadata from GitLab.
+
+        Returns the raw ``GET /api/v4/projects/:id/merge_requests/:iid``
+        response dict — its ``labels`` field is the only thing my-tools
+        cares about today (Tranzor Platform's ``SKIP_TRANSLATE_LABEL``
+        machinery, default ``skip-translate``, lives entirely in GitLab
+        labels per LOC-skip / commit ``8663a18``).
+
+        Cached per ``(project_id, mr_iid)`` for the lifetime of this
+        client instance — a Tranzor Checks sync touches each MR exactly
+        once, but the cache shields us if the same MR is referenced by
+        multiple ``task_checks`` rows (rare but possible).
+
+        Raises on HTTP error so callers can decide whether to swallow
+        the failure (typical: store ``""`` to signal "we tried, no data")
+        or surface it. The Tranzor Checks sync path swallows: missing
+        labels must never tank an otherwise healthy sync.
+        """
+        key = (str(project_id), int(mr_iid))
+        if key in self._mr_cache:
+            return self._mr_cache[key]
+        url = (f"{self.base_url}/api/v4/projects/"
+               f"{self._encode(project_id)}/merge_requests/{int(mr_iid)}")
+        resp = self._session.get(url, timeout=self.timeout)
+        resp.raise_for_status()
+        data = resp.json() or {}
+        self._mr_cache[key] = data
+        return data
+
+    def fetch_mr_labels(self, project_id, mr_iid):
+        """Convenience wrapper returning ``mr['labels']`` as ``list[str]``.
+
+        Failures bubble up; the typical caller (Tranzor Checks sync) wraps
+        this in try/except so a single 404 doesn't kill the batch.
+        """
+        mr = self.get_merge_request(project_id, mr_iid)
+        labels = mr.get("labels") or []
+        return [str(x) for x in labels if x]
 
 
 # ---------------------------------------------------------------------------

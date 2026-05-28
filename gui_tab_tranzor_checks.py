@@ -89,6 +89,7 @@ STRINGS = {
         "tc_status_failed":          "❌ {error}",
         "tc_status_cancelled":       "⚠ Sync cancelled",
         "tc_agg_empty":              "Local checks cache is empty — click 'Full re-sync' to populate.",
+        "tc_skip_legend":            "🚫 = MR has 'skip-translate' label · Tranzor pipeline skipped this MR",
         "tc_src_mr":                 "MR",
         "tc_src_scan":               "Scan",
         "tc_src_file":                "File",
@@ -182,6 +183,7 @@ STRINGS = {
         "tc_status_failed":          "❌ {error}",
         "tc_status_cancelled":       "⚠ 同步已取消",
         "tc_agg_empty":              "本地 checks 缓存为空 —— 请点「全量重建」拉取数据。",
+        "tc_skip_legend":            "🚫 = MR 已被打 'skip-translate' 标签 · Tranzor 流水线已跳过该 MR",
         "tc_src_mr":                 "MR",
         "tc_src_scan":               "Scan",
         "tc_src_file":                "文件",
@@ -286,6 +288,19 @@ def _short(text, n=80):
         return ""
     s = str(text)
     return s if len(s) <= n else s[:n - 1] + "…"
+
+
+# Tranzor Platform's ``SKIP_TRANSLATE_LABEL`` (env var, default
+# ``skip-translate`` — see commit ``8663a18``) is the GitLab label that
+# causes the whole translation pipeline (webhook / Note / TaskExecutor /
+# pre-commit gate) to ignore an MR. We hard-code the *default* here
+# because:
+#   - it's the value 99% of envs use,
+#   - reading the platform env var would require a Tranzor API my-tools
+#     does not (and per the read-only rule must not) extend,
+#   - if a team overrides the default they can edit this constant —
+#     it's deliberately a single named symbol, not a magic string.
+_SKIP_TRANSLATE_LABEL = "skip-translate"
 
 
 # ---------------------------------------------------------------------------
@@ -504,6 +519,15 @@ class TranzorChecksTab:
         self.lbl_agg = ttk.Label(top_pane, text="", style="CardBold.TLabel")
         self.lbl_agg.pack(anchor="w", pady=(0, 4))
 
+        # Tiny legend so first-time users know what 🚫 means in the Latest task
+        # column. Permanent (no toggle) because the icon is meaningless without
+        # context, and "show only when present" would surprise users on their
+        # first synced MR with the skip label.
+        self.lbl_skip_legend = ttk.Label(
+            top_pane, text="", style="Status.TLabel",
+        )
+        self.lbl_skip_legend.pack(anchor="w", pady=(0, 4))
+
         agg_frame = ttk.Frame(top_pane, style="App.TFrame")
         agg_frame.pack(fill="both", expand=True)
         # 列顺序：来源 → 错误类型 → 语言 → 关键词 → 条数 → 任务数 → 最近任务 → 最近检查时间 → 距今
@@ -622,6 +646,7 @@ class TranzorChecksTab:
                 self._tip_open_task.set_text(t("tc_task_summary_tip"))
         # 主表标题与列头
         self.lbl_agg.configure(text=t("tc_agg_title"))
+        self.lbl_skip_legend.configure(text=t("tc_skip_legend"))
         for c, key in (
             ("source", "tc_col_source"),
             ("error_type", "tc_col_error_type"),
@@ -822,6 +847,15 @@ class TranzorChecksTab:
                 latest_task_disp = _short(latest_tid, 14)
             else:
                 latest_task_disp = "—"
+            # 主库（commit 8663a18）引入了 SKIP_TRANSLATE_LABEL 机制：MR
+            # 打上该 label（默认 ``skip-translate``）后整条翻译流水线都会
+            # 跳过它。my-tools sync 时已经直连 GitLab 把 labels 落到
+            # task_checks.mr_labels，这里把 skip 标记前缀渲染到 "Latest task"
+            # 列——避免新加一整列只为少数行用，且与 mr_iid 显示同位置，
+            # 视觉上是 MR 行的属性而不是孤立信号。
+            latest_labels = r.get("latest_mr_labels") or []
+            if _SKIP_TRANSLATE_LABEL in latest_labels:
+                latest_task_disp = f"🚫 {latest_task_disp}"
             latest_seen_raw = r.get("latest_seen") or ""
             iid = self.tree_agg.insert("", "end", values=(
                 src_disp or "—",
