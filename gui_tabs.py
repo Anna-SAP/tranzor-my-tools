@@ -26,7 +26,16 @@ class MRPipelineTab:
         self.app = app
         self.parent = parent
         self.mr_page = 0
-        self.mr_page_size = 20
+        self.mr_page_size = 25
+        # Extra pages appended below the anchor page via "Load More".
+        # 0 == single-page view (Prev/Next semantics); > 0 == extended
+        # view where the table also shows the next N pages worth of
+        # rows. Reset whenever the user navigates (Prev/Next/Search/
+        # Reset) since those replace the visible rows.
+        self.mr_extra_pages = 0
+        # One-shot flag set by ``_load_more`` and consumed by the next
+        # ``_fetch_tasks`` call to switch the load into append mode.
+        self._pending_append = False
         self.mr_total = 0
         self.mr_filtered_total = 0
         self.mr_loading = False
@@ -203,6 +212,25 @@ class MRPipelineTab:
         )
         self.lbl_mr_post_edit_legend.pack(anchor="w", pady=(0, 4))
 
+        # ── Footer: Load More button anchored at the bottom of `left` ──
+        # Packed BEFORE tree_frame with side="bottom" so the tree's
+        # expand=True fills every pixel between the legend and this
+        # footer — mirrors the pattern used in _build_mr_sidebar for
+        # the refresh button anchor.
+        footer = ttk.Frame(left, style="App.TFrame")
+        footer.pack(side="bottom", fill="x", pady=(6, 0))
+
+        self.btn_mr_load_more = self.app._create_button(
+            footer, text="", command=self._load_more,
+            style_name="SecondarySmall",
+            font=(FONT_FAMILY, 10, "bold"), bg="#0f3460", fg="#ccc",
+            padx=18, pady=4, state="disabled")
+        self.btn_mr_load_more.pack(side="left")
+
+        self.lbl_mr_load_more_hint = ttk.Label(
+            footer, text="", style="Status.TLabel")
+        self.lbl_mr_load_more_hint.pack(side="left", padx=(12, 0))
+
         # ── Task list table ──
         tree_frame = ttk.Frame(left, style="App.TFrame")
         tree_frame.pack(fill="both", expand=True, pady=(0, 6))
@@ -324,6 +352,7 @@ class MRPipelineTab:
         self.btn_mr_search.configure(text=t("mr_search"))
         self.btn_mr_reset.configure(text=t("mr_reset"))
         self.btn_mr_export.configure(text=t("mr_export"))
+        self.btn_mr_load_more.configure(text=t("mr_load_more"))
         self.lbl_mr_export_type.configure(text=t("export_type_label"))
         self.rb_mr_changes.configure(text=t("export_type_changes"))
         self.rb_mr_translations.configure(text=t("export_type_all"))
@@ -350,7 +379,7 @@ class MRPipelineTab:
             self._render_recent_projects(self._last_recent_projects)
 
     def load_initial_tasks(self):
-        """Load the latest 20 tasks (no filters) on first tab selection."""
+        """Load the latest ``mr_page_size`` tasks (no filters) on first tab selection."""
         self._load_tasks()
 
     def _refresh_tasks(self):
@@ -391,6 +420,7 @@ class MRPipelineTab:
     def _prev_page(self):
         if self.mr_page > 0:
             self.mr_page -= 1
+            # _on_tasks_loaded clears mr_extra_pages whenever append=False
             self._load_tasks()
 
     def _next_page(self):
@@ -400,9 +430,35 @@ class MRPipelineTab:
             or self.mr_task_id_var.get().strip()
         )
         effective_total = self.mr_filtered_total if filters_active else self.mr_total
-        if (self.mr_page + 1) * self.mr_page_size < effective_total:
-            self.mr_page += 1
+        # Skip past every page already visible in the current extended
+        # view so Next never re-shows rows the user just scrolled through
+        # via Load More.
+        next_page = self.mr_page + 1 + self.mr_extra_pages
+        if next_page * self.mr_page_size < effective_total:
+            self.mr_page = next_page
             self._load_tasks()
+
+    def _load_more(self):
+        """Append the next page of rows below the current view.
+
+        Unlike Next (which jumps the anchor page and replaces the tree),
+        Load More keeps the existing rows and tacks on the next batch
+        — giving users a continuous-scroll way to dig into older MR
+        history without paging back-and-forth.
+        """
+        if self.mr_loading:
+            return
+        filters_active = (
+            self.mr_hide_empty_var.get()
+            or self.mr_iid_var.get().strip()
+            or self.mr_task_id_var.get().strip()
+        )
+        effective_total = self.mr_filtered_total if filters_active else self.mr_total
+        items_shown = (self.mr_page + 1 + self.mr_extra_pages) * self.mr_page_size
+        if items_shown >= effective_total:
+            return
+        self._pending_append = True
+        self._load_tasks()
 
     def _load_tasks(self):
         if self.mr_loading:
@@ -442,10 +498,12 @@ class MRPipelineTab:
             self.btn_mr_export.state(flag)
             self.btn_mr_prev.state(flag)
             self.btn_mr_next.state(flag)
+            self.btn_mr_load_more.state(flag)
         else:
             self.btn_mr_export.configure(state=state)
             self.btn_mr_prev.configure(state=state)
             self.btn_mr_next.configure(state=state)
+            self.btn_mr_load_more.configure(state=state)
 
     def _check_task_translations(self, t):
         """Check a task's translation count via API; attach _translations_count and average_score."""
@@ -472,6 +530,18 @@ class MRPipelineTab:
             mr_iid_filter = self.mr_iid_var.get().strip()
             task_id_filter = self.mr_task_id_var.get().strip()
             hide_empty = self.mr_hide_empty_var.get()
+
+            # Capture-and-clear the one-shot append flag set by
+            # _load_more. _on_tasks_loaded uses ``append`` to decide
+            # whether to replace or extend the tree, and ``base_offset``
+            # to assign correct row indices (idx column) for the new
+            # batch.
+            append = self._pending_append
+            self._pending_append = False
+            if append:
+                base_offset = (self.mr_page + 1 + self.mr_extra_pages) * self.mr_page_size
+            else:
+                base_offset = self.mr_page * self.mr_page_size
 
             # Task ID short-circuit: if user pastes a UUID, look it up
             # directly via /tasks/{task_id} and intersect with the other
@@ -502,9 +572,12 @@ class MRPipelineTab:
                 if isinstance(detail, dict) and detail.get("task_id"):
                     collected.append(detail)
                 matched_total = len(collected)
-                # Single result fits on page 0 — return directly.
+                # Single result fits on page 0 — return directly. Force
+                # append=False because a single-result short-circuit
+                # always replaces the view (never extends it).
                 self.parent.after(0, self._on_tasks_loaded,
-                                  matched_total, collected, matched_total)
+                                  matched_total, collected, matched_total,
+                                  False, 0)
                 return
 
             need_filter = hide_empty or bool(mr_iid_filter)
@@ -513,15 +586,16 @@ class MRPipelineTab:
                 # Simple path: no client-side filtering needed
                 total, tasks = mr_api.fetch_mr_tasks(
                     project_id=proj, release=rel, status=status,
-                    limit=self.mr_page_size, offset=self.mr_page * self.mr_page_size)
-                self.parent.after(0, self._on_tasks_loaded, total, tasks, total)
+                    limit=self.mr_page_size, offset=base_offset)
+                self.parent.after(0, self._on_tasks_loaded,
+                                  total, tasks, total, append, base_offset)
             else:
                 from concurrent.futures import ThreadPoolExecutor, as_completed
 
                 # Accumulate non-empty / MR#-matched tasks across multiple API batches
                 batch_size = 100
                 target = self.mr_page_size
-                skip_count = self.mr_page * self.mr_page_size  # items to skip for pagination
+                skip_count = base_offset  # items to skip for pagination
                 collected = []
                 offset = 0
                 api_total = 0
@@ -577,27 +651,32 @@ class MRPipelineTab:
                 else:
                     estimated_total = total_matched
 
-                self.parent.after(0, self._on_tasks_loaded, api_total, collected, estimated_total)
+                self.parent.after(0, self._on_tasks_loaded,
+                                  api_total, collected, estimated_total,
+                                  append, base_offset)
         except Exception as e:
             self.parent.after(0, self._on_tasks_error, str(e))
 
-    def _on_tasks_loaded(self, api_total, tasks, filtered_total):
+    def _on_tasks_loaded(self, api_total, tasks, filtered_total,
+                          append=False, base_offset=0):
         self.mr_loading = False
         self._stop_loading_anim()
         self.mr_total = api_total
         self.mr_filtered_total = filtered_total
 
-        for item in self.mr_tree.get_children():
-            self.mr_tree.delete(item)
-
-        # Reset row mapping; populated per task below so the async
-        # post-edit prefetch callback can patch the Project cell when
-        # detail fetches return.
-        self._mr_row_iid_by_task = {}
+        if not append:
+            # Replace mode: clear the tree and reset row mapping +
+            # extended-view counter so we're back to a single-page view.
+            for item in self.mr_tree.get_children():
+                self.mr_tree.delete(item)
+            self._mr_row_iid_by_task = {}
+            self.mr_extra_pages = 0
+        # Append mode: keep existing rows + row mapping intact so
+        # post-edit tagging on older rows still works.
         prefetch_items: list[tuple[str, int]] = []
 
         for i, t in enumerate(tasks):
-            idx = self.mr_page * self.mr_page_size + i + 1
+            idx = base_offset + i + 1
             created = (t.get("created_at") or "")[:19].replace("T", " ")
             updated = t.get("updated_at") or ""
             duration = ""
@@ -663,19 +742,44 @@ class MRPipelineTab:
                 max_workers=4,
             )
 
+        if append:
+            # We just appended one more page worth of rows; track that
+            # so Prev/Next/Load More can compute the correct boundary.
+            self.mr_extra_pages += 1
+
         # Pagination — use filtered_total when filters are active
         effective_total = filtered_total
-        total_pages = max(1, (effective_total + self.mr_page_size - 1) // self.mr_page_size)
-        self.lbl_mr_page.configure(text=f"{self.mr_page + 1} / {total_pages}  ({effective_total})")
-        has_next = (self.mr_page + 1) * self.mr_page_size < effective_total
-        if IS_MAC:
-            self.btn_mr_prev.state(["!disabled"] if self.mr_page > 0 else ["disabled"])
-            self.btn_mr_next.state(["!disabled"] if has_next else ["disabled"])
-            self.btn_mr_export.state(["!disabled"] if tasks else ["disabled"])
+        # items_shown_max == upper bound on the items currently visible
+        # (may be slightly above effective_total when the last page is
+        # not full — we cap the display value below).
+        items_shown_max = (self.mr_page + 1 + self.mr_extra_pages) * self.mr_page_size
+        has_next = items_shown_max < effective_total
+        has_prev = self.mr_page > 0
+        has_more = has_next  # Load More uses the same boundary as Next
+
+        if self.mr_extra_pages > 0:
+            # Extended view: show "start - end / total" so the user can
+            # tell at a glance how far they've scrolled through history.
+            start_idx = self.mr_page * self.mr_page_size + 1
+            end_idx = min(items_shown_max, effective_total)
+            self.lbl_mr_page.configure(
+                text=f"{start_idx} - {end_idx} / {effective_total}")
         else:
-            self.btn_mr_prev.configure(state="normal" if self.mr_page > 0 else "disabled")
+            total_pages = max(1, (effective_total + self.mr_page_size - 1) // self.mr_page_size)
+            self.lbl_mr_page.configure(
+                text=f"{self.mr_page + 1} / {total_pages}  ({effective_total})")
+
+        has_rows = bool(self.mr_tree.get_children())
+        if IS_MAC:
+            self.btn_mr_prev.state(["!disabled"] if has_prev else ["disabled"])
+            self.btn_mr_next.state(["!disabled"] if has_next else ["disabled"])
+            self.btn_mr_load_more.state(["!disabled"] if has_more else ["disabled"])
+            self.btn_mr_export.state(["!disabled"] if has_rows else ["disabled"])
+        else:
+            self.btn_mr_prev.configure(state="normal" if has_prev else "disabled")
             self.btn_mr_next.configure(state="normal" if has_next else "disabled")
-            self.btn_mr_export.configure(state="normal" if tasks else "disabled")
+            self.btn_mr_load_more.configure(state="normal" if has_more else "disabled")
+            self.btn_mr_export.configure(state="normal" if has_rows else "disabled")
         self.lbl_mr_status_bar.configure(text=self._t("status_ready"))
 
     # ------------------------------------------------------------------
