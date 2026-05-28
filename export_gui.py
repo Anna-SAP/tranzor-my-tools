@@ -383,6 +383,8 @@ STRINGS = {
         "mr_col_avg_score": "Avg Score",
         "mr_col_created":   "Created",
         "mr_col_duration":  "Duration",
+        "mr_post_edit_legend": "✏️ = MR contains at least one human-edited translation (post-edit)",
+        "summary_post_edit_legend": "✏️ = task contains at least one human-edited translation (post-edit)",
         # Quality Overview tab
         "qa_language":      "Language",
         "qa_export":        "Export Report",
@@ -508,6 +510,8 @@ STRINGS = {
         "mr_col_avg_score": "平均分",
         "mr_col_created":   "创建时间",
         "mr_col_duration":  "耗时",
+        "mr_post_edit_legend": "✏️ = 该 MR 至少含一条经过人工编辑（post-edit）的翻译",
+        "summary_post_edit_legend": "✏️ = 该任务至少含一条经过人工编辑（post-edit）的翻译",
         # Quality Overview tab
         "qa_language":      "语言",
         "qa_export":        "导出报告",
@@ -1301,6 +1305,12 @@ class ExportApp:
             inner, text="", style="SummarySection.TLabel")
         self.lbl_recent_header.pack(anchor="w", pady=(0, 8))
 
+        # Legend for the ✏️ marker the async post-edit prefetch may
+        # prepend to Task Name once detail fetches return.
+        self.lbl_summary_post_edit_legend = ttk.Label(
+            inner, text="", style="SummaryStatus.TLabel")
+        self.lbl_summary_post_edit_legend.pack(anchor="w", pady=(0, 4))
+
         # ── Treeview for task list ──
         self.summary_tree_frame = ttk.Frame(inner, style="Summary.TFrame")
         self.summary_tree_frame.pack(fill="both", expand=True)
@@ -1484,6 +1494,8 @@ class ExportApp:
         self.lbl_summary_title.configure(text=self._t("summary_title"))
         self.lbl_total_label.configure(text=self._t("summary_total"))
         self.lbl_recent_header.configure(text=self._t("summary_recent"))
+        self.lbl_summary_post_edit_legend.configure(
+            text=self._t("summary_post_edit_legend"))
         self.btn_summary_prev.configure(text=self._t("summary_prev"))
         self.btn_summary_next.configure(text=self._t("summary_next"))
         self.btn_refresh.configure(text=self._t("summary_refresh"))
@@ -1610,14 +1622,78 @@ class ExportApp:
         for item in self.task_tree.get_children():
             self.task_tree.delete(item)
 
+        # Reset row mapping; populated below so the async post-edit
+        # prefetch callback can patch Task Name when detail returns.
+        self._summary_row_iid_by_task: dict[str, str] = {}
+        prefetch_items: list[tuple[str, str]] = []
+
+        # Late import — task_post_edit is its own module and keeps the
+        # main GUI cold start cheap.
+        import task_post_edit as _tpe_local
+
         for task in page_tasks:
             tid = task.get("id", "")
             tname = task.get("task_name", "")
             creator = task.get("created_by", "") or task.get("creator", "") or "-"
-            self.task_tree.insert("", "end", values=(tid, tname, creator))
+            # Synchronous render when we've already cached the answer.
+            cached = (
+                _tpe_local.get_cache().get("legacy", tid)
+                if tid else None
+            )
+            display_name = (
+                _tpe_local.POST_EDIT_PREFIX + tname if cached else tname
+            )
+            iid = self.task_tree.insert(
+                "", "end",
+                iid=str(tid) if tid else None,
+                values=(tid, display_name, creator),
+            )
+            if tid:
+                self._summary_row_iid_by_task[str(tid)] = iid
+                if cached is None:
+                    prefetch_items.append(("legacy", str(tid)))
+
+        if prefetch_items:
+            _tpe_local.prefetch_async(
+                prefetch_items,
+                on_result=self._on_summary_post_edit_result,
+                max_workers=4,
+            )
 
         self._restore_summary_selection_if_possible()
         self._update_summary_pager()
+
+    def _on_summary_post_edit_result(self, kind, task_id, has_post_edit):
+        """Worker-thread callback from the post-edit prefetch — marshal
+        back to Tk before touching widgets."""
+        if not has_post_edit:
+            return
+        try:
+            self.task_tree.after(
+                0, self._apply_summary_post_edit_prefix, str(task_id),
+            )
+        except Exception:
+            pass
+
+    def _apply_summary_post_edit_prefix(self, task_id):
+        import task_post_edit as _tpe_local
+        iid = getattr(self, "_summary_row_iid_by_task", {}).get(task_id)
+        if not iid:
+            return
+        try:
+            vals = list(self.task_tree.item(iid, "values"))
+        except tk.TclError:
+            return
+        if len(vals) < 2:
+            return
+        name = vals[1] or ""
+        if name.startswith(_tpe_local.POST_EDIT_PREFIX):
+            return
+        vals[1] = _tpe_local.POST_EDIT_PREFIX + name
+        try:
+            self.task_tree.item(iid, values=vals)
+        except tk.TclError:
+            pass
 
     def _prev_summary_page(self):
         if self.summary_page <= 0:

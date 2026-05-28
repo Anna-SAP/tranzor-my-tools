@@ -12,6 +12,7 @@ from datetime import date, datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import export_mr_pipeline as mr_api
 import quality_overview as qa
+import task_post_edit as _tpe
 from export_gui import FONT_FAMILY, IS_MAC, reveal_in_folder, sanitize_for_filename
 
 
@@ -33,6 +34,10 @@ class MRPipelineTab:
         self._recent_projects_loading = False
         self._loading_anim_id = None
         self._loading_dot_count = 0
+        # task_id → Treeview iid; populated each time _on_tasks_loaded
+        # repaints, used by the async post-edit prefetch callback to
+        # find the row to mark.
+        self._mr_row_iid_by_task: dict[str, str] = {}
         self._build(parent)
 
     def _t(self, key):
@@ -191,6 +196,13 @@ class MRPipelineTab:
             padx=10, pady=3)
         self.btn_mr_refresh.pack(side="right", padx=(0, 8))
 
+        # Legend for the ✏️ marker the async post-edit prefetch may
+        # prepend to the Project column once detail fetches return.
+        self.lbl_mr_post_edit_legend = ttk.Label(
+            left, text="", style="Status.TLabel",
+        )
+        self.lbl_mr_post_edit_legend.pack(anchor="w", pady=(0, 4))
+
         # ── Task list table ──
         tree_frame = ttk.Frame(left, style="App.TFrame")
         tree_frame.pack(fill="both", expand=True, pady=(0, 6))
@@ -313,6 +325,7 @@ class MRPipelineTab:
 
         for i, col in enumerate(("idx", "project", "mr", "release", "status", "avg_score", "created", "duration")):
             self.mr_tree.heading(col, text=t(f"mr_col_{col}"))
+        self.lbl_mr_post_edit_legend.configure(text=t("mr_post_edit_legend"))
 
         self.lbl_mr_sidebar_title.configure(text=t("mr_sidebar_title"))
         for key in ("total", "completed", "failed", "avg_score"):
@@ -569,6 +582,12 @@ class MRPipelineTab:
         for item in self.mr_tree.get_children():
             self.mr_tree.delete(item)
 
+        # Reset row mapping; populated per task below so the async
+        # post-edit prefetch callback can patch the Project cell when
+        # detail fetches return.
+        self._mr_row_iid_by_task = {}
+        prefetch_items: list[tuple[str, int]] = []
+
         for i, t in enumerate(tasks):
             idx = self.mr_page * self.mr_page_size + i + 1
             created = (t.get("created_at") or "")[:19].replace("T", " ")
@@ -587,11 +606,45 @@ class MRPipelineTab:
                 pass
 
             avg = t.get("average_score")
-            self.mr_tree.insert("", "end", values=(
-                idx, t.get("project_id", ""), t.get("merge_request_iid", ""),
-                t.get("release", ""), t.get("status", ""),
-                avg if avg is not None else "—", created, duration
-            ), tags=(t.get("task_id", ""),))
+            task_id = t.get("task_id") or ""
+            mr_iid = t.get("merge_request_iid")
+            raw_project = t.get("project_id", "")
+            # Synchronous render when we've already cached the answer
+            # — paging back and forth shouldn't re-flicker.
+            cached = (_tpe.get_cache().get("mr", mr_iid)
+                      if mr_iid is not None else None)
+            display_project = (
+                _tpe.POST_EDIT_PREFIX + raw_project if cached else raw_project
+            )
+            iid = self.mr_tree.insert(
+                "", "end",
+                iid=task_id or None,
+                values=(
+                    idx, display_project, mr_iid,
+                    t.get("release", ""), t.get("status", ""),
+                    avg if avg is not None else "—", created, duration,
+                ),
+                tags=(task_id,),
+            )
+            if task_id:
+                self._mr_row_iid_by_task[task_id] = iid
+                if mr_iid is not None and cached is None:
+                    prefetch_items.append(("mr", mr_iid))
+                    # Stash mr_iid → iid so the callback (which only
+                    # carries mr_iid) can find this row again. We pack
+                    # both directions into the same dict for simplicity.
+                    self._mr_row_iid_by_task[f"mr:{mr_iid}"] = iid
+
+        # Kick off the dashboard-cases fetch for newly-seen MRs. This is
+        # heavier than the legacy/scan path (each MR returns its full
+        # case list, ~1-2 MB) so we cap workers at 4 instead of the
+        # default 8 to be a polite neighbour to the platform.
+        if prefetch_items:
+            _tpe.prefetch_async(
+                prefetch_items,
+                on_result=self._on_post_edit_result,
+                max_workers=4,
+            )
 
         # Pagination — use filtered_total when filters are active
         effective_total = filtered_total
@@ -607,6 +660,39 @@ class MRPipelineTab:
             self.btn_mr_next.configure(state="normal" if has_next else "disabled")
             self.btn_mr_export.configure(state="normal" if tasks else "disabled")
         self.lbl_mr_status_bar.configure(text=self._t("status_ready"))
+
+    # ------------------------------------------------------------------
+    # Post-edit prefetch callback. The fetcher runs on a worker thread,
+    # so we must marshal back to Tk via after() before touching widgets.
+    # ------------------------------------------------------------------
+    def _on_post_edit_result(self, kind, mr_iid, has_post_edit):
+        if not has_post_edit or mr_iid is None:
+            return
+        try:
+            self.mr_tree.after(
+                0, self._apply_post_edit_prefix_mr, int(mr_iid),
+            )
+        except Exception:
+            pass
+
+    def _apply_post_edit_prefix_mr(self, mr_iid: int):
+        iid = self._mr_row_iid_by_task.get(f"mr:{mr_iid}")
+        if not iid:
+            return
+        try:
+            vals = list(self.mr_tree.item(iid, "values"))
+        except tk.TclError:
+            return
+        if len(vals) < 2:
+            return
+        project = vals[1] or ""
+        if project.startswith(_tpe.POST_EDIT_PREFIX):
+            return
+        vals[1] = _tpe.POST_EDIT_PREFIX + project
+        try:
+            self.mr_tree.item(iid, values=vals)
+        except tk.TclError:
+            pass
 
     def _on_tasks_error(self, err):
         self.mr_loading = False

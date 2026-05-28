@@ -22,6 +22,7 @@ from export_gui import (
     FONT_FAMILY, IS_MAC, format_age_days, reveal_in_folder,
     sanitize_for_filename,
 )
+import task_post_edit as _tpe
 
 
 STRINGS = {
@@ -47,6 +48,7 @@ STRINGS = {
         "scan_col_output_mode":  "Output Mode",
         "scan_col_created":      "Created",
         "scan_col_age":          "Age",
+        "scan_post_edit_legend": "✏️ = task contains at least one human-edited translation (post-edit)",
     },
     "zh": {
         "tab_scan_tasks":        "🔎 扫描任务",
@@ -70,6 +72,7 @@ STRINGS = {
         "scan_col_output_mode":  "输出模式",
         "scan_col_created":      "创建时间",
         "scan_col_age":          "距今",
+        "scan_post_edit_legend": "✏️ = 该任务至少有一条经过人工编辑（post-edit）",
     },
 }
 
@@ -87,6 +90,9 @@ class ScanTasksTab:
         self.scan_loading = False
         self._loading_anim_id = None
         self._loading_dot_count = 0
+        # task_id → Treeview iid; populated by _on_tasks_loaded so the
+        # async post-edit prefetch callback can find the row to mark.
+        self._scan_row_iid_by_task: dict[str, str] = {}
         self._build(parent)
 
     def _t(self, key):
@@ -226,6 +232,14 @@ class ScanTasksTab:
             padx=10, pady=3)
         self.btn_scan_refresh.pack(side="right", padx=(0, 8))
 
+        # Tiny legend for the ✏️ glyph the async post-edit prefetch may
+        # prepend to Task Name. Permanent so first-time viewers know
+        # what's coming before the first marker lights up.
+        self.lbl_scan_post_edit_legend = ttk.Label(
+            left, text="", style="Status.TLabel",
+        )
+        self.lbl_scan_post_edit_legend.pack(anchor="w", pady=(0, 4))
+
         # ── Task list table ──
         tree_frame = ttk.Frame(left, style="App.TFrame")
         tree_frame.pack(fill="both", expand=True, pady=(0, 6))
@@ -303,6 +317,9 @@ class ScanTasksTab:
         for col in ("idx", "task_name", "project", "base_ref", "head_ref",
                     "status", "output_mode", "created", "age"):
             self.scan_tree.heading(col, text=t(f"scan_col_{col}"))
+        self.lbl_scan_post_edit_legend.configure(
+            text=t("scan_post_edit_legend"),
+        )
 
         self.lbl_scan_sidebar_title.configure(text=t("scan_sidebar_title"))
         for key in ("total", "completed", "running", "failed"):
@@ -451,23 +468,55 @@ class ScanTasksTab:
         for item in self.scan_tree.get_children():
             self.scan_tree.delete(item)
 
+        # Map task_id → row iid so the async post-edit prefetch can patch
+        # the Task Name cell once the detail fetch returns. We use the
+        # raw task_id as the iid (Tranzor task ids are UUIDs — safe as
+        # Tk iids) and keep ``tags`` populated so existing selection code
+        # (see _on_export) keeps working.
+        self._scan_row_iid_by_task = {}
+        prefetch_items: list[tuple[str, str]] = []
         for i, t in enumerate(tasks):
             idx = self.scan_page * self.scan_page_size + i + 1
             created_raw = t.get("created_at") or ""
             created = created_raw[:19].replace("T", " ")
             # Format age from the *raw* ISO so timezone info isn't dropped.
             age = format_age_days(created_raw)
-            self.scan_tree.insert("", "end", values=(
-                idx,
-                t.get("task_name", ""),
-                t.get("project_id", ""),
-                t.get("base_ref", ""),
-                t.get("head_ref", ""),
-                t.get("status", ""),
-                t.get("output_mode", ""),
-                created,
-                age,
-            ), tags=(t.get("task_id", ""),))
+            task_id = t.get("task_id") or ""
+            raw_name = t.get("task_name", "")
+            # If we already know the answer for this task, render the
+            # prefix synchronously — no flicker for users paging back.
+            cached = _tpe.get_cache().get("scan", task_id) if task_id else None
+            display_name = (
+                _tpe.POST_EDIT_PREFIX + raw_name if cached else raw_name
+            )
+            iid = self.scan_tree.insert(
+                "", "end",
+                iid=task_id or None,
+                values=(
+                    idx, display_name,
+                    t.get("project_id", ""),
+                    t.get("base_ref", ""),
+                    t.get("head_ref", ""),
+                    t.get("status", ""),
+                    t.get("output_mode", ""),
+                    created,
+                    age,
+                ),
+                tags=(task_id,),
+            )
+            if task_id:
+                self._scan_row_iid_by_task[task_id] = iid
+                if cached is None:
+                    prefetch_items.append(("scan", task_id))
+
+        # Fire-and-forget: ✏️ markers appear incrementally as per-task
+        # detail fetches return. The legend below the table tells users
+        # what the glyph means while they wait.
+        if prefetch_items:
+            _tpe.prefetch_async(
+                prefetch_items,
+                on_result=self._on_post_edit_result,
+            )
 
         effective_total = filtered_total
         total_pages = max(1, (effective_total + self.scan_page_size - 1) // self.scan_page_size)
@@ -482,6 +531,42 @@ class ScanTasksTab:
             self.btn_scan_next.configure(state="normal" if has_next else "disabled")
             self.btn_scan_export.configure(state="normal" if tasks else "disabled")
         self.lbl_scan_status_bar.configure(text=self._t("status_ready"))
+
+    # ------------------------------------------------------------------
+    # Post-edit prefetch callback — fires on a worker thread; marshal back
+    # to Tk before touching the Treeview (Tk widgets are NOT thread-safe).
+    # ------------------------------------------------------------------
+    def _on_post_edit_result(self, kind, task_id, has_post_edit):
+        if not has_post_edit:
+            return
+        try:
+            self.scan_tree.after(
+                0, self._apply_post_edit_prefix, str(task_id),
+            )
+        except Exception:
+            # Widget already destroyed (tab closed / app shutting down).
+            pass
+
+    def _apply_post_edit_prefix(self, task_id):
+        iid = self._scan_row_iid_by_task.get(task_id)
+        if not iid:
+            return
+        try:
+            vals = list(self.scan_tree.item(iid, "values"))
+        except tk.TclError:
+            # Row was deleted (user paged or re-searched between fetch
+            # firing and callback arriving). Drop silently.
+            return
+        if len(vals) < 2:
+            return
+        name = vals[1] or ""
+        if name.startswith(_tpe.POST_EDIT_PREFIX):
+            return  # already marked
+        vals[1] = _tpe.POST_EDIT_PREFIX + name
+        try:
+            self.scan_tree.item(iid, values=vals)
+        except tk.TclError:
+            pass
 
     def _on_tasks_error(self, err):
         self.scan_loading = False
