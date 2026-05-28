@@ -226,5 +226,118 @@ class TestParseBranchTimestamp(unittest.TestCase):
         self.assertIsNone(gitlab_client.parse_branch_timestamp("master"))
 
 
+# ---------------------------------------------------------------------------
+# get_merge_request / fetch_mr_labels — added for SKIP_TRANSLATE_LABEL viz
+# ---------------------------------------------------------------------------
+class _FakeResponse:
+    """Just enough of requests.Response for the MR helpers."""
+
+    def __init__(self, payload, status_code=200):
+        self._payload = payload
+        self.status_code = status_code
+
+    def json(self):
+        return self._payload
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise requests.HTTPError(f"{self.status_code}")
+
+
+class _FakeSession:
+    """In-memory stand-in for requests.Session — records calls so tests can
+    assert the cache short-circuits subsequent fetches."""
+
+    def __init__(self, payload, status_code=200):
+        self._payload = payload
+        self._status_code = status_code
+        self.calls = []
+        self.headers = {}
+
+    def get(self, url, **kwargs):
+        self.calls.append(url)
+        return _FakeResponse(self._payload, self._status_code)
+
+
+def _make_client_with_session(session):
+    """Build a GitLabClient and swap in our fake session so no HTTP goes out."""
+    client = gitlab_client.GitLabClient(
+        base_url="https://git.example.com", token="t",
+    )
+    client._session = session
+    return client
+
+
+class TestGetMergeRequest(unittest.TestCase):
+
+    def test_returns_full_payload(self):
+        payload = {
+            "iid": 1066, "labels": ["skip-translate", "needs-review"],
+            "title": "do not translate me",
+        }
+        session = _FakeSession(payload)
+        client = _make_client_with_session(session)
+
+        mr = client.get_merge_request("group/proj", 1066)
+
+        self.assertEqual(mr["iid"], 1066)
+        self.assertEqual(mr["labels"], ["skip-translate", "needs-review"])
+        self.assertEqual(len(session.calls), 1)
+        self.assertIn("merge_requests/1066", session.calls[0])
+
+    def test_caches_within_client(self):
+        session = _FakeSession({"iid": 1, "labels": []})
+        client = _make_client_with_session(session)
+
+        client.get_merge_request("p", 1)
+        client.get_merge_request("p", 1)  # same key → cache hit
+
+        self.assertEqual(
+            len(session.calls), 1,
+            "Second call should be served from _mr_cache, not re-fetched",
+        )
+
+    def test_distinct_keys_dont_share_cache(self):
+        session = _FakeSession({"iid": 1, "labels": []})
+        client = _make_client_with_session(session)
+
+        client.get_merge_request("p", 1)
+        client.get_merge_request("p", 2)
+        client.get_merge_request("q", 1)
+
+        self.assertEqual(len(session.calls), 3)
+
+    def test_http_error_propagates(self):
+        session = _FakeSession({}, status_code=404)
+        client = _make_client_with_session(session)
+        with self.assertRaises(requests.HTTPError):
+            client.get_merge_request("p", 999)
+
+
+class TestFetchMrLabels(unittest.TestCase):
+
+    def test_extracts_labels_list(self):
+        session = _FakeSession(
+            {"iid": 1, "labels": ["a", "b", "skip-translate"]}
+        )
+        client = _make_client_with_session(session)
+        self.assertEqual(
+            client.fetch_mr_labels("p", 1),
+            ["a", "b", "skip-translate"],
+        )
+
+    def test_no_labels_field_returns_empty_list(self):
+        session = _FakeSession({"iid": 1})
+        client = _make_client_with_session(session)
+        self.assertEqual(client.fetch_mr_labels("p", 1), [])
+
+    def test_drops_falsy_entries(self):
+        # Defensive: a malformed payload with nulls / empty strings shouldn't
+        # poison the labels list with bogus "skip-translate"-look-alikes.
+        session = _FakeSession({"iid": 1, "labels": ["a", None, "", "b"]})
+        client = _make_client_with_session(session)
+        self.assertEqual(client.fetch_mr_labels("p", 1), ["a", "b"])
+
+
 if __name__ == "__main__":
     unittest.main()
