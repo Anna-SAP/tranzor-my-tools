@@ -46,7 +46,7 @@ import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Iterable
 
 # 复用既有 HTTP 客户端 —— 不重复造鉴权 / 重试 / Session 池。
@@ -999,6 +999,46 @@ def sync_incremental(progress_callback=None,
         _set_meta(conn, "last_sync_at",
                   datetime.now(timezone.utc).isoformat(timespec="seconds"))
     return overall
+
+
+# Review Worklist 的「同步并刷新」首次回看窗口。Worklist 只关心近期待
+# merge 的 MR，没必要在刷新时全量拉 7000+ 历史 task（会卡几分钟、GitLab
+# 调用爆炸）。要建完整基线请用 Tranzor Checks 的 Full re-sync。
+_MR_INCREMENTAL_FIRST_WINDOW_DAYS = 14
+
+
+def sync_mr_incremental(progress_callback=None,
+                        cancel_event: threading.Event | None = None) -> dict:
+    """只增量同步 MR Pipeline 任务 —— Review Worklist 的「同步并刷新」用。
+
+    用**独立水位** ``last_mr_sync_at``，刻意不碰 :func:`sync_incremental`
+    的 ``last_sync_at``。否则 Worklist 推进了公共水位，下次 Tranzor
+    Checks 的三类增量 sync 会漏掉本窗口内的 scan / legacy 任务。
+
+    首次（无 ``last_mr_sync_at``）只回看
+    :data:`_MR_INCREMENTAL_FIRST_WINDOW_DAYS` 天。
+
+    返回 ``_sync_mr_tasks`` 的 stats dict（tasks_seen / rows_total /
+    issues_inserted）。
+    """
+    init_db()
+    with _connect() as conn:
+        since_iso = _get_meta(conn, "last_mr_sync_at")
+        if not since_iso:
+            since_iso = (
+                datetime.now(timezone.utc)
+                - timedelta(days=_MR_INCREMENTAL_FIRST_WINDOW_DAYS)
+            ).isoformat(timespec="seconds")
+        stats = _sync_mr_tasks(
+            conn, since_iso=since_iso,
+            progress_callback=progress_callback,
+            cancel_event=cancel_event)
+        # 仅在没被取消时推进水位 —— 取消意味着这次没拉全，下次应从
+        # 同一 since 重来。
+        if not (cancel_event and cancel_event.is_set()):
+            _set_meta(conn, "last_mr_sync_at",
+                      datetime.now(timezone.utc).isoformat(timespec="seconds"))
+    return stats
 
 
 # ---------------------------------------------------------------------------

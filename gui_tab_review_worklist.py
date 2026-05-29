@@ -36,10 +36,11 @@ STRINGS = {
         "rw_subtitle":          (
             "Sorted by merge urgency × language priority. "
             "Chinese issues weigh heaviest."),
-        "rw_refresh":           "🔄 Refresh",
+        "rw_refresh":           "🔄 Sync & refresh",
         "rw_refresh_tip":       (
-            "Recompute the worklist from the local checks cache.\n"
-            "To pull new MR data, run Sync on the Tranzor Checks tab."),
+            "Pull recent MR Pipeline tasks from Tranzor, then recompute.\n"
+            "First run looks back 14 days; for the full history use\n"
+            "Full re-sync on the Tranzor Checks tab."),
         "rw_show_grey":         "Include merged / skipped",
         "rw_show_grey_tip":     (
             "Show MRs that are already merged or have skip-translate.\n"
@@ -55,16 +56,18 @@ STRINGS = {
         "rw_col_zh":            "zh issues",
         "rw_col_other":         "other issues",
         "rw_col_reviewed":      "Reviewed",
+        "rw_col_age":           "Age (created)",
         "rw_col_score":         "Avg score",
         "rw_col_activity":      "Last activity",
         "rw_col_state":         "State",
         "rw_empty":             (
             "No MRs need review right now. "
-            "If the cache feels stale, run Sync on the Tranzor Checks tab."),
+            "If the cache feels stale, click Sync & refresh."),
         "rw_loading":           "Loading worklist…",
+        "rw_syncing":           "Syncing latest MRs… {msg}",
+        "rw_sync_failed":       "Sync failed: {error} — showing cached data.",
         "rw_error":             "Failed to load: {error}",
         "rw_count":             "{shown} of {total} MR(s)",
-        "rw_summary_reviewer":  "Reviewer: {reviewer}  ·  today {today} · total {total}",
         "rw_open":              "Open MR",
         "rw_open_tip":           "Open the MR in your default browser.",
         "rw_menu_mark":         "✓ Mark MR reviewed",
@@ -100,10 +103,11 @@ STRINGS = {
         "rw_title":             "今日待看 · MR Pipeline",
         "rw_subtitle":          (
             "按 merge 紧迫度 × 语言优先级 自动排序，中文问题权重最高。"),
-        "rw_refresh":           "🔄 刷新",
+        "rw_refresh":           "🔄 同步并刷新",
         "rw_refresh_tip":       (
-            "用本地 checks 缓存重新计算清单。\n"
-            "要拉取新 MR 数据请到「Tranzor Checks」标签运行 Sync。"),
+            "从 Tranzor 拉取近期 MR Pipeline 任务，再重新计算清单。\n"
+            "首次回看 14 天；要建完整历史基线请到「Tranzor Checks」\n"
+            "标签做 Full re-sync。"),
         "rw_show_grey":         "包含已合并 / 跳过",
         "rw_show_grey_tip":     (
             "显示已 merged 或带 skip-translate 标签的 MR。\n"
@@ -119,16 +123,17 @@ STRINGS = {
         "rw_col_zh":            "中文问题",
         "rw_col_other":         "其它问题",
         "rw_col_reviewed":      "已审",
+        "rw_col_age":           "创建至今",
         "rw_col_score":         "平均分",
         "rw_col_activity":      "最近活动",
         "rw_col_state":         "状态",
         "rw_empty":             (
-            "当前没有待看 MR。如果觉得缓存陈旧，到「Tranzor Checks」"
-            "标签运行 Sync。"),
+            "当前没有待看 MR。如果觉得缓存陈旧，点「同步并刷新」。"),
         "rw_loading":           "正在加载清单…",
+        "rw_syncing":           "正在同步最新 MR… {msg}",
+        "rw_sync_failed":       "同步失败：{error} — 显示缓存数据。",
         "rw_error":             "加载失败：{error}",
         "rw_count":             "共 {total} 条，显示 {shown} 条",
-        "rw_summary_reviewer":  "审阅者：{reviewer}  ·  今日 {today} · 累计 {total}",
         "rw_open":              "打开 MR",
         "rw_open_tip":           "在默认浏览器中打开 MR。",
         "rw_menu_mark":         "✓ 标记 MR 已审",
@@ -204,13 +209,15 @@ class ReviewWorklistTab:
 
     1. ``__init__`` → ``_build`` 起骨架，立刻调一次 ``_reload`` 让首屏
        有内容（同步、毫秒级，因为是 SQLite local read）。
-    2. 用户点 🔄 / 切换 ``Include grey`` 复选框 → ``_reload``。
-    3. ``_reload`` 跑在后台线程（即便很快——保留 UI 不卡），结果 marshal
+    2. 用户切换 ``Include grey`` 复选框 → ``_reload``（纯本地重算）。
+    3. 用户点「同步并刷新」→ ``_sync_and_reload``：先增量拉近期 MR
+       （PR-H），再 ``_reload`` 重算。
+    4. ``_reload`` 跑在后台线程（即便很快——保留 UI 不卡），结果 marshal
        回 Tk 后由 ``_render`` 重绘 Treeview。
 
-    Worklist 不发起任何同步——同步逻辑由 Tranzor Checks tab 持有，避免
-    一份数据被两个 tab 各拉一遍。这条边界让 PR-D 的后台 watchdog 也只
-    需要 hook 一个 sync 入口。
+    PR-H 起 Worklist 自己也能发起一次**轻量 MR 增量同步**（独立水位
+    ``last_mr_sync_at``，不动 Tranzor Checks 的三类全量 sync），这样
+    用户点刷新就能拉到新数据，而不必先切到 Tranzor Checks tab。
     """
 
     def __init__(self, parent, app):
@@ -219,6 +226,8 @@ class ReviewWorklistTab:
         self.include_grey_var = tk.BooleanVar(value=False)
         self.include_reviewed_var = tk.BooleanVar(value=False)
         self._loading = False
+        self._syncing = False          # PR-H: MR 增量 sync 进行中
+        self._last_sync_error = None   # PR-H: 上次 sync 的错误（供 _on_loaded 让位）
         self._items: list[dict] = []
         self._watchdog = None  # PR-D
         self._build(parent)
@@ -269,7 +278,7 @@ class ReviewWorklistTab:
         # 创建按钮不能用 export_gui 的辅助函数（循环依赖；那是 ExportApp
         # 的方法）。直接用 tk.Button 配深色主题即可。
         self.btn_refresh = tk.Button(
-            actions, text="", command=self._reload,
+            actions, text="", command=self._sync_and_reload,
             font=(FONT_FAMILY, 10), relief="flat",
             bg="#0f3460", fg="#fff", activebackground="#1a3a6a",
             activeforeground="#fff", padx=14, pady=4)
@@ -285,13 +294,10 @@ class ReviewWorklistTab:
             command=self._reload, style="App.TCheckbutton")
         self.chk_reviewed.pack(side="left", padx=(12, 0))
 
-        # 顶右：审阅者徽章——"今日已审 X / 累计 Y"。Lillian 一眼看出
-        # 她今天的工作量，也是给自己的"还差几条"提醒。
-        self.lbl_reviewer = ttk.Label(
-            actions, text="", style="Status.TLabel")
-        self.lbl_reviewer.pack(side="right")
-
         # 顶右 (PR-D)：watchdog 状态 —— 跑没跑、上次检查、当前红色 MR 数。
+        # （PR-H 删掉了原来的"审阅者: xxx"徽章 —— 用户反馈那个本机
+        #  用户名既无来源说明也无实际价值。reviewer 身份仍由 review_log
+        #  在后台用于去重，只是不再占界面。）
         self.lbl_watchdog = ttk.Label(
             actions, text="", style="Status.TLabel")
         self.lbl_watchdog.pack(side="right", padx=(0, 12))
@@ -301,20 +307,21 @@ class ReviewWorklistTab:
         tree_frame.pack(fill="both", expand=True, pady=(4, 0))
 
         cols = ("risk", "project", "mr", "task", "zh", "other",
-                "reviewed", "new_terms", "score", "activity", "state")
+                "reviewed", "new_terms", "score", "age", "activity",
+                "state")
         self.tree = ttk.Treeview(
             tree_frame, columns=cols, show="headings",
             selectmode="browse", height=18)
         widths = {
-            "risk": 50, "project": 130, "mr": 60, "task": 200,
-            "zh": 80, "other": 80, "reviewed": 80, "new_terms": 80,
-            "score": 70, "activity": 100, "state": 80,
+            "risk": 50, "project": 130, "mr": 60, "task": 180,
+            "zh": 70, "other": 70, "reviewed": 70, "new_terms": 70,
+            "score": 60, "age": 100, "activity": 100, "state": 70,
         }
         anchors = {
             "risk": "center", "mr": "center", "zh": "center",
             "other": "center", "reviewed": "center",
             "new_terms": "center", "score": "center",
-            "activity": "center", "state": "center",
+            "age": "center", "activity": "center", "state": "center",
         }
         for c in cols:
             self.tree.column(
@@ -383,6 +390,7 @@ class ReviewWorklistTab:
         self.tree.heading("reviewed", text=t("rw_col_reviewed"))
         self.tree.heading("new_terms", text=t("rw_col_new_terms"))
         self.tree.heading("score",    text=t("rw_col_score"))
+        self.tree.heading("age",      text=t("rw_col_age"))
         self.tree.heading("activity", text=t("rw_col_activity"))
         self.tree.heading("state",    text=t("rw_col_state"))
         # Context menu labels need refreshing too —— entryconfigure 用
@@ -414,6 +422,62 @@ class ReviewWorklistTab:
             daemon=True, name="worklist-load",
         ).start()
 
+    # ------------------------------------------------------------------
+    # PR-H: 「同步并刷新」—— 先增量拉近期 MR，再重算
+    # ------------------------------------------------------------------
+    def _sync_and_reload(self):
+        """按钮入口：增量同步近期 MR，完成后重算 worklist。
+
+        sync 跑后台线程，进度写状态栏；无论成功失败都接 ``_reload`` 重算
+        （失败时展示缓存数据 + 错误提示）。sync 期间禁用按钮防重复点。
+        """
+        if self._loading or self._syncing:
+            return
+        self._syncing = True
+        self._last_sync_error = None
+        try:
+            self.btn_refresh.configure(state="disabled")
+        except Exception:
+            pass
+        self.lbl_status.configure(
+            text=self._t("rw_syncing").format(msg=""))
+        threading.Thread(
+            target=self._sync_thread, daemon=True, name="worklist-sync",
+        ).start()
+
+    def _sync_thread(self):
+        import tranzor_checks as tc
+
+        def _progress(stage, done=0, total=0, **kw):
+            # 节流：只在每 10 个 / 收尾时更新 UI，避免 after() 洪泛。
+            if total and (done % 10 == 0 or done >= total):
+                msg = f"{done}/{total}"
+                self.parent.after(
+                    0, lambda m=msg: self.lbl_status.configure(
+                        text=self._t("rw_syncing").format(msg=m)))
+
+        err = None
+        try:
+            tc.sync_mr_incremental(progress_callback=_progress)
+        except Exception as e:
+            err = str(e)
+        self.parent.after(0, self._after_sync, err)
+
+    def _after_sync(self, err):
+        self._syncing = False
+        try:
+            self.btn_refresh.configure(state="normal")
+        except Exception:
+            pass
+        self._last_sync_error = err
+        if err:
+            self.lbl_status.configure(
+                text=self._t("rw_sync_failed").format(error=err[:80]))
+        # 无论同步成败都重算一次 —— 成功则展示新数据，失败则至少刷新
+        # 缓存视图。``_last_sync_error`` 让 _on_loaded 不要用 unknown
+        # 提示盖掉这条 sync 失败信息。
+        self._reload()
+
     def _fetch_thread(self, include_grey, include_reviewed):
         import tranzor_checks as tc
         # PR-C: 拉一次已登记术语集合（6h 缓存，几乎无成本）；platform 不可达
@@ -430,25 +494,23 @@ class ReviewWorklistTab:
                 include_fully_reviewed=include_reviewed,
                 known_term_names_lower=known,
             )
-            summary = tc.get_review_summary()
         except Exception as e:
             self.parent.after(0, self._on_error, str(e))
             return
-        self.parent.after(0, self._on_loaded, items, summary)
+        self.parent.after(0, self._on_loaded, items)
 
-    def _on_loaded(self, items, summary):
+    def _on_loaded(self, items):
         self._loading = False
         self._items = items
         self._render(items)
-        self.lbl_reviewer.configure(
-            text=self._t("rw_summary_reviewer").format(
-                reviewer=summary.get("reviewer", "—"),
-                today=summary.get("today", 0),
-                total=summary.get("total", 0),
-            ),
-        )
         # PR-F: 如果当前视图里有 unknown-tier 行，提示一下"建议 Sync"。
-        # 数量 > 0 才显示——避免在正常状态下也唠叨。
+        # 数量 > 0 才显示——避免在正常状态下也唠叨。但 sync 失败的提示
+        # 优先级更高，不要被这条覆盖（_after_sync 设了就让位一轮）。
+        if getattr(self, "_last_sync_error", None):
+            # 一次性让位：保留 _after_sync 写的"同步失败"提示这一轮，
+            # 读完即清，下轮纯 reload（如切复选框）恢复正常 unknown 提示。
+            self._last_sync_error = None
+            return
         n_unknown = sum(
             1 for d in items if d.get("merge_tier") == "unknown"
         )
@@ -496,6 +558,10 @@ class ReviewWorklistTab:
             new_terms_disp = str(new_count) if new_count else "—"
             score = d.get("final_score_avg")
             score_disp = f"{score:.0f}" if score is not None else "—"
+            # PR-H: "创建至今" —— task_created_at（≈ MR 翻译任务建立时间）
+            # 到现在多久，回答"这个 MR 已经挂了多久没人管"。不依赖
+            # GitLab，所以即便 state 是 unknown 这列也有值。
+            age = _fmt_age(d.get("task_created_at"), t)
             activity = _fmt_age(d.get("mr_updated_at"), t)
             state = d.get("mr_state") or "—"
             tag = f"tier_{tier}"
@@ -504,7 +570,7 @@ class ReviewWorklistTab:
                 iid=str(d.get("task_id") or i),
                 values=(dot, project, mr, task_name,
                         zh, other_total, reviewed_disp, new_terms_disp,
-                        score_disp, activity, state),
+                        score_disp, age, activity, state),
                 tags=(tag,),
             )
         # Count 行：显示"全部 N 条 / 表里 M 条"——超过 200 时让用户知道有更多。
