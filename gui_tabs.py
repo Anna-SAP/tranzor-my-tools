@@ -14,6 +14,7 @@ import export_mr_pipeline as mr_api
 import quality_overview as qa
 import task_post_edit as _tpe
 from export_gui import FONT_FAMILY, IS_MAC, reveal_in_folder, sanitize_for_filename
+from date_picker import attach_calendar
 
 
 # ============================================================
@@ -116,13 +117,32 @@ class MRPipelineTab:
 
         self.lbl_mr_date = ttk.Label(r2, text="", style="Card.TLabel", width=8)
         self.lbl_mr_date.pack(side="left")
+
+        # Date fields keep manual typing; the 📅 button opens a calendar
+        # popup for point-and-click selection.
+        def _entry_setter(entry):
+            def _set(s):
+                entry.delete(0, "end")
+                entry.insert(0, s)
+            return _set
+
         self.mr_date_from = tk.Entry(r2, width=12, font=(FONT_FAMILY, 10),
                                       bg="#0a0a1a", fg="#fff", insertbackground="#fff", relief="flat")
-        self.mr_date_from.pack(side="left", padx=(4, 4), ipady=3)
+        self.mr_date_from.pack(side="left", padx=(4, 2), ipady=3)
+        attach_calendar(
+            r2, self.mr_date_from, font_family=FONT_FAMILY,
+            get_value=self.mr_date_from.get,
+            set_value=_entry_setter(self.mr_date_from),
+            lang=lambda: self.app.lang, padx=(0, 6))
         ttk.Label(r2, text="—", style="Card.TLabel").pack(side="left")
         self.mr_date_to = tk.Entry(r2, width=12, font=(FONT_FAMILY, 10),
                                     bg="#0a0a1a", fg="#fff", insertbackground="#fff", relief="flat")
-        self.mr_date_to.pack(side="left", padx=(4, 12), ipady=3)
+        self.mr_date_to.pack(side="left", padx=(4, 2), ipady=3)
+        attach_calendar(
+            r2, self.mr_date_to, font_family=FONT_FAMILY,
+            get_value=self.mr_date_to.get,
+            set_value=_entry_setter(self.mr_date_to),
+            lang=lambda: self.app.lang, padx=(0, 12))
 
         self.btn_mr_search = self.app._create_button(
             r2, text="", command=self._on_search,
