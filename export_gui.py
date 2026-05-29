@@ -1005,6 +1005,24 @@ class ExportApp:
             except tk.TclError:
                 pass
 
+    def _mark_hint(self, label, text):
+        """把引导 / 警示类提示切到醒目可读的 Hint 样式（11pt 加粗亮琥珀）。
+
+        用于"⚠ …，请这样做"这类需要用户读懂并照做的常驻提示——默认的
+        Status 暗灰小字对视力不佳 / 视障用户很不友好。空文本时退回普通
+        Status 样式，避免空标签占着加粗大字行高。
+        """
+        if not text:
+            self._mark_idle(label, "")
+            return
+        try:
+            label.configure(text=text, style="Hint.TLabel")
+        except tk.TclError:
+            try:
+                label.configure(text=text)
+            except tk.TclError:
+                pass
+
     def _setup_styles(self):
         style = ttk.Style()
         style.theme_use("clam")
@@ -1034,6 +1052,13 @@ class ExportApp:
         style.configure("Busy.TLabel",
                          background=self.BG, foreground="#fbbf24",
                          font=(FONT_FAMILY, 9, "bold"))
+        # 引导 / 警示类提示（⚠ 这类需要用户读懂并照做的文本）。默认的
+        # Status 是 9pt 暗灰 #888，对视力不佳 / 视障用户很吃力。Hint 专门
+        # 放大到 11pt 加粗 + 高对比亮琥珀，确保醒目可读（无障碍）。配合
+        # _mark_hint 使用。
+        style.configure("Hint.TLabel",
+                         background=self.BG, foreground="#fcd34d",
+                         font=(FONT_FAMILY, 11, "bold"))
 
         # Radio button for dark theme
         style.configure("Card.TRadiobutton",
