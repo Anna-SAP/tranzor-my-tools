@@ -475,7 +475,7 @@ class ReviewWorklistTab:
         if self._loading:
             return
         self._loading = True
-        self.lbl_status.configure(text=self._t("rw_loading"))
+        self.app._mark_busy(self.lbl_status, self._t("rw_loading"))
         include_grey = bool(self.include_grey_var.get())
         include_reviewed = bool(self.include_reviewed_var.get())
         threading.Thread(
@@ -501,8 +501,8 @@ class ReviewWorklistTab:
             self.btn_refresh.configure(state="disabled")
         except Exception:
             pass
-        self.lbl_status.configure(
-            text=self._t("rw_syncing").format(msg=""))
+        self.app._mark_busy(
+            self.lbl_status, self._t("rw_syncing").format(msg=""))
         threading.Thread(
             target=self._sync_thread, daemon=True, name="worklist-sync",
         ).start()
@@ -515,8 +515,9 @@ class ReviewWorklistTab:
             if total and (done % 10 == 0 or done >= total):
                 msg = f"{done}/{total}"
                 self.parent.after(
-                    0, lambda m=msg: self.lbl_status.configure(
-                        text=self._t("rw_syncing").format(msg=m)))
+                    0, lambda m=msg: self.app._mark_busy(
+                        self.lbl_status,
+                        self._t("rw_syncing").format(msg=m)))
 
         err = None
         try:
@@ -533,8 +534,9 @@ class ReviewWorklistTab:
             pass
         self._last_sync_error = err
         if err:
-            self.lbl_status.configure(
-                text=self._t("rw_sync_failed").format(error=err[:80]))
+            self.app._mark_idle(
+                self.lbl_status,
+                self._t("rw_sync_failed").format(error=err[:80]))
         # 无论同步成败都重算一次 —— 成功则展示新数据，失败则至少刷新
         # 缓存视图。``_last_sync_error`` 让 _on_loaded 不要用 unknown
         # 提示盖掉这条 sync 失败信息。
@@ -577,16 +579,17 @@ class ReviewWorklistTab:
             1 for d in items if d.get("merge_tier") == "unknown"
         )
         if n_unknown:
-            self.lbl_status.configure(
-                text=self._t("rw_unknown_hint").format(n=n_unknown),
+            self.app._mark_idle(
+                self.lbl_status,
+                self._t("rw_unknown_hint").format(n=n_unknown),
             )
         else:
-            self.lbl_status.configure(text="")
+            self.app._mark_idle(self.lbl_status, "")
 
     def _on_error(self, err):
         self._loading = False
-        self.lbl_status.configure(
-            text=self._t("rw_error").format(error=err))
+        self.app._mark_idle(
+            self.lbl_status, self._t("rw_error").format(error=err))
 
     # ------------------------------------------------------------------
     # 渲染
@@ -598,7 +601,7 @@ class ReviewWorklistTab:
 
         if not items:
             self.lbl_count.configure(text="")
-            self.lbl_status.configure(text=t("rw_empty"))
+            self.app._mark_idle(self.lbl_status, t("rw_empty"))
             return
 
         for i, d in enumerate(items):
@@ -657,13 +660,13 @@ class ReviewWorklistTab:
             return
         url = item.get("mr_web_url")
         if not url:
-            self.lbl_status.configure(text=self._t("rw_no_web_url"))
+            self.app._mark_idle(self.lbl_status, self._t("rw_no_web_url"))
             return
         try:
             webbrowser.open(url, new=2)
         except Exception as e:
-            self.lbl_status.configure(
-                text=self._t("rw_error").format(error=str(e)))
+            self.app._mark_idle(
+                self.lbl_status, self._t("rw_error").format(error=str(e)))
 
     # ------------------------------------------------------------------
     # 右键菜单 → Mark / Unmark MR
@@ -724,15 +727,17 @@ class ReviewWorklistTab:
                 msg_key = "rw_unmarked"
         except Exception as e:
             self.parent.after(
-                0, self.lbl_status.configure,
-                {"text": self._t("rw_error").format(error=str(e))},
+                0, lambda: self.app._mark_idle(
+                    self.lbl_status,
+                    self._t("rw_error").format(error=str(e))),
             )
             return
         self.parent.after(0, self._after_mark, n, mr_iid, msg_key)
 
     def _after_mark(self, n, mr_iid, msg_key):
-        self.lbl_status.configure(
-            text=self._t(msg_key).format(n=n, mr=mr_iid or "—"),
+        self.app._mark_idle(
+            self.lbl_status,
+            self._t(msg_key).format(n=n, mr=mr_iid or "—"),
         )
         # 重新加载——MR 可能因 fully_reviewed 被默认隐藏，要立即体现。
         self._reload()
@@ -747,7 +752,7 @@ class ReviewWorklistTab:
             return
         terms = item.get("unregistered_terms") or []
         if not terms:
-            self.lbl_status.configure(text=self._t("rw_no_terms"))
+            self.app._mark_idle(self.lbl_status, self._t("rw_no_terms"))
             return
         try:
             self.parent.clipboard_clear()
@@ -756,11 +761,12 @@ class ReviewWorklistTab:
             # clipboard_append 否则会被关 GUI 时丢掉。
             self.parent.update_idletasks()
         except Exception as e:
-            self.lbl_status.configure(
-                text=self._t("rw_error").format(error=str(e)))
+            self.app._mark_idle(
+                self.lbl_status, self._t("rw_error").format(error=str(e)))
             return
-        self.lbl_status.configure(
-            text=self._t("rw_copied_terms").format(n=len(terms)),
+        self.app._mark_idle(
+            self.lbl_status,
+            self._t("rw_copied_terms").format(n=len(terms)),
         )
 
     # ------------------------------------------------------------------

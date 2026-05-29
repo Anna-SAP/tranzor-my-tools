@@ -277,8 +277,9 @@ class ScanTasksTab:
 
         self.scan_loading_overlay = tk.Label(
             tree_frame, text="",
-            font=(FONT_FAMILY, 15),
-            fg="#9aa0b0", bg=self.app.BG, anchor="center")
+            # 等待指示：亮金加粗，醒目告知"正在加载"，免得用户以为卡死。
+            font=(FONT_FAMILY, 15, "bold"),
+            fg="#fbbf24", bg=self.app.BG, anchor="center")
 
         # ── Right sidebar: stats ──
         self._build_scan_sidebar(right)

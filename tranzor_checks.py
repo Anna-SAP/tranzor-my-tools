@@ -689,11 +689,21 @@ def _sync_mr_tasks(
             status="completed", limit=page_size, offset=offset)
         if not batch:
             break
+        # 后端 /tasks 按 created_at DESC（最新在前）返回。一旦本页出现
+        # 早于 since_iso 的任务，本页剩余 + 后续所有页都更旧，没必要再
+        # 翻——直接收尾。否则每次增量同步都会把上千条历史任务全翻一遍
+        # 才停（offset+page_size>=total），让"同步并刷新"无谓地慢上几十
+        # 个列表往返。created 为空的任务视为"未知时间"按在窗口内处理，
+        # 不触发提前结束。
+        reached_window_end = False
         for t in batch:
             created = t.get("created_at") or ""
             if since_iso and created and created < since_iso:
-                continue
+                reached_window_end = True
+                break
             all_tasks.append(t)
+        if reached_window_end:
+            break
         if offset + page_size >= total:
             break
         offset += page_size
@@ -801,11 +811,17 @@ def _sync_scan_tasks(
             break
         if not batch:
             break
+        # 同 _sync_mr_tasks：scan 端点也按 created_at DESC 返回，越过
+        # since_iso 即可停止翻页（见那里的详细说明）。
+        reached_window_end = False
         for t in batch:
             created = t.get("created_at") or ""
             if since_iso and created and created < since_iso:
-                continue
+                reached_window_end = True
+                break
             all_tasks.append(t)
+        if reached_window_end:
+            break
         if offset + page_size >= total:
             break
         offset += page_size

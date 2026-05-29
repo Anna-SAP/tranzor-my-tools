@@ -687,8 +687,9 @@ class TranzorChecksTab:
             summary = tc.get_summary()
             options = tc.get_filter_options()
         except Exception as e:
-            self.lbl_status.configure(
-                text=t("tc_status_failed").format(error=str(e)[:60]))
+            self.app._mark_idle(
+                self.lbl_status,
+                t("tc_status_failed").format(error=str(e)[:60]))
             return
 
         total_tasks = summary["total_tasks"]
@@ -759,8 +760,9 @@ class TranzorChecksTab:
                 task_id=tid or None,
             )
         except Exception as e:
-            self.lbl_status.configure(
-                text=t("tc_status_failed").format(error=str(e)[:60]))
+            self.app._mark_idle(
+                self.lbl_status,
+                t("tc_status_failed").format(error=str(e)[:60]))
             return
         self._agg_data = data
         self._render_agg_table()
@@ -826,7 +828,7 @@ class TranzorChecksTab:
         t = self._t
         if not rows:
             # 空表友好提示：在 status 行而不是吃掉整张表
-            self.lbl_status.configure(text=t("tc_agg_empty"))
+            self.app._mark_idle(self.lbl_status, t("tc_agg_empty"))
             return
         for r in rows:
             src_kinds = (r.get("source_kinds") or "").split(",")
@@ -908,8 +910,9 @@ class TranzorChecksTab:
                 limit=500,
             )
         except Exception as e:
-            self.lbl_status.configure(
-                text=self._t("tc_status_failed").format(error=str(e)[:60]))
+            self.app._mark_idle(
+                self.lbl_status,
+                self._t("tc_status_failed").format(error=str(e)[:60]))
             return
         self._issues_data = issues
         self.lbl_detail.configure(
@@ -1041,13 +1044,15 @@ class TranzorChecksTab:
         try:
             summary = tc.get_task_summary(tid)
         except Exception as e:
-            self.lbl_status.configure(
-                text=self._t("tc_status_failed").format(error=str(e)[:60]))
+            self.app._mark_idle(
+                self.lbl_status,
+                self._t("tc_status_failed").format(error=str(e)[:60]))
             return
         if summary is None:
             # 本地缓存没这个 task —— 告诉用户去 Sync
-            self.lbl_status.configure(
-                text=self._t("tc_task_not_found").format(tid=tid[:8]))
+            self.app._mark_idle(
+                self.lbl_status,
+                self._t("tc_task_not_found").format(tid=tid[:8]))
             return
         TaskSummaryDialog(self.parent, self.app, summary)
 
@@ -1128,8 +1133,9 @@ class TranzorChecksTab:
             import webbrowser
             webbrowser.open(url)
         except Exception as e:
-            self.lbl_status.configure(
-                text=self._t("tc_status_failed").format(error=str(e)[:60]))
+            self.app._mark_idle(
+                self.lbl_status,
+                self._t("tc_status_failed").format(error=str(e)[:60]))
 
     # ------------------------------------------------------------------
     # Sync
@@ -1150,8 +1156,9 @@ class TranzorChecksTab:
             return
         self._cancel_event.clear()
         self._set_sync_buttons(running=True)
-        self.lbl_status.configure(
-            text=self._t("tc_status_syncing").format(
+        self.app._mark_busy(
+            self.lbl_status,
+            self._t("tc_status_syncing").format(
                 stage="init", cur=0, total=0))
         self._sync_thread = threading.Thread(
             target=self._run_sync, args=(full,), daemon=True)
@@ -1194,8 +1201,9 @@ class TranzorChecksTab:
         if self._reclassify_thread and self._reclassify_thread.is_alive():
             return
         self._set_sync_buttons(running=True)
-        self.lbl_status.configure(
-            text=self._t("tc_reclassify_running").format(cur=0, total=0))
+        self.app._mark_busy(
+            self.lbl_status,
+            self._t("tc_reclassify_running").format(cur=0, total=0))
         self._reclassify_thread = threading.Thread(
             target=self._run_reclassify, daemon=True)
         self._reclassify_thread.start()
@@ -1206,16 +1214,19 @@ class TranzorChecksTab:
             def progress(stage, cur, total, **kw):
                 self.parent.after(
                     0,
-                    lambda c=cur, tt=total: self.lbl_status.configure(
-                        text=t("tc_reclassify_running").format(cur=c, total=tt)))
+                    lambda c=cur, tt=total: self.app._mark_busy(
+                        self.lbl_status,
+                        t("tc_reclassify_running").format(cur=c, total=tt)))
             result = tc.reclassify_existing_issues(progress_callback=progress)
-            self.parent.after(0, lambda: self.lbl_status.configure(
-                text=t("tc_reclassify_done").format(
+            self.parent.after(0, lambda: self.app._mark_idle(
+                self.lbl_status,
+                t("tc_reclassify_done").format(
                     updated=result.get("updated", 0))))
         except Exception as e:
             err = str(e)[:80]
-            self.parent.after(0, lambda: self.lbl_status.configure(
-                text=t("tc_status_failed").format(error=err)))
+            self.parent.after(0, lambda: self.app._mark_idle(
+                self.lbl_status,
+                t("tc_status_failed").format(error=err)))
         finally:
             self.parent.after(0, lambda: self._set_sync_buttons(running=False))
             # 让聚合表立刻反映新分类结果
@@ -1226,8 +1237,9 @@ class TranzorChecksTab:
             def progress(stage, cur, total, **kw):
                 self.parent.after(
                     0,
-                    lambda s=stage, c=cur, tt=total: self.lbl_status.configure(
-                        text=self._t("tc_status_syncing").format(
+                    lambda s=stage, c=cur, tt=total: self.app._mark_busy(
+                        self.lbl_status,
+                        self._t("tc_status_syncing").format(
                             stage=s, cur=c, total=tt)))
 
             if full:
@@ -1240,8 +1252,8 @@ class TranzorChecksTab:
                     cancel_event=self._cancel_event)
 
             if self._cancel_event.is_set():
-                self.parent.after(0, lambda: self.lbl_status.configure(
-                    text=self._t("tc_status_cancelled")))
+                self.parent.after(0, lambda: self.app._mark_idle(
+                    self.lbl_status, self._t("tc_status_cancelled")))
             else:
                 msg = self._t("tc_status_done").format(
                     mr_t=result.get("mr", {}).get("tasks_seen", 0),
@@ -1251,11 +1263,13 @@ class TranzorChecksTab:
                     file_t=result.get("file", {}).get("tasks_seen", 0),
                     file_i=result.get("file", {}).get("issues_inserted", 0),
                 )
-                self.parent.after(0, lambda: self.lbl_status.configure(text=msg))
+                self.parent.after(0, lambda: self.app._mark_idle(
+                    self.lbl_status, msg))
         except Exception as e:
             err = str(e)[:80]
-            self.parent.after(0, lambda: self.lbl_status.configure(
-                text=self._t("tc_status_failed").format(error=err)))
+            self.parent.after(0, lambda: self.app._mark_idle(
+                self.lbl_status,
+                self._t("tc_status_failed").format(error=err)))
         finally:
             self.parent.after(0, lambda: self._set_sync_buttons(running=False))
             self.parent.after(100, self._refresh_from_cache)
