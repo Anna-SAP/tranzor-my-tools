@@ -59,11 +59,29 @@ class ComputeMergeUrgencyTests(unittest.TestCase):
         score, tier = self._call(state="locked")
         self.assertEqual((score, tier), (0, "grey"))
 
-    def test_unknown_state_is_grey(self):
-        # GitLab fetch failed → state=None → must NOT bubble up as a
-        # high-urgency red row. Safer to hide than mislead.
+    def test_unknown_state_uses_unknown_tier_not_grey(self):
+        # GitLab fetch never ran (old sync / no token) → state=None
+        # MUST still surface in the Worklist (otherwise the entire
+        # default view goes blank for users who haven't re-synced yet).
+        # The tier is "unknown" so the GUI can paint it distinctly
+        # and hint "run Sync" without hiding the row.
         score, tier = self._call(state=None)
-        self.assertEqual((score, tier), (0, "grey"))
+        self.assertEqual(tier, "unknown")
+        # The score itself still reflects every other signal — we
+        # only stripped the tier classification.
+        self.assertGreater(score, 0)
+
+    def test_unknown_state_still_grey_when_skip_translate_label(self):
+        # Skip-translate beats unknown — explicit "don't review" wins
+        # over "don't know yet".
+        _, tier = self._call(state=None, labels=["skip-translate"])
+        self.assertEqual(tier, "grey")
+
+    def test_unknown_state_still_grey_when_merged(self):
+        # Sanity: even unknown can become grey if upstream tells us
+        # the MR is already merged.
+        _, tier = self._call(state="merged")
+        self.assertEqual(tier, "grey")
 
     # ---- skip-translate label is sticky ----
     def test_skip_translate_label_forces_grey(self):
@@ -268,6 +286,27 @@ class GetWorklistItemsTests(unittest.TestCase):
             items = tc.get_worklist_items(now_utc=NOW)
             self.assertEqual(items[0]["task_id"], "t-red")
             self.assertEqual(items[1]["task_id"], "t-amber")
+
+    def test_unknown_state_mr_visible_in_default_view(self):
+        # This is the regression for "Worklist blank after install":
+        # 7848 cached MR tasks had mr_state=NULL because the GitLab
+        # state columns are PR-A additions, so the old sync never
+        # populated them. The default view MUST show them so Lillian
+        # sees something even before she re-syncs.
+        with _IsolatedDb():
+            tc.init_db()
+            # Seed an MR without any GitLab state at all — the
+            # seeder helper passes None defaults.
+            _seed_mr_task(
+                task_id="t-stale", mr_iid=42,
+                state=None, upvotes=None, updated_at=None,
+                issues={"zh-CN": 2},
+            )
+            items = tc.get_worklist_items(now_utc=NOW)
+            self.assertEqual(
+                [d["task_id"] for d in items], ["t-stale"],
+            )
+            self.assertEqual(items[0]["merge_tier"], "unknown")
 
     def test_skip_translate_label_filtered_when_include_grey_false(self):
         with _IsolatedDb():

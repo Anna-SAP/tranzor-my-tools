@@ -1399,24 +1399,35 @@ def compute_merge_urgency(
     输出 ``(score, tier)``：
 
     - ``score`` ∈ ``[0, 10]``：UI 排序键，越高越紧迫。
-    - ``tier`` ∈ ``{"red", "amber", "green", "grey"}``：UI 显示用桶，
-      默认阈值 ``score ≥ 8 → red``、``≥ 4 → amber``、``≥ 0 → green``，
-      被 skip-translate / merged 显式压成 grey。
+    - ``tier`` ∈ ``{"red", "amber", "green", "unknown", "grey"}``：UI
+      显示用桶。
+      * ``red``：score ≥ 8，state 明确 ``opened``。即将合并。
+      * ``amber``：score ∈ [4, 7]，state 明确 ``opened``。今日要看。
+      * ``green``：score < 4，state 明确 ``opened``。可慢慢看。
+      * ``unknown``：state 缺失（None / 空 / 旧 sync 没拉过 GitLab）。
+        仍按公式打分参与排序，但 UI 加灰底警示——告诉 Lillian 这条
+        的紧迫度是"基于不完整数据估算的"，建议 Sync 一次再看。
+      * ``grey``：state ∈ {merged, closed, locked} 或带 skip-translate
+        标签——彻底无需 review，默认隐藏。
 
     估算逻辑（保守、可解释、不依赖未实现的字段）：
 
-    1. **state**：``opened`` 才有意义；``merged`` / ``closed`` / ``locked``
-       的 MR 已经定局，``score = 0`` ``tier = "grey"``。
-    2. **draft**：草稿 MR 仍可能 merge 但概率极低，``-5``。
-    3. **upvotes (👍)**：approval 的近似信号，每个 +1.5、上限 +4.5。
-    4. **recency**：``updated_at`` 越新越紧迫——
+    1. **state 终态**：``merged`` / ``closed`` / ``locked`` 已经定局，
+       ``(0, "grey")``。
+    2. **skip-translate label**：显式跳过，``(0, "grey")``。
+    3. **draft**：草稿 MR 仍可能 merge 但概率极低，``-5``。
+    4. **upvotes (👍)**：approval 的近似信号，每个 +1.5、上限 +4.5。
+    5. **recency**：``updated_at`` 越新越紧迫——
        ``≤ 1h → +3``、``≤ 6h → +2``、``≤ 24h → +1``、``> 7d → -1``。
        updated_at 缺失（GitLab 没拉到）当作"未知"，不加不减。
-    5. **labels**：含 ``skip-translate`` → ``score = 0`` ``tier = "grey"``。
 
-    基线 ``state=opened`` 给 +5，让"任何 open MR"都至少落 amber 以上的
-    起点，再让上面几条规则拨高/拨低。这种"先有底再加减"的实现比
-    "从 0 累加" 更鲁棒——单字段缺失时不会假性归零。
+    基线 ``+5``，让"任何 open MR"都至少落 amber 以上的起点，再让上面
+    几条规则拨高/拨低。这种"先有底再加减"的实现比"从 0 累加" 更鲁棒
+    ——单字段缺失时不会假性归零。
+
+    历史 note：v0.1 把 state=None 也压 grey 当"安全保守"，但实测下用
+    户经常在 GitLab token 缺失 / 旧 sync 字段未填的情况下打开 Worklist，
+    结果整屏空白；改成 ``unknown`` 显示更符合"我要看到东西"的预期。
 
     ``now_utc`` 可显式注入，便于单测。生产路径默认 ``datetime.now``。
     """
@@ -1430,11 +1441,9 @@ def compute_merge_urgency(
     if _SKIP_TRANSLATE_LABEL in lbls:
         return (0, "grey")
 
-    # 未知 state → 不参与排序。GitLab 没拉到（``state`` 是 None / "" /
-    # 任何 ``opened`` 之外的值）时，宁可压灰也别假装高紧迫度——错把
-    # 已 merged 的当 open 是误导，把 open 的临时压灰下次 sync 就会复原。
-    if s != "opened":
-        return (0, "grey")
+    # state 是否明确 ``opened``。其他值（None / "" / "未知") 走打分但
+    # tier 单独标记为 unknown。
+    state_known_opened = (s == "opened")
 
     score = 5.0
     if draft:
@@ -1468,7 +1477,12 @@ def compute_merge_urgency(
             pass
 
     score_i = max(0, min(10, int(round(score))))
-    if score_i >= 8:
+    if not state_known_opened:
+        # 数据不全 → 强制 unknown，UI 单独标色，给 Lillian 一个"Sync
+        # 一下再看"的 hint。score 仍参与排序，让她至少能看到有 issue
+        # 的 MR 排前面。
+        tier = "unknown"
+    elif score_i >= 8:
         tier = "red"
     elif score_i >= 4:
         tier = "amber"
