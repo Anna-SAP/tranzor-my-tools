@@ -1591,16 +1591,47 @@ class ExportApp:
         self.lbl_footer.configure(text=self._t("footer"))
         self.btn_lang.configure(text=self._t("lang_toggle"))
 
-        # Helper: schedule a tab's refresh_text on the next idle tick so it
-        # cannot stall the current frame. Wraps the call in try/except so a
-        # single broken tab can't take the whole batch down.
-        def _async_refresh(tab):
-            def _runner():
-                try:
-                    tab.refresh_text()
-                except Exception as exc:  # pragma: no cover
-                    print(f"[refresh_text] {tab!r} failed: {exc!r}")
-            self.root.after(0, _runner)
+        # PR-L: LAZY per-tab refresh — the real fix for the ~57s
+        # "(未响应)" gap between window paint and first interactivity
+        # (see startup.log: first_idle_in_mainloop +57085ms).
+        #
+        # Each non-visible tab's refresh_text() runs SQLite queries +
+        # rebuilds treeviews (OPUS / Checks / TM-Insight / Term-Watchtower
+        # etc.). PR #89 deferred them to after(0), which unblocked the
+        # FIRST FRAME but left all ~11 of them queued ahead of first idle —
+        # so the window showed but couldn't take input for tens of seconds.
+        #
+        # Now: only the CURRENTLY VISIBLE tab refreshes at startup. Every
+        # other tab is parked in ``_pending_tab_refresh`` and refreshed
+        # once, the first time the user switches to it (handled in
+        # ``_on_tab_changed`` → ``_lazy_refresh_current_tab``). At startup
+        # the visible tab is File Translation (index 0), whose text was
+        # already set synchronously in the body above — so the startup
+        # after-queue refresh cost drops to ~zero.
+        try:
+            cur_idx = self.notebook.index(self.notebook.select())
+        except Exception:
+            cur_idx = 0
+        self._tab_obj_by_index = {}
+        if not hasattr(self, "_pending_tab_refresh"):
+            self._pending_tab_refresh = set()
+
+        def _register_tab_refresh(tab, idx):
+            if tab is None:
+                return
+            self._tab_obj_by_index[idx] = tab
+            if idx == cur_idx:
+                self._pending_tab_refresh.discard(tab)
+
+                def _runner():
+                    try:
+                        tab.refresh_text()
+                    except Exception as exc:  # pragma: no cover
+                        print(f"[refresh_text] {tab!r} failed: {exc!r}")
+                self.root.after(0, _runner)
+            else:
+                # Deferred until first switch to this tab.
+                self._pending_tab_refresh.add(tab)
 
         # Notebook tab titles (synchronous — these are cheap, single calls).
         self.notebook.tab(0, text=self._t("tab_file_translation"))
@@ -1609,7 +1640,7 @@ class ExportApp:
         if self.ft_tab is not None:
             try:
                 self.notebook.tab(3, text=self._t("tab_full_translations"))
-                _async_refresh(self.ft_tab)
+                _register_tab_refresh(self.ft_tab, 3)
             except Exception:
                 pass
         if self.hr_tab is not None:
@@ -1617,43 +1648,43 @@ class ExportApp:
                 # HR tab index depends on whether Full Translations tab exists
                 hr_idx = 4 if self.ft_tab is not None else 3
                 self.notebook.tab(hr_idx, text=self._t("tab_human_revisions"))
-                _async_refresh(self.hr_tab)
+                _register_tab_refresh(self.hr_tab, hr_idx)
             except Exception:
                 pass
         if self.st_tab is not None and self._st_tab_index is not None:
             try:
                 self.notebook.tab(self._st_tab_index, text=self._t("tab_scan_tasks"))
-                _async_refresh(self.st_tab)
+                _register_tab_refresh(self.st_tab, self._st_tab_index)
             except Exception:
                 pass
         if self.tw_tab is not None and self._tw_tab_index is not None:
             try:
                 self.notebook.tab(self._tw_tab_index, text=self._t("tab_term_watchtower"))
-                _async_refresh(self.tw_tab)
+                _register_tab_refresh(self.tw_tab, self._tw_tab_index)
             except Exception:
                 pass
         if self.tci_tab is not None and self._tci_tab_index is not None:
             try:
                 self.notebook.tab(self._tci_tab_index, text=self._t("tab_tm_context_insight"))
-                _async_refresh(self.tci_tab)
+                _register_tab_refresh(self.tci_tab, self._tci_tab_index)
             except Exception:
                 pass
         if self.opus_tab is not None and self._opus_tab_index is not None:
             try:
                 self.notebook.tab(self._opus_tab_index, text=self._t("tab_opus_monitor"))
-                _async_refresh(self.opus_tab)
+                _register_tab_refresh(self.opus_tab, self._opus_tab_index)
             except Exception:
                 pass
         if self.tc_tab is not None and self._tc_tab_index is not None:
             try:
                 self.notebook.tab(self._tc_tab_index, text=self._t("tab_tranzor_checks"))
-                _async_refresh(self.tc_tab)
+                _register_tab_refresh(self.tc_tab, self._tc_tab_index)
             except Exception:
                 pass
         if self.rw_tab is not None and self._rw_tab_index is not None:
             try:
                 self.notebook.tab(self._rw_tab_index, text=self._t("tab_review_worklist"))
-                _async_refresh(self.rw_tab)
+                _register_tab_refresh(self.rw_tab, self._rw_tab_index)
             except Exception:
                 pass
 
@@ -1674,10 +1705,10 @@ class ExportApp:
         self.task_tree.heading("creator", text=self._t("summary_col_creator"))
         self._update_summary_pager()
 
-        # MR Pipeline & Quality Overview tab texts — also async for the same
-        # reason: their refresh_text re-renders sidebars / project lists.
-        _async_refresh(self.mr_tab)
-        _async_refresh(self.qa_tab)
+        # MR Pipeline (1) & Quality Overview (2) — same lazy treatment;
+        # their refresh_text re-renders sidebars / project lists.
+        _register_tab_refresh(self.mr_tab, 1)
+        _register_tab_refresh(self.qa_tab, 2)
 
         # Refresh status label only if not running
         if not self.running:
@@ -1885,6 +1916,23 @@ class ExportApp:
         self.summary_page += 1
         self._render_summary_page()
 
+    def _lazy_refresh_current_tab(self):
+        """PR-L: refresh the now-visible tab's i18n text if it was parked
+        at startup / last language toggle. Each tab refreshes at most once
+        per park; switching back later is free."""
+        try:
+            cur = self.notebook.index(self.notebook.select())
+        except Exception:
+            return
+        tab = getattr(self, "_tab_obj_by_index", {}).get(cur)
+        pending = getattr(self, "_pending_tab_refresh", None)
+        if tab is not None and pending is not None and tab in pending:
+            pending.discard(tab)
+            try:
+                tab.refresh_text()
+            except Exception as exc:  # pragma: no cover
+                print(f"[lazy refresh_text] {tab!r} failed: {exc!r}")
+
     def _on_tab_changed(self, event):
         """Lazy-load data when MR Pipeline / Quality Overview / Full Translations
         tab is first selected.
@@ -1894,6 +1942,9 @@ class ExportApp:
         is interactive within ~1–2s. Heavy translation data is fetched only
         on Export click.
         """
+        # PR-L: first, flush any deferred i18n text refresh for this tab so
+        # the labels are correct before its data loads below.
+        self._lazy_refresh_current_tab()
         tab_idx = self.notebook.index(self.notebook.select())
         if tab_idx == 1 and not self._mr_tab_initialized:
             self._mr_tab_initialized = True
