@@ -1239,6 +1239,7 @@ class ExportApp:
         # 按项目分布；首屏纯本地读，不依赖网络。
         self.opus_tab = None
         self._opus_tab_index = None
+        self._opus_tab_initialized = False  # PR-M: lazy first-show render
         if _opus_tab_mod is not None:
             try:
                 tab_opus = ttk.Frame(self.notebook, style="App.TFrame")
@@ -1989,6 +1990,18 @@ class ExportApp:
                     self.tci_tab.on_first_show()
                 except Exception:
                     pass
+            elif (self.opus_tab is not None
+                  and self._opus_tab_index is not None
+                  and tab_idx == self._opus_tab_index
+                  and not self._opus_tab_initialized):
+                # PR-M: OPUS first-screen render (SQLite -> treeviews,
+                # ~11s) was the dominant residual startup cost. Deferred
+                # to first show so the app is interactive immediately.
+                self._opus_tab_initialized = True
+                try:
+                    self.opus_tab.on_first_show()
+                except Exception:
+                    pass
 
     # ── Summary panel data loading ──
     def _load_summary_data(self):
@@ -2026,6 +2039,7 @@ class ExportApp:
 
     def _on_summary_loaded(self, total, all_tasks):
         """Callback when summary data loads successfully."""
+        _boot_mark("summary_loaded")
         self.summary_loading = False
         self.btn_refresh.configure(state="normal")
         self.lbl_summary_status.configure(text="", foreground="#666")
@@ -2446,6 +2460,7 @@ def main():
             root.deiconify()
         except Exception:
             pass
+    _boot_mark("deiconify_done")
     # Don't force a synchronous root.update() here — when there are 1000+
     # widgets across 10 tabs, that single call can take 15-20 s while Tk
     # paints everything. Instead, let mainloop draw the window naturally
