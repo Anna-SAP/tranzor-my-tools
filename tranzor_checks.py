@@ -107,10 +107,25 @@ CREATE TABLE IF NOT EXISTS task_checks (
     mr_labels        TEXT,                        -- GitLab MR labels (JSON list);
                                                   -- NULL = 未尝试拉过；"" / "[]" = 已尝试但无 labels；
                                                   -- 用于识别 SKIP_TRANSLATE_LABEL（默认 ``skip-translate``）
+    -- Review Worklist 用的 GitLab MR 状态字段（PR-A 新增）：
+    -- 都是 nullable，旧任务 / 没 GitLab token 时保持 NULL；
+    -- get_worklist_items 把 NULL 当 "未知" 处理而不是 0/false。
+    mr_state         TEXT,                        -- "opened" | "merged" | "closed" | "locked"
+    mr_merge_status  TEXT,                        -- "can_be_merged" | "cannot_be_merged" | "unchecked"
+    mr_draft         INTEGER,                     -- 1/0 — Draft / Work-in-Progress
+    mr_upvotes       INTEGER,                     -- 👍 数；近似 approvals 数
+    mr_downvotes     INTEGER,
+    mr_updated_at    TEXT,                        -- GitLab 侧 MR 最近更新时间 (ISO)；
+                                                  -- 用作"最近活动"代理，估算 merge 紧迫度
+    mr_web_url       TEXT,                        -- 一键跳转 Tranzor / GitLab 的 URL
     PRIMARY KEY (task_id, source_kind)
 );
 CREATE INDEX IF NOT EXISTS ix_task_checks_kind    ON task_checks(source_kind);
 CREATE INDEX IF NOT EXISTS ix_task_checks_created ON task_checks(task_created_at);
+-- ``ix_task_checks_mr_state`` 不在这里创建 —— 它依赖 PR-A 才加进来的
+-- ``mr_state`` 列。fresh-DB 路径下 CREATE TABLE 已经带了该列，但升级路径
+-- 下 executescript 跑在 ALTER 之前，会找不到列。统一把"依赖新列的索引"
+-- 都放到 init_db 的 ALTER 段之后，详见下方注释。
 
 CREATE TABLE IF NOT EXISTS check_issues (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -145,13 +160,30 @@ def init_db(db_path: str | None = None) -> None:
     """创建 schema（幂等 / 升级安全）。"""
     with _connect(db_path) as conn:
         conn.executescript(_SCHEMA)
-        # 升级路径：旧 DB 没有 ``mr_labels`` 列。SQLite 不支持 IF NOT
-        # EXISTS 的 ADD COLUMN，所以靠 except 兜底——已存在时 OperationalError
-        # 是预期的，不打印、不向上抛。
-        try:
-            conn.execute("ALTER TABLE task_checks ADD COLUMN mr_labels TEXT")
-        except sqlite3.OperationalError:
-            pass
+        # 升级路径：SQLite 不支持 IF NOT EXISTS 的 ADD COLUMN，所以每列
+        # 各试一次，OperationalError 是"列已存在"的预期信号，吞掉即可。
+        # 顺序：先有 mr_labels（v0.2 引入），再有 PR-A 加的 GitLab MR 状态
+        # 字段。新列追加在表尾不影响既有查询。
+        for ddl in (
+            "ALTER TABLE task_checks ADD COLUMN mr_labels TEXT",
+            "ALTER TABLE task_checks ADD COLUMN mr_state TEXT",
+            "ALTER TABLE task_checks ADD COLUMN mr_merge_status TEXT",
+            "ALTER TABLE task_checks ADD COLUMN mr_draft INTEGER",
+            "ALTER TABLE task_checks ADD COLUMN mr_upvotes INTEGER",
+            "ALTER TABLE task_checks ADD COLUMN mr_downvotes INTEGER",
+            "ALTER TABLE task_checks ADD COLUMN mr_updated_at TEXT",
+            "ALTER TABLE task_checks ADD COLUMN mr_web_url TEXT",
+        ):
+            try:
+                conn.execute(ddl)
+            except sqlite3.OperationalError:
+                pass
+        # 依赖新列的索引：必须在 ALTER 之后创建，否则升级路径下找不到列。
+        # ``IF NOT EXISTS`` 让 fresh-DB 路径也安全地走这条逻辑。
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS ix_task_checks_mr_state "
+            "ON task_checks(mr_state)"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -360,6 +392,7 @@ def _persist_task_results(
     source_kind: str,
     translations: list[dict],
     mr_labels: list[str] | None = None,
+    mr_state_info: dict | None = None,
 ) -> tuple[int, int]:
     """把一个 task 的 results 持久化。
 
@@ -397,13 +430,29 @@ def _persist_task_results(
         else json.dumps(list(mr_labels), ensure_ascii=False)
     )
 
+    # PR-A: GitLab MR 状态字段。整个 mr_state_info=None 时全部落 NULL，
+    # ON CONFLICT 段的 COALESCE 保护已有值，"这轮拉不到"绝不破坏上轮成果。
+    info = mr_state_info or {}
+    mr_state = info.get("state")
+    mr_merge_status = info.get("merge_status")
+    mr_draft = info.get("draft")
+    mr_draft_int = (
+        None if mr_draft is None else (1 if bool(mr_draft) else 0)
+    )
+    mr_upvotes = _safe_int(info.get("upvotes"))
+    mr_downvotes = _safe_int(info.get("downvotes"))
+    mr_updated_at = info.get("updated_at")
+    mr_web_url = info.get("web_url")
+
     conn.execute(
         """
         INSERT INTO task_checks(
             task_id, source_kind, project_id, project_name, mr_iid, task_name,
             task_status, final_score_avg, total_issues, total_rows,
-            task_created_at, fetched_at, mr_labels
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            task_created_at, fetched_at, mr_labels,
+            mr_state, mr_merge_status, mr_draft, mr_upvotes, mr_downvotes,
+            mr_updated_at, mr_web_url
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(task_id, source_kind) DO UPDATE SET
             project_id      = excluded.project_id,
             project_name    = excluded.project_name,
@@ -416,7 +465,14 @@ def _persist_task_results(
             task_created_at = excluded.task_created_at,
             fetched_at      = excluded.fetched_at,
             -- 只在新值非 NULL 时覆盖；这样"拉 labels 失败"不会冲掉上一次成功值
-            mr_labels       = COALESCE(excluded.mr_labels, task_checks.mr_labels)
+            mr_labels       = COALESCE(excluded.mr_labels, task_checks.mr_labels),
+            mr_state        = COALESCE(excluded.mr_state,        task_checks.mr_state),
+            mr_merge_status = COALESCE(excluded.mr_merge_status, task_checks.mr_merge_status),
+            mr_draft        = COALESCE(excluded.mr_draft,        task_checks.mr_draft),
+            mr_upvotes      = COALESCE(excluded.mr_upvotes,      task_checks.mr_upvotes),
+            mr_downvotes    = COALESCE(excluded.mr_downvotes,    task_checks.mr_downvotes),
+            mr_updated_at   = COALESCE(excluded.mr_updated_at,   task_checks.mr_updated_at),
+            mr_web_url      = COALESCE(excluded.mr_web_url,      task_checks.mr_web_url)
         """,
         (
             task_id, source_kind,
@@ -431,6 +487,8 @@ def _persist_task_results(
             task.get("created_at") or "",
             now_iso,
             mr_labels_json,
+            mr_state, mr_merge_status, mr_draft_int,
+            mr_upvotes, mr_downvotes, mr_updated_at, mr_web_url,
         ),
     )
 
@@ -479,15 +537,23 @@ def _drain_results_into_db(
     log_stage: str,
     cancel_event: threading.Event | None,
     stats: dict,
-    mr_label_fetcher=None,
+    mr_info_fetcher=None,
 ) -> None:
     """HTTP 走线程池、SQLite 写入留在主线程的成熟模式（详见 opus_id_monitor）。
 
-    ``mr_label_fetcher`` (optional): ``Callable[[dict], list[str] | None]``。
+    ``mr_info_fetcher`` (optional):
+        ``Callable[[dict], tuple[list[str] | None, dict | None]]``。
     每个 task fetch translations 完成后，在同一个 worker 上紧接着调一次，
-    返回 GitLab MR labels。失败返回 ``None`` 让 ``_persist_task_results``
-    保留旧值（``COALESCE`` 不冲）；返回 ``[]`` 显式表示"已尝试拉过、确实
-    没 labels"。仅 MR sync 路径传入，Scan / Legacy 留空。
+    返回 ``(labels, state_info)``：
+
+    - ``labels`` — GitLab MR labels (``list[str]`` / ``None``)。``None`` 让
+      :func:`_persist_task_results` 保留旧值（``COALESCE`` 不冲）；``[]``
+      显式表示"已尝试拉过、确实没 labels"。
+    - ``state_info`` — GitLab MR 状态字典 (PR-A 引入)，键：``state`` /
+      ``merge_status`` / ``draft`` / ``upvotes`` / ``downvotes`` /
+      ``updated_at`` / ``web_url``。``None`` 同样走 COALESCE 保留旧值。
+
+    仅 MR sync 路径传入，Scan / Legacy 留空。
     """
     if not tasks:
         return
@@ -497,20 +563,20 @@ def _drain_results_into_db(
 
     def _worker(task):
         if cancel_event and cancel_event.is_set():
-            return task, None, None
+            return task, None, None, None
         try:
             translations = fetch_fn(task)
         except Exception as e:
-            return task, e, None
+            return task, e, None, None
         labels = None
-        if mr_label_fetcher is not None:
+        state_info = None
+        if mr_info_fetcher is not None:
             try:
-                labels = mr_label_fetcher(task)
+                labels, state_info = mr_info_fetcher(task)
             except Exception:
-                # labels 是装饰性增量数据：任何拉取失败都吞掉，绝不让 sync
-                # 因为副信息缺失而失败。``None`` → 保留旧值（见 COALESCE）。
-                labels = None
-        return task, translations, labels
+                # 副信息任何拉取失败都吞掉，绝不让 sync 因为它而失败。
+                labels, state_info = None, None
+        return task, translations, labels, state_info
 
     pool = ThreadPoolExecutor(
         max_workers=MAX_FETCH_WORKERS,
@@ -523,7 +589,7 @@ def _drain_results_into_db(
                 break
 
             try:
-                task, results, mr_labels = future.result()
+                task, results, mr_labels, mr_state_info = future.result()
             except Exception as e:
                 log(f"{log_stage}_error", completed, total, error=str(e))
                 continue
@@ -553,6 +619,7 @@ def _drain_results_into_db(
                     source_kind=source_kind,
                     translations=translations,
                     mr_labels=mr_labels,
+                    mr_state_info=mr_state_info,
                 )
                 stats["tasks_seen"] += 1
                 stats["rows_total"] += rows
@@ -604,11 +671,11 @@ def _sync_mr_tasks(
         log("mr_list", len(all_tasks), total)
 
     log("mr_results", 0, len(all_tasks))
-    # MR sync 比 scan/legacy 多做一件事：顺手抓 GitLab MR labels 入库，让
-    # 用户能在 GUI 里一眼识别"哪些 MR 被打了 skip-translate label 而被
-    # Tranzor Platform 跳过翻译"。失败容忍策略由 _drain_results_into_db
-    # 内的 worker 实现：单 MR 拉 labels 失败不影响主翻译数据持久化。
-    mr_label_fetcher = _build_mr_label_fetcher()
+    # MR sync 比 scan/legacy 多做一件事：顺手抓 GitLab MR labels + 状态字段
+    # 入库。PR-A 起 fetcher 同时返回 (labels, state_info)，让 Review
+    # Worklist 能算出 merge 紧迫度。同一个 GitLab MR 详情请求复用 cache，
+    # 不会引入额外 round-trip。
+    mr_info_fetcher = _build_mr_info_fetcher()
     _drain_results_into_db(
         all_tasks,
         fetch_fn=lambda t: mr_api.fetch_mr_results(
@@ -619,22 +686,37 @@ def _sync_mr_tasks(
         log_stage="mr_results",
         cancel_event=cancel_event,
         stats=stats,
-        mr_label_fetcher=mr_label_fetcher,
+        mr_info_fetcher=mr_info_fetcher,
     )
     return stats
 
 
-def _build_mr_label_fetcher():
-    """Wire a fresh GitLab client and return a per-task labels fetcher.
+# GitLab MR 详情里我们会落库的字段。集中在这里方便日后扩展（比如想加
+# pipeline_status / assignees）只改一处。
+_MR_STATE_FIELDS = (
+    "state", "merge_status", "draft", "upvotes", "downvotes",
+    "updated_at", "web_url",
+)
+
+
+def _extract_mr_state(mr: dict) -> dict:
+    """从 GitLab MR 完整字典中只挑我们关心的字段。"""
+    return {k: mr.get(k) for k in _MR_STATE_FIELDS}
+
+
+def _build_mr_info_fetcher():
+    """Wire a fresh GitLab client and return a per-task info fetcher.
 
     Returns ``None`` if GitLab isn't configured (no token) — without auth
     we'd 401 every request and burn the API budget for nothing. In that
-    case the GUI simply won't show skip badges; ``mr_labels`` stays NULL
-    in DB and downstream code treats it as "未知".
+    case Review Worklist degrades gracefully (no merge-risk column data;
+    skip-label badge still won't appear).
 
     The closure captures one ``GitLabClient`` so the in-memory MR cache
     is shared across the whole sync run (rare cross-task MR repeats hit
     cache instead of GitLab).
+
+    Returns a ``Callable[[dict], tuple[list[str] | None, dict | None]]``.
     """
     try:
         import gitlab_client as _gc  # local import: keeps cold start cheap
@@ -652,10 +734,15 @@ def _build_mr_label_fetcher():
         project_id = task.get("project_id") or ""
         if not mr_iid or not project_id:
             # Some MR-pipeline tasks come back without a usable (project, iid)
-            # tuple (e.g. ad-hoc retranslations). Returning None preserves any
-            # previously cached labels via COALESCE in the upsert.
-            return None
-        return client.fetch_mr_labels(project_id, mr_iid)
+            # tuple (e.g. ad-hoc retranslations). Returning (None, None)
+            # preserves any previously cached values via COALESCE upserts.
+            return (None, None)
+        try:
+            mr = client.get_merge_request(project_id, mr_iid)
+        except Exception:
+            return (None, None)
+        labels = [str(x) for x in (mr.get("labels") or []) if x]
+        return (labels, _extract_mr_state(mr))
 
     return _fetch
 
@@ -1234,3 +1321,266 @@ def get_filter_options() -> dict:
             "SELECT DISTINCT source_kind FROM check_issues "
             "ORDER BY source_kind").fetchall()]
     return {"error_types": types, "languages": langs, "source_kinds": kinds}
+
+
+# ---------------------------------------------------------------------------
+# Review Worklist —— Language Lead 每日的唯一入口
+# ---------------------------------------------------------------------------
+# Worklist 把 MR Pipeline 任务按"merge 紧迫度 × 翻译问题数"做加权排序，
+# 替代 Lillian 现在"打开 MR Pipeline → 肉眼挑 → 一个个开"的工作流。
+#
+# 排序公式（详见 compute_merge_urgency / get_worklist_items 文档）：
+#
+#   priority = w_urg·merge_urgency
+#            + w_zh ·has_zh_issue
+#            + w_oth·has_other_issue
+#            - w_rev·already_reviewed   # PR-B 接入；PR-A 阶段恒为 0
+#
+# 中文优先体现在 ``w_zh > w_oth``；项目不参与权重（每个项目都重要，
+# 团队共识）。
+# ---------------------------------------------------------------------------
+
+# 中文 locale —— 计算 has_zh_issue 时按这些前缀匹配 ``target_language``。
+# 用 startswith 比硬编码 ``"zh-CN"`` 更稳：Tranzor 历史上偶尔会传
+# ``zh-Hans-CN`` 这类长格式，统一前缀匹配就 OK 了。
+_CHINESE_LOCALE_PREFIXES = ("zh",)
+
+# 用 fr / de / es 作为次重要语种 —— 与 Lillian 在群里描述的策略一致
+# （中文为主，其次法德西）。其它语种走 "other" 权重。
+_SECONDARY_LOCALE_PREFIXES = ("fr", "de", "es")
+
+# Skip-translate 标签：与 Tranzor Platform 后端的 ``SKIP_TRANSLATE_LABEL``
+# 默认值保持一致。Worklist 会把带它的 MR 一律压到底（urgency = 0）
+# 并以灰色标记，避免占据视觉黄金位。
+_SKIP_TRANSLATE_LABEL = "skip-translate"
+
+
+def compute_merge_urgency(
+    *,
+    state: str | None,
+    merge_status: str | None,
+    draft: int | None,
+    upvotes: int | None,
+    updated_at_iso: str | None,
+    labels: list[str] | None,
+    now_utc: datetime | None = None,
+) -> tuple[int, str]:
+    """Pure function — 算一个 MR 的 merge 紧迫度。
+
+    输出 ``(score, tier)``：
+
+    - ``score`` ∈ ``[0, 10]``：UI 排序键，越高越紧迫。
+    - ``tier`` ∈ ``{"red", "amber", "green", "grey"}``：UI 显示用桶，
+      默认阈值 ``score ≥ 8 → red``、``≥ 4 → amber``、``≥ 0 → green``，
+      被 skip-translate / merged 显式压成 grey。
+
+    估算逻辑（保守、可解释、不依赖未实现的字段）：
+
+    1. **state**：``opened`` 才有意义；``merged`` / ``closed`` / ``locked``
+       的 MR 已经定局，``score = 0`` ``tier = "grey"``。
+    2. **draft**：草稿 MR 仍可能 merge 但概率极低，``-5``。
+    3. **upvotes (👍)**：approval 的近似信号，每个 +1.5、上限 +4.5。
+    4. **recency**：``updated_at`` 越新越紧迫——
+       ``≤ 1h → +3``、``≤ 6h → +2``、``≤ 24h → +1``、``> 7d → -1``。
+       updated_at 缺失（GitLab 没拉到）当作"未知"，不加不减。
+    5. **labels**：含 ``skip-translate`` → ``score = 0`` ``tier = "grey"``。
+
+    基线 ``state=opened`` 给 +5，让"任何 open MR"都至少落 amber 以上的
+    起点，再让上面几条规则拨高/拨低。这种"先有底再加减"的实现比
+    "从 0 累加" 更鲁棒——单字段缺失时不会假性归零。
+
+    ``now_utc`` 可显式注入，便于单测。生产路径默认 ``datetime.now``。
+    """
+    # state 优先：定局的 MR 不参与排序。
+    s = (state or "").lower()
+    if s in ("merged", "closed", "locked"):
+        return (0, "grey")
+
+    # skip-translate 优先：显式跳过的 MR 直接落底，避免霸占 worklist 头部。
+    lbls = [str(x).lower() for x in (labels or [])]
+    if _SKIP_TRANSLATE_LABEL in lbls:
+        return (0, "grey")
+
+    # 未知 state → 不参与排序。GitLab 没拉到（``state`` 是 None / "" /
+    # 任何 ``opened`` 之外的值）时，宁可压灰也别假装高紧迫度——错把
+    # 已 merged 的当 open 是误导，把 open 的临时压灰下次 sync 就会复原。
+    if s != "opened":
+        return (0, "grey")
+
+    score = 5.0
+    if draft:
+        score -= 5
+
+    upv = upvotes if isinstance(upvotes, int) and upvotes > 0 else 0
+    score += min(upv, 3) * 1.5
+
+    # Recency —— 用 updated_at 估算。GitLab MR 的 updated_at 包含 push /
+    # comment / label 等任何变更，足够代表"活跃度"。
+    if updated_at_iso:
+        now = now_utc or datetime.now(timezone.utc)
+        try:
+            # GitLab 返回带 Z 的 ISO 串，python 直接 fromisoformat 不接受 Z
+            # （3.11+ 才支持）。这里手工换 +00:00 保兼容。
+            ts = datetime.fromisoformat(
+                updated_at_iso.replace("Z", "+00:00")
+            )
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            age_h = max(0.0, (now - ts).total_seconds() / 3600.0)
+            if age_h <= 1:
+                score += 3
+            elif age_h <= 6:
+                score += 2
+            elif age_h <= 24:
+                score += 1
+            elif age_h > 24 * 7:
+                score -= 1
+        except (ValueError, TypeError):
+            pass
+
+    score_i = max(0, min(10, int(round(score))))
+    if score_i >= 8:
+        tier = "red"
+    elif score_i >= 4:
+        tier = "amber"
+    else:
+        tier = "green"
+    return (score_i, tier)
+
+
+def _issue_lang_breakdown(conn, task_id: str, source_kind: str) -> tuple[int, int, int]:
+    """返回 (zh_issues, secondary_issues, other_issues)。"""
+    rows = conn.execute(
+        "SELECT target_language, COUNT(*) AS n "
+        "FROM check_issues "
+        "WHERE task_id = ? AND source_kind = ? "
+        "GROUP BY target_language",
+        (task_id, source_kind),
+    ).fetchall()
+    zh = sec = oth = 0
+    for r in rows:
+        lang = (r["target_language"] or "").lower()
+        n = int(r["n"] or 0)
+        if not lang:
+            oth += n
+        elif any(lang.startswith(p) for p in _CHINESE_LOCALE_PREFIXES):
+            zh += n
+        elif any(lang.startswith(p) for p in _SECONDARY_LOCALE_PREFIXES):
+            sec += n
+        else:
+            oth += n
+    return zh, sec, oth
+
+
+def get_worklist_items(
+    *,
+    limit: int = 50,
+    include_grey: bool = False,
+    now_utc: datetime | None = None,
+) -> list[dict]:
+    """Review Worklist 主表的数据源。
+
+    返回按 ``priority`` 降序排列的 MR 列表。每条包含足够 UI 直接渲染的
+    字段：``priority`` / ``tier`` / ``zh_issues`` / ``secondary_issues`` /
+    ``other_issues`` / ``mr_web_url`` 等。
+
+    Args:
+        limit: 上限。默认 50 —— Lillian 一天大概看 8-12 条，50 给她足够
+            的下拉空间但不会一次拉几百条。
+        include_grey: 是否包含 ``tier="grey"`` 的（merged / skip-translate）。
+            默认 ``False``——Worklist 是"今天要看的"，已经定局的 MR 没必要
+            霸占视觉空间。PR-D 的 watchdog 可以打开它做"事后回滚清单"。
+        now_utc: 可注入的当前时间，单测专用。
+
+    数据源：仅 ``source_kind = 'mr'`` 的 ``task_checks`` 行。Scan / File
+    任务有它们自己的入口（Scan Tasks tab / File Translation tab）。
+    """
+    init_db()
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM task_checks
+            WHERE source_kind = 'mr'
+            """,
+        ).fetchall()
+
+        # zh / 次级语种 / 其它语种的 issue 数：用一次 GROUP BY 拿回来，避免
+        # 行内再各 SELECT 一遍。任务多时这一步开销不可忽视。
+        lang_rows = conn.execute(
+            """
+            SELECT task_id, source_kind, target_language, COUNT(*) AS n
+            FROM check_issues
+            WHERE source_kind = 'mr'
+            GROUP BY task_id, source_kind, target_language
+            """,
+        ).fetchall()
+
+    lang_map: dict[tuple[str, str], tuple[int, int, int]] = {}
+    for r in lang_rows:
+        key = (r["task_id"], r["source_kind"])
+        zh, sec, oth = lang_map.get(key, (0, 0, 0))
+        lang = (r["target_language"] or "").lower()
+        n = int(r["n"] or 0)
+        if not lang:
+            oth += n
+        elif any(lang.startswith(p) for p in _CHINESE_LOCALE_PREFIXES):
+            zh += n
+        elif any(lang.startswith(p) for p in _SECONDARY_LOCALE_PREFIXES):
+            sec += n
+        else:
+            oth += n
+        lang_map[key] = (zh, sec, oth)
+
+    out: list[dict] = []
+    for r in rows:
+        d = dict(r)
+        # mr_labels 解析（与 get_aggregated_issues 同口径）
+        raw_labels = d.get("mr_labels") or ""
+        try:
+            labels = json.loads(raw_labels) if raw_labels else []
+            if not isinstance(labels, list):
+                labels = []
+        except Exception:
+            labels = []
+        d["mr_labels_list"] = [str(x) for x in labels]
+
+        score, tier = compute_merge_urgency(
+            state=d.get("mr_state"),
+            merge_status=d.get("mr_merge_status"),
+            draft=d.get("mr_draft"),
+            upvotes=d.get("mr_upvotes"),
+            updated_at_iso=d.get("mr_updated_at"),
+            labels=d["mr_labels_list"],
+            now_utc=now_utc,
+        )
+        d["merge_urgency"] = score
+        d["merge_tier"] = tier
+
+        zh, sec, oth = lang_map.get(
+            (d["task_id"], d["source_kind"]), (0, 0, 0),
+        )
+        d["zh_issues"] = zh
+        d["secondary_issues"] = sec
+        d["other_issues"] = oth
+        d["total_lang_issues"] = zh + sec + oth
+
+        # 综合 priority：tier×权重 是主轴，issue 数把同 tier 内排序细分。
+        # ``already_reviewed`` 留作 PR-B 接入点；现在恒为 0。
+        already_reviewed = 0
+        d["priority"] = (
+            score * 10
+            + zh * 3
+            + sec * 1
+            + oth * 0.3
+            - already_reviewed * 100
+        )
+        out.append(d)
+
+    if not include_grey:
+        out = [d for d in out if d["merge_tier"] != "grey"]
+
+    out.sort(key=lambda x: (
+        -x["priority"], x.get("task_created_at") or "",
+    ))
+    return out[:limit]

@@ -286,6 +286,16 @@ except Exception as _tc_e:  # pragma: no cover
 else:
     _tc_import_error = None
 
+# PR-A: Review Worklist —— Language Lead 每日唯一入口。仅依赖 Tranzor
+# Checks 缓存表的 mr_state / mr_labels / check_issues，不发起额外网络。
+try:
+    import gui_tab_review_worklist as _rw_tab_mod
+except Exception as _rw_e:  # pragma: no cover
+    _rw_tab_mod = None
+    _rw_import_error = _rw_e
+else:
+    _rw_import_error = None
+
 _boot_mark("optional_tabs_imported")
 
 # ---------------------------------------------------------------------------
@@ -609,6 +619,14 @@ if _opus_tab_mod is not None:
 if _tc_tab_mod is not None:
     try:
         for _lang_code, _extra in _tc_tab_mod.STRINGS.items():
+            STRINGS.setdefault(_lang_code, {}).update(_extra)
+    except Exception:
+        pass
+
+# Merge in strings from the optional Review Worklist tab (PR-A).
+if _rw_tab_mod is not None:
+    try:
+        for _lang_code, _extra in _rw_tab_mod.STRINGS.items():
             STRINGS.setdefault(_lang_code, {}).update(_extra)
     except Exception:
         pass
@@ -1132,6 +1150,22 @@ class ExportApp:
                 print(f"[Tranzor Checks tab] init failed: {_e}")
                 self.tc_tab = None
 
+        # --- Tab 11: Review Worklist (PR-A) ---
+        # Language Lead 每日唯一入口：把 70+ MR 压成 5-10 条按 merge 紧迫度
+        # × 翻译问题数排序的待看清单。仅依赖 Tranzor Checks 本地缓存，无
+        # 额外网络。Sync 行为放在 Tranzor Checks tab —— 这里只是看的入口。
+        self.rw_tab = None
+        self._rw_tab_index = None
+        if _rw_tab_mod is not None:
+            try:
+                tab_rw = ttk.Frame(self.notebook, style="App.TFrame")
+                self.notebook.add(tab_rw, text="")
+                self.rw_tab = _rw_tab_mod.ReviewWorklistTab(tab_rw, self)
+                self._rw_tab_index = self.notebook.index(tab_rw)
+            except Exception as _e:
+                print(f"[Review Worklist tab] init failed: {_e}")
+                self.rw_tab = None
+
         # ═══════════════════════════════════════════
         # TAB 1 CONTENTS (File Translation — preserved)
         # ═══════════════════════════════════════════
@@ -1497,6 +1531,12 @@ class ExportApp:
             try:
                 self.notebook.tab(self._tc_tab_index, text=self._t("tab_tranzor_checks"))
                 _async_refresh(self.tc_tab)
+            except Exception:
+                pass
+        if self.rw_tab is not None and self._rw_tab_index is not None:
+            try:
+                self.notebook.tab(self._rw_tab_index, text=self._t("tab_review_worklist"))
+                _async_refresh(self.rw_tab)
             except Exception:
                 pass
 
