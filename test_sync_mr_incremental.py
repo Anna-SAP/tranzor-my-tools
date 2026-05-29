@@ -135,5 +135,83 @@ class SyncMrIncrementalTests(unittest.TestCase):
             self.assertIs(seen["cb"], sentinel)
 
 
+class MrListPaginationTests(unittest.TestCase):
+    """``_sync_mr_tasks`` listing loop must exploit the backend's
+    ``created_at DESC`` ordering and stop paging once it crosses the
+    ``since_iso`` window — otherwise every incremental refresh walks the
+    entire completed-task history (dozens of wasted list round-trips),
+    which is exactly what made the Review Worklist "Sync & refresh" crawl.
+    """
+
+    SINCE = "2026-05-15T00:00:00+00:00"
+    TOTAL = 250
+
+    def _run_with_pages(self, since_iso):
+        """Drive ``_sync_mr_tasks`` against a 3-page DESC dataset.
+
+        Returns ``(requested_offsets, collected_tasks)``. Pages:
+          - offset 0  : 100 tasks, all newer than SINCE
+          - offset 100: 50 newer-than-SINCE then 50 older (boundary here)
+          - offset 200: 50 tasks, all older than SINCE
+        """
+        requested: list[int] = []
+
+        def _fake_fetch(status=None, limit=100, offset=0, **_kw):
+            requested.append(offset)
+            if offset == 0:
+                batch = [
+                    {"task_id": f"a{i}",
+                     "created_at": f"2026-05-2{i % 9}T10:00:00+00:00"}
+                    for i in range(100)
+                ]
+            elif offset == 100:
+                batch = (
+                    [{"task_id": f"b{i}",
+                      "created_at": "2026-05-16T10:00:00+00:00"}
+                     for i in range(50)]
+                    + [{"task_id": f"c{i}",
+                        "created_at": "2026-05-10T10:00:00+00:00"}
+                       for i in range(50)]
+                )
+            else:  # offset == 200
+                batch = [
+                    {"task_id": f"d{i}",
+                     "created_at": "2026-05-01T10:00:00+00:00"}
+                    for i in range(50)
+                ]
+            return self.TOTAL, batch
+
+        with _IsolatedDb():
+            tc.init_db()
+            with mock.patch.object(
+                tc.mr_api, "fetch_mr_tasks", side_effect=_fake_fetch
+            ), mock.patch.object(
+                tc, "_build_mr_info_fetcher", return_value=None
+            ), mock.patch.object(
+                tc, "_drain_results_into_db"
+            ) as drain:
+                with tc._connect() as conn:
+                    tc._sync_mr_tasks(conn, since_iso=since_iso)
+                collected = drain.call_args.args[0]
+        return requested, collected
+
+    def test_stops_paging_at_window_boundary(self):
+        requested, collected = self._run_with_pages(self.SINCE)
+        # The third page (offset 200) is entirely out of window and must
+        # never be requested.
+        self.assertEqual(requested, [0, 100])
+        # Collected exactly the in-window tasks: 100 (page 0) + 50 (page 1).
+        self.assertEqual(len(collected), 150)
+        self.assertTrue(all(
+            t["created_at"] >= self.SINCE for t in collected))
+
+    def test_no_window_walks_full_history(self):
+        # With no since_iso (e.g. a full backfill) the early-break must NOT
+        # kick in — we still page through everything.
+        requested, collected = self._run_with_pages(None)
+        self.assertEqual(requested, [0, 100, 200])
+        self.assertEqual(len(collected), 250)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

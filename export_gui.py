@@ -973,6 +973,38 @@ class ExportApp:
         """Get translated string for current language."""
         return STRINGS[self.lang].get(key, key)
 
+    # ------------------------------------------------------------------
+    # 状态标签的"等待态"高亮 —— 全 app 共用，各 tab 通过 self.app 调用。
+    # 同步 / 加载 / 导出这类需要等待的消息走 _mark_busy（亮金加粗），
+    # 完成 / 失败 / 空闲的终态走 _mark_idle（恢复默认暗灰）。集中在这里
+    # 既保证视觉一致，也避免每个调用点各写一份 configure(style=...)。
+    # ------------------------------------------------------------------
+    def _mark_busy(self, label, text):
+        """把状态标签切到醒目的"请稍候"样式并带 ⏳ 前缀。
+
+        ``label`` 须是 ttk.Label（生产环境里这些状态标签都是）。万一传进
+        非 ttk 控件（无 style 选项）就降级为只设文本，绝不让一个纯视觉的
+        增强反过来弄崩 UI。
+        """
+        msg = text if str(text).startswith("⏳") else f"⏳ {text}"
+        try:
+            label.configure(text=msg, style="Busy.TLabel")
+        except tk.TclError:
+            try:
+                label.configure(text=msg)
+            except tk.TclError:
+                pass
+
+    def _mark_idle(self, label, text=""):
+        """恢复状态标签的默认（终态 / 空闲）样式。"""
+        try:
+            label.configure(text=text, style="Status.TLabel")
+        except tk.TclError:
+            try:
+                label.configure(text=text)
+            except tk.TclError:
+                pass
+
     def _setup_styles(self):
         style = ttk.Style()
         style.theme_use("clam")
@@ -995,6 +1027,13 @@ class ExportApp:
         style.configure("Status.TLabel",
                          background=self.BG, foreground="#888",
                          font=(FONT_FAMILY, 9))
+        # "正在同步 / 加载 / 导出…"这类需要用户等待的消息——亮金加粗，
+        # 与默认的暗灰 Status 拉开对比，让用户一眼看出程序在忙、可放心
+        # 等待（修复"同步进度文字太暗看不清"的反馈）。配合 _mark_busy /
+        # _mark_idle 在等待态↔终态间切换。
+        style.configure("Busy.TLabel",
+                         background=self.BG, foreground="#fbbf24",
+                         font=(FONT_FAMILY, 9, "bold"))
 
         # Radio button for dark theme
         style.configure("Card.TRadiobutton",
@@ -1714,9 +1753,9 @@ class ExportApp:
         # Refresh status label only if not running
         if not self.running:
             if self.last_output_path:
-                self.status_label.configure(text=self._t("status_done"))
+                self._mark_idle(self.status_label, self._t("status_done"))
             else:
-                self.status_label.configure(text=self._t("status_ready"))
+                self._mark_idle(self.status_label, self._t("status_ready"))
 
     def _toggle_lang(self):
         """Toggle between English and Chinese."""
@@ -2023,8 +2062,12 @@ class ExportApp:
             # Cache invalidation is best-effort — never block the refresh.
             pass
         self.summary_loading = True
+        # 等待消息：亮金加粗 + ⏳，和完成后的暗灰/红色错误明显区分，让用户
+        # 一眼看出还在加载。lbl_summary_status 在卡片背景上、沿用 inline
+        # foreground 的既有写法（不走 _mark_busy 的 BG 样式以免底色不匹配）。
         self.lbl_summary_status.configure(
-            text=self._t("summary_loading"), foreground="#666")
+            text=f"⏳ {self._t('summary_loading')}",
+            foreground="#fbbf24", font=(FONT_FAMILY, 9, "bold"))
         self.btn_refresh.configure(state="disabled")
         t = threading.Thread(target=self._fetch_summary, daemon=True)
         t.start()
@@ -2042,7 +2085,8 @@ class ExportApp:
         _boot_mark("summary_loaded")
         self.summary_loading = False
         self.btn_refresh.configure(state="normal")
-        self.lbl_summary_status.configure(text="", foreground="#666")
+        self.lbl_summary_status.configure(
+            text="", foreground="#666", font=(FONT_FAMILY, 9))
 
         self.summary_total = total
         self.summary_tasks = all_tasks
@@ -2060,7 +2104,8 @@ class ExportApp:
         self.summary_loading = False
         self.btn_refresh.configure(state="normal")
         self.lbl_summary_status.configure(
-            text=self._t("summary_error"), foreground="#e94560")
+            text=self._t("summary_error"), foreground="#e94560",
+            font=(FONT_FAMILY, 9))
 
     def _on_task_select(self, event):
         """When user clicks a task row, fill the Task ID entry."""
@@ -2097,7 +2142,7 @@ class ExportApp:
             self.btn_run.configure(state="disabled", bg="#555")
             self.btn_open.configure(state="disabled", fg="#888")
         self.progress.start(15)
-        self.status_label.configure(text=self._t("status_exporting"))
+        self._mark_busy(self.status_label, self._t("status_exporting"))
 
         # Clear log
         self.log_text.configure(state="normal")
@@ -2199,8 +2244,9 @@ class ExportApp:
             # Show the actual filename so the user immediately sees where the
             # export went (the old "✓ Export complete" gave no hint at all).
             basename = os.path.basename(filepath)
-            self.status_label.configure(
-                text=self._t("status_saved").format(filename=basename))
+            self._mark_idle(
+                self.status_label,
+                self._t("status_saved").format(filename=basename))
             lower = filepath.lower()
             if lower.endswith(".html"):
                 # HTML self-renders in a browser tab — that's enough wayfinding.
@@ -2211,7 +2257,7 @@ class ExportApp:
                 # email, etc.) without hunting through the install dir.
                 reveal_in_folder(filepath)
         else:
-            self.status_label.configure(text=self._t("status_no_data"))
+            self._mark_idle(self.status_label, self._t("status_no_data"))
 
     def _on_open(self):
         if self.last_output_path and os.path.exists(self.last_output_path):

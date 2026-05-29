@@ -1247,8 +1247,10 @@ class FullTranslationsTab:
             return
         sources = self._selected_sources()
         self._set_busy(True)
+        # 等待消息用亮金 + ⏳，替换原本暗灰 #888（与"颜色太暗看不清"的
+        # 反馈对齐）；done/err/warn 各自有绿/红/黄，已够醒目，保持不动。
         self.lbl_status.configure(
-            text=self._t("ft_status_loading"), foreground="#888")
+            text=f"⏳ {self._t('ft_status_loading')}", foreground="#fbbf24")
         t = threading.Thread(
             target=self._run_light_refresh, args=(sources,), daemon=True)
         t.start()
@@ -1389,7 +1391,7 @@ class FullTranslationsTab:
 
         self._set_busy(True)
         self.lbl_status.configure(
-            text=self._t("ft_status_collecting"), foreground="#888")
+            text=f"⏳ {self._t('ft_status_collecting')}", foreground="#fbbf24")
 
         # Open the modal progress dialog. The background worker pipes
         # progress callbacks here via _dialog_log so the user can follow
@@ -1447,7 +1449,7 @@ class FullTranslationsTab:
             self.parent.after(
                 0,
                 lambda: self.lbl_status.configure(
-                    text=self._t(writing_key), foreground="#888"),
+                    text=f"⏳ {self._t(writing_key)}", foreground="#fbbf24"),
             )
             if dlg is not None:
                 self.parent.after(

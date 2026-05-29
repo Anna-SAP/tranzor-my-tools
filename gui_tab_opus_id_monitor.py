@@ -520,7 +520,7 @@ class OpusIdMonitorTab:
         self._first_shown = True
         self._refresh_source_combo()
         try:
-            self.lbl_status.configure(text=self._t("opus_status_loading"))
+            self.app._mark_busy(self.lbl_status, self._t("opus_status_loading"))
         except Exception:
             pass
 
@@ -891,8 +891,9 @@ class OpusIdMonitorTab:
         if not data:
             return
         if data.get("error"):
-            self.lbl_status.configure(
-                text=self._t("opus_status_failed").format(
+            self.app._mark_idle(
+                self.lbl_status,
+                self._t("opus_status_failed").format(
                     error=str(data["error"])[:60]))
             return
         summary = data["summary"]
@@ -1103,8 +1104,9 @@ class OpusIdMonitorTab:
             return  # 不允许并发同步
         self._cancel_event.clear()
         self._set_sync_buttons(running=True)
-        self.lbl_status.configure(
-            text=self._t("opus_status_syncing").format(
+        self.app._mark_busy(
+            self.lbl_status,
+            self._t("opus_status_syncing").format(
                 stage="init", cur=0, total=0))
         # 捕获本次 sync 的"新增基线" —— sync 完成后用它查 first_seen > 基线
         # 的所有 opus_id，弹窗展示。**必须在 sync 启动前**记录，否则 sync 自己
@@ -1175,8 +1177,9 @@ class OpusIdMonitorTab:
         try:
             detail = om.get_project_detail(project_id, source_kind)
         except Exception as e:
-            self.lbl_status.configure(
-                text=self._t("opus_status_failed").format(error=str(e)[:60]))
+            self.app._mark_idle(
+                self.lbl_status,
+                self._t("opus_status_failed").format(error=str(e)[:60]))
             return
         ProjectDetailDialog(self.parent, self.app, detail)
 
@@ -1190,8 +1193,9 @@ class OpusIdMonitorTab:
         try:
             detail = om.get_opus_detail(opus_id)
         except Exception as e:
-            self.lbl_status.configure(
-                text=self._t("opus_status_failed").format(error=str(e)[:60]))
+            self.app._mark_idle(
+                self.lbl_status,
+                self._t("opus_status_failed").format(error=str(e)[:60]))
             return
         OpusDetailDialog(self.parent, self.app, detail)
 
@@ -1203,7 +1207,7 @@ class OpusIdMonitorTab:
     def _on_backfill(self):
         """手动触发跨源路径回填 —— 不阻塞 UI（虽然典型耗时 <1s）。"""
         t = self._t
-        self.lbl_status.configure(text=t("opus_backfill_running"))
+        self.app._mark_busy(self.lbl_status, t("opus_backfill_running"))
 
         def _run():
             try:
@@ -1211,13 +1215,15 @@ class OpusIdMonitorTab:
                 msg = t("opus_backfill_done").format(
                     filled=stats.get("distinct_path_hashes_filled", 0),
                     rows=stats.get("rows_updated", 0))
-                self.parent.after(0, lambda: self.lbl_status.configure(text=msg))
+                self.parent.after(0, lambda: self.app._mark_idle(
+                    self.lbl_status, msg))
                 # 回填完了刷新一下面板，让用户立刻看到效果
                 self.parent.after(150, self._refresh_from_cache)
             except Exception as e:
                 err = str(e)[:80]
-                self.parent.after(0, lambda: self.lbl_status.configure(
-                    text=t("opus_status_failed").format(error=err)))
+                self.parent.after(0, lambda: self.app._mark_idle(
+                    self.lbl_status,
+                    t("opus_status_failed").format(error=err)))
 
         threading.Thread(target=_run, daemon=True).start()
 
@@ -1241,8 +1247,9 @@ class OpusIdMonitorTab:
                 # 后台线程只能用 after() 回主线程更新 UI
                 self.parent.after(
                     0,
-                    lambda s=stage, c=cur, tt=total: self.lbl_status.configure(
-                        text=self._t("opus_status_syncing").format(
+                    lambda s=stage, c=cur, tt=total: self.app._mark_busy(
+                        self.lbl_status,
+                        self._t("opus_status_syncing").format(
                             stage=s, cur=c, total=tt)))
 
             if full:
@@ -1255,15 +1262,16 @@ class OpusIdMonitorTab:
                     cancel_event=self._cancel_event)
 
             if self._cancel_event.is_set():
-                self.parent.after(0, lambda: self.lbl_status.configure(
-                    text=self._t("opus_status_cancelled")))
+                self.parent.after(0, lambda: self.app._mark_idle(
+                    self.lbl_status, self._t("opus_status_cancelled")))
             else:
                 mr_rows = result.get("mr", {}).get("rows_inserted", 0)
                 scan_rows = result.get("scan", {}).get("rows_inserted", 0)
                 legacy_rows = result.get("legacy", {}).get("rows_inserted", 0)
                 self.parent.after(
-                    0, lambda: self.lbl_status.configure(
-                        text=self._t("opus_status_done").format(
+                    0, lambda: self.app._mark_idle(
+                        self.lbl_status,
+                        self._t("opus_status_done").format(
                             mr=mr_rows, scan=scan_rows, legacy=legacy_rows)))
                 # 完成后弹增量详情对话框：查 first_seen > 同步前基线的
                 # 全部 distinct opus_id。**只在用户主动取消之外的成功路径**
@@ -1274,8 +1282,9 @@ class OpusIdMonitorTab:
                     lambda b=baseline: self._show_sync_delta_dialog(b))
         except Exception as e:
             err = str(e)[:80]
-            self.parent.after(0, lambda: self.lbl_status.configure(
-                text=self._t("opus_status_failed").format(error=err)))
+            self.parent.after(0, lambda: self.app._mark_idle(
+                self.lbl_status,
+                self._t("opus_status_failed").format(error=err)))
         finally:
             self.parent.after(0, lambda: self._set_sync_buttons(running=False))
             # 同步完了刷新一次面板
@@ -1292,8 +1301,9 @@ class OpusIdMonitorTab:
             additions = om.get_additions_since(baseline_iso)
         except Exception as e:
             # 数据查询失败不能影响主面板；status 行提示即可
-            self.lbl_status.configure(
-                text=self._t("opus_status_failed").format(error=str(e)[:60]))
+            self.app._mark_idle(
+                self.lbl_status,
+                self._t("opus_status_failed").format(error=str(e)[:60]))
             return
         if not additions:
             return  # 0 新增，不打扰用户

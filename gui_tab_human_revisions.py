@@ -341,7 +341,8 @@ class HumanRevisionsTab:
         if self._loading:
             return
         self._loading = True
-        self._update_status(self._t("hr_loading"))
+        # 等待消息：亮金 + ⏳（原本走默认红色，既像报错又不符合"加载中"语义）。
+        self._update_status(f"⏳ {self._t('hr_loading')}", "#fbbf24")
         self.btn_export.configure(state="disabled")
 
         params = self._get_date_params()
