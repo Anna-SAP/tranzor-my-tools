@@ -77,6 +77,7 @@ STRINGS = {
         "opus_recent_col_alias":    "Alias",
         "opus_recent_col_opus":     "OPUS ID",
         "opus_status_idle":         "Idle.",
+        "opus_status_loading":      "Loading from local cache…",
         "opus_status_syncing":      "Syncing… {stage} {cur}/{total}",
         "opus_status_done":         "✓ Sync done · MR +{mr} · Scan +{scan} · File +{legacy} rows",
         "opus_status_failed":       "❌ {error}",
@@ -260,6 +261,7 @@ STRINGS = {
         "opus_recent_col_alias":    "Alias",
         "opus_recent_col_opus":     "OPUS ID",
         "opus_status_idle":         "空闲。",
+        "opus_status_loading":      "正在从本地缓存加载…",
         "opus_status_syncing":      "正在同步… {stage} {cur}/{total}",
         "opus_status_done":         "✓ 同步完成 · MR +{mr} · Scan +{scan} · File +{legacy} 行",
         "opus_status_failed":       "❌ {error}",
@@ -498,9 +500,38 @@ class OpusIdMonitorTab:
         self.parent = parent
         self._sync_thread: threading.Thread | None = None
         self._cancel_event = threading.Event()
+        self._first_shown = False
         self._build(parent)
-        # 启动后立即用本地缓存渲染首屏（不触发网络）
-        self.parent.after(50, self._refresh_from_cache)
+        # PR-M: 首屏渲染延迟到 tab 首次可见。
+        # 实测：_refresh_from_cache 渲染整个 breakdown/recent treeview，
+        # 即便本 tab 不可见也会在启动后执行，单独占用 ~11s 的首次绘制
+        # 时间（startup.log: first_idle +18.9s 的主因）。改由
+        # ExportApp._on_tab_changed 在用户首次切到本 tab 时调
+        # on_first_show()，启动完全不为它付费。
+
+    def on_first_show(self):
+        """ExportApp 在用户首次切到 OPUS tab 时调一次 —— 延迟首屏渲染。
+        幂等：重复调用只渲染一次。
+
+        查询放后台线程（大缓存下 SQLite 聚合 ~20s），渲染 marshal 回主
+        线程，避免切到本 tab 时整个 GUI 冻结。先显示"加载中"给即时反馈。"""
+        if self._first_shown:
+            return
+        self._first_shown = True
+        self._refresh_source_combo()
+        try:
+            self.lbl_status.configure(text=self._t("opus_status_loading"))
+        except Exception:
+            pass
+
+        def _work():
+            data = self._query_cache_data()
+            try:
+                self.parent.after(0, lambda: self._apply_cache_data(data))
+            except Exception:
+                pass
+        threading.Thread(
+            target=_work, daemon=True, name="opus-first-show").start()
 
     def _t(self, key):
         return self.app._t(key)
@@ -830,20 +861,44 @@ class OpusIdMonitorTab:
     # ------------------------------------------------------------------
     # 渲染：从本地 SQLite 拉数据填面板
     # ------------------------------------------------------------------
+    def _query_cache_data(self):
+        """4 个 SQLite 聚合查询 —— 大缓存（数十万 opus_id）上实测可达 ~20s，
+        因此可被 :meth:`on_first_show` 放到后台线程跑。纯查询、不碰 Tk，
+        线程安全。返回 dict；失败时返回 ``{"error": msg}``。"""
+        try:
+            return {
+                "summary": om.get_summary(),
+                "breakdown": om.get_per_project_breakdown(),
+                "trend": om.get_daily_trend(days=30),
+                # 7 天滚动窗口：用户要求"展示一周内的全部新增内容"
+                "recent": om.get_recent_additions(days=7, hard_limit=1000),
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
     def _refresh_from_cache(self):
+        """同步路径：查询 + 渲染。保留给 sync 完成 / 过滤变化等调用方
+        （那些场景数据已热或用户有等待预期）。首次进入 tab 走的是
+        :meth:`on_first_show` 的异步路径，避免冻结 UI。"""
         # 首次进入 tab 时 refresh_text 还没跑过，确保 Source 下拉至少有
         # "(全部)/MR/Scan/文件" 四个选项；之后每次 refresh_text 都会再调一次。
         self._refresh_source_combo()
-        try:
-            summary = om.get_summary()
-            breakdown = om.get_per_project_breakdown()
-            trend = om.get_daily_trend(days=30)
-            # 7 天滚动窗口：用户要求"展示一周内的全部新增内容"
-            recent = om.get_recent_additions(days=7, hard_limit=1000)
-        except Exception as e:
-            self.lbl_status.configure(
-                text=self._t("opus_status_failed").format(error=str(e)[:60]))
+        self._apply_cache_data(self._query_cache_data())
+
+    def _apply_cache_data(self, data):
+        """把 :meth:`_query_cache_data` 的结果渲染到卡片/表格/图。
+        必须在主线程调用（碰 Tk widget）。"""
+        if not data:
             return
+        if data.get("error"):
+            self.lbl_status.configure(
+                text=self._t("opus_status_failed").format(
+                    error=str(data["error"])[:60]))
+            return
+        summary = data["summary"]
+        breakdown = data["breakdown"]
+        trend = data["trend"]
+        recent = data["recent"]
 
         # 卡片
         self.card_total.set_value(f"{summary['total_opus_ids']:,}")
