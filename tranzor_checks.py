@@ -1906,6 +1906,104 @@ def unmark_task_reviewed(
         return cur.rowcount or 0
 
 
+# ---------------------------------------------------------------------------
+# PR-D: merge watchdog 用的写回 / 事件持久化辅助
+# ---------------------------------------------------------------------------
+def update_mr_state_fields(
+    *,
+    task_id: str,
+    source_kind: str = "mr",
+    state: str | None = None,
+    upvotes: int | None = None,
+    updated_at: str | None = None,
+    web_url: str | None = None,
+) -> None:
+    """部分更新一个 task_checks 行的 GitLab MR 状态字段。
+
+    与 :func:`_persist_task_results` 不同：那是 sync 路径走的全量 upsert，
+    要 task 数据齐备；watchdog 只想刷新四个动态字段，task 必然已存在。
+    用 ``COALESCE`` 让传 ``None`` 的字段保留旧值——传谁覆盖谁。
+    """
+    if not task_id:
+        return
+    init_db()
+    with _connect() as conn:
+        conn.execute(
+            """
+            UPDATE task_checks
+            SET mr_state      = COALESCE(?, mr_state),
+                mr_upvotes    = COALESCE(?, mr_upvotes),
+                mr_updated_at = COALESCE(?, mr_updated_at),
+                mr_web_url    = COALESCE(?, mr_web_url)
+            WHERE task_id = ? AND source_kind = ?
+            """,
+            (state, upvotes, updated_at, web_url, task_id, source_kind),
+        )
+
+
+# sync_meta 里存事件历史的 key。PR-E 的 digest 用同一个 key 读。
+_MERGE_EVENTS_META_KEY = "merge_watchdog_events"
+
+# 事件环形缓冲容量。watchdog 每条事件就是"一次 state 转换"，正常一天
+# 量级在几十；200 足以覆盖一周左右，不会让 sync_meta 这一行 JSON 过大。
+_MERGE_EVENTS_RING_SIZE = 200
+
+
+def append_merge_events(events: list[dict]) -> None:
+    """把 watchdog 检测到的事件追加进 sync_meta 的事件环。
+
+    新事件追到末尾；超过 ``_MERGE_EVENTS_RING_SIZE`` 时丢掉最旧的。
+    多线程安全靠 SQLite 自身（_connect 取的连接独立、写有内部锁）。
+    """
+    if not events:
+        return
+    init_db()
+    with _connect() as conn:
+        cur = conn.execute(
+            "SELECT value FROM sync_meta WHERE key = ?",
+            (_MERGE_EVENTS_META_KEY,),
+        ).fetchone()
+        existing: list[dict] = []
+        if cur and cur["value"]:
+            try:
+                existing = json.loads(cur["value"]) or []
+                if not isinstance(existing, list):
+                    existing = []
+            except Exception:
+                existing = []
+        existing.extend(events)
+        if len(existing) > _MERGE_EVENTS_RING_SIZE:
+            existing = existing[-_MERGE_EVENTS_RING_SIZE:]
+        conn.execute(
+            "INSERT INTO sync_meta(key, value) VALUES(?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (_MERGE_EVENTS_META_KEY,
+             json.dumps(existing, ensure_ascii=False)),
+        )
+
+
+def get_merge_events(*, limit: int | None = None) -> list[dict]:
+    """读取 watchdog 事件环（最近的在最后）。``limit`` 给 PR-E 的 digest
+    控制取多少；默认全量。"""
+    init_db()
+    with _connect() as conn:
+        cur = conn.execute(
+            "SELECT value FROM sync_meta WHERE key = ?",
+            (_MERGE_EVENTS_META_KEY,),
+        ).fetchone()
+    if not cur or not cur["value"]:
+        return []
+    try:
+        items = json.loads(cur["value"]) or []
+        if not isinstance(items, list):
+            return []
+    except Exception:
+        return []
+    if limit is not None:
+        items = items[-int(limit):]
+    return items
+
+
 def get_review_summary(reviewer: str | None = None) -> dict:
     """返回 reviewer 的已审统计。UI 主要用 ``today`` / ``total`` 两个数：
     挂在 Worklist 顶部当"今日已审 X / 累计 Y"小徽章。"""
