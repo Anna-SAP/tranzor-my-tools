@@ -578,13 +578,30 @@ class ReviewWorklistTab:
         n_unknown = sum(
             1 for d in items if d.get("merge_tier") == "unknown"
         )
-        if n_unknown:
-            self.app._mark_idle(
+        # 只有在「没有任何可用 GitLab token」时才提示去配置 token——
+        # 一旦用户已配置（或 env / 构建内嵌了 token），这条"请设置 token"
+        # 的引导就没有意义，继续显示只会打扰用户，故直接收起。
+        if n_unknown and not self._has_gitlab_token():
+            self.app._mark_hint(
                 self.lbl_status,
                 self._t("rw_unknown_hint").format(n=n_unknown),
             )
         else:
             self.app._mark_idle(self.lbl_status, "")
+
+    @staticmethod
+    def _has_gitlab_token() -> bool:
+        """是否已有可用的 GitLab token（用户配置 / 环境变量 / 构建内嵌）。
+
+        用 :func:`gitlab_client.get_token` 统一判断——它本身就按
+        env > 配置文件 > 内嵌 的优先级取值，任一非空即视为"已配置"。
+        取不到（模块缺失等）时按"未配置"处理，宁可多提示一次也不误吞。
+        """
+        try:
+            import gitlab_client as _gc
+            return bool(_gc.get_token())
+        except Exception:
+            return False
 
     def _on_error(self, err):
         self._loading = False
