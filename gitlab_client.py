@@ -41,6 +41,21 @@ def save_config(cfg):
         json.dump(cfg, f, indent=2)
 
 
+def update_config(**kwargs):
+    """Merge-update the config file —— 只覆盖传入的 key，保留其它。
+
+    ``save_config`` 是整体覆盖；直接用它写 token 会抹掉同文件里别的
+    设置（bridge 端口等）。GUI 的 GitLab 设置对话框用这个增量写。
+    值为 ``None`` 的 key 跳过（"不改这一项"）。
+    """
+    cfg = load_config()
+    for k, v in kwargs.items():
+        if v is not None:
+            cfg[k] = v
+    save_config(cfg)
+    return cfg
+
+
 def get_token():
     return os.getenv("TRANZOR_GITLAB_TOKEN") or load_config().get("gitlab_token") or ""
 
@@ -49,6 +64,60 @@ def get_base_url():
     return (os.getenv("TRANZOR_GITLAB_BASE_URL")
             or load_config().get("gitlab_base_url")
             or DEFAULT_BASE_URL)
+
+
+def verify_connection(base_url=None, token=None, timeout=10):
+    """探测 (base_url, token) 能否连通 GitLab 并通过鉴权。
+
+    用 ``GET /api/v4/user`` —— ``read_api`` scope 即可访问，成功时返回
+    当前 token 对应的用户身份，让用户在对话框里确认"连上的是我自己的
+    账号"。这个端点也最能区分各类失败：
+
+    Returns dict:
+      - 成功：``{"ok": True, "username": ..., "name": ..., "base_url": ...}``
+      - 失败：``{"ok": False, "error": "<人话>", "status": <int|None>}``
+
+    永不抛 —— 对话框直接渲染返回的 dict。
+    """
+    burl = (base_url or get_base_url() or "").rstrip("/")
+    tok = token or get_token()
+    if not burl:
+        return {"ok": False, "error": "Base URL 为空", "status": None}
+    if not tok:
+        return {"ok": False, "error": "Token 为空", "status": None}
+    try:
+        resp = requests.get(
+            f"{burl}/api/v4/user",
+            headers={"PRIVATE-TOKEN": tok},
+            timeout=timeout,
+        )
+    except requests.exceptions.RequestException as e:
+        # 连不上 / DNS / 超时 —— 多半是 base_url 写错或没连 VPN。
+        return {"ok": False, "error": f"连接失败：{e}", "status": None}
+
+    if resp.status_code == 200:
+        try:
+            data = resp.json()
+        except Exception:
+            data = {}
+        return {
+            "ok": True,
+            "username": data.get("username") or "?",
+            "name": data.get("name") or "",
+            "base_url": burl,
+            "status": 200,
+        }
+    if resp.status_code == 401:
+        return {"ok": False, "status": 401,
+                "error": "401 未授权 —— Token 无效或已过期"}
+    if resp.status_code == 403:
+        return {"ok": False, "status": 403,
+                "error": "403 禁止 —— Token 权限不足（需要 read_api scope）"}
+    if resp.status_code == 404:
+        return {"ok": False, "status": 404,
+                "error": "404 —— Base URL 可能不是有效的 GitLab 实例"}
+    return {"ok": False, "status": resp.status_code,
+            "error": f"HTTP {resp.status_code}"}
 
 
 # ---------------------------------------------------------------------------

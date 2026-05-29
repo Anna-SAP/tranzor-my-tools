@@ -91,8 +91,33 @@ STRINGS = {
             "❔ State unknown — run Sync · ⚪ Merged / skipped"),
         "rw_unknown_hint":      (
             "⚠ {n} MR(s) have no GitLab state cached. "
-            "Run Sync on the Tranzor Checks tab to refresh urgency."),
+            "Set a GitLab token (⚙ button) then Sync & refresh."),
         "rw_no_web_url":        "No MR URL stored — run Sync to populate.",
+        # GitLab token settings dialog (PR-I)
+        "rw_gitlab_btn":        "⚙ GitLab",
+        "rw_gitlab_btn_tip":    (
+            "Set the GitLab token used to read MR state (open / merged /\n"
+            "approvals). Without it the Risk column stays ❔."),
+        "rw_gl_title":          "GitLab connection",
+        "rw_gl_base_url":       "Base URL",
+        "rw_gl_token":          "Token",
+        "rw_gl_token_ph_set":   "(configured — leave blank to keep current)",
+        "rw_gl_token_ph_empty": "paste a read_api personal access token",
+        "rw_gl_show":           "Show",
+        "rw_gl_scope_hint":     (
+            "Needs only the read_api scope. The token is stored in "
+            "~/.tranzor_exporter_config.json."),
+        "rw_gl_test":           "Test connection",
+        "rw_gl_save":           "Save",
+        "rw_gl_cancel":         "Cancel",
+        "rw_gl_testing":        "Testing…",
+        "rw_gl_test_ok":        "✓ Connected as {name} (@{username})",
+        "rw_gl_test_fail":      "✗ {error}",
+        "rw_gl_saved":          "✓ Saved. Click Sync & refresh to apply.",
+        "rw_gl_need_token":     "Enter a token (or leave blank to keep the existing one).",
+        "rw_gl_env_override":   (
+            "⚠ Env var TRANZOR_GITLAB_TOKEN is set and overrides this dialog. "
+            "Unset it for the saved token to take effect."),
         "rw_age_just_now":      "just now",
         "rw_age_minutes":       "{m}m ago",
         "rw_age_hours":         "{h}h ago",
@@ -157,8 +182,33 @@ STRINGS = {
             "❔ 状态未知 — 请 Sync · ⚪ 已合并 / 已跳过"),
         "rw_unknown_hint":      (
             "⚠ 有 {n} 条 MR 没有 GitLab 状态缓存，紧迫度只是估算。"
-            "请到「Tranzor Checks」标签运行 Sync 刷新。"),
+            "点 ⚙ 按钮配置 GitLab token，再「同步并刷新」。"),
         "rw_no_web_url":        "尚未存 MR URL — 请先 Sync。",
+        # GitLab token 设置对话框 (PR-I)
+        "rw_gitlab_btn":        "⚙ GitLab",
+        "rw_gitlab_btn_tip":    (
+            "配置读取 MR 状态（open / merged / 审批数）所用的 GitLab\n"
+            "token。不配的话「风险」列会一直是 ❔。"),
+        "rw_gl_title":          "GitLab 连接设置",
+        "rw_gl_base_url":       "Base URL",
+        "rw_gl_token":          "Token",
+        "rw_gl_token_ph_set":   "（已配置 — 留空则保留当前 token）",
+        "rw_gl_token_ph_empty": "粘贴一个 read_api 权限的 personal access token",
+        "rw_gl_show":           "显示",
+        "rw_gl_scope_hint":     (
+            "只需 read_api scope。token 保存在 "
+            "~/.tranzor_exporter_config.json。"),
+        "rw_gl_test":           "测试连接",
+        "rw_gl_save":           "保存",
+        "rw_gl_cancel":         "取消",
+        "rw_gl_testing":        "测试中…",
+        "rw_gl_test_ok":        "✓ 已连接，身份：{name}（@{username}）",
+        "rw_gl_test_fail":      "✗ {error}",
+        "rw_gl_saved":          "✓ 已保存。点「同步并刷新」生效。",
+        "rw_gl_need_token":     "请输入 token（或留空以保留现有 token）。",
+        "rw_gl_env_override":   (
+            "⚠ 环境变量 TRANZOR_GITLAB_TOKEN 已设置，会覆盖本对话框。"
+            "要让保存的 token 生效，请先取消该环境变量。"),
         "rw_age_just_now":      "刚刚",
         "rw_age_minutes":       "{m} 分钟前",
         "rw_age_hours":         "{h} 小时前",
@@ -248,7 +298,7 @@ class ReviewWorklistTab:
     # UI 构造
     # ------------------------------------------------------------------
     def _build(self, parent):
-        from export_gui import FONT_FAMILY  # 局部 import，避免循环依赖
+        from export_gui import FONT_FAMILY, Tooltip  # 局部 import，避免循环依赖
 
         content = ttk.Frame(parent, style="App.TFrame")
         content.pack(fill="both", expand=True, padx=16, pady=8)
@@ -283,6 +333,16 @@ class ReviewWorklistTab:
             bg="#0f3460", fg="#fff", activebackground="#1a3a6a",
             activeforeground="#fff", padx=14, pady=4)
         self.btn_refresh.pack(side="left", padx=(0, 12))
+
+        # PR-I: GitLab token 设置入口。配 token 才能把 ❔ 变成真实
+        # open/merged 状态，所以放在最显眼的同步按钮旁边。
+        self.btn_gitlab = tk.Button(
+            actions, text="", command=self._open_gitlab_settings,
+            font=(FONT_FAMILY, 10), relief="flat",
+            bg="#16213e", fg="#cbd5e1", activebackground="#1a3a6a",
+            activeforeground="#fff", padx=12, pady=4)
+        self.btn_gitlab.pack(side="left", padx=(0, 12))
+        self._tip_gitlab = Tooltip(self.btn_gitlab)
 
         self.chk_grey = ttk.Checkbutton(
             actions, text="", variable=self.include_grey_var,
@@ -379,6 +439,8 @@ class ReviewWorklistTab:
         self.lbl_subtitle.configure(text=t("rw_subtitle"))
         self.lbl_legend.configure(text=t("rw_legend"))
         self.btn_refresh.configure(text=t("rw_refresh"))
+        self.btn_gitlab.configure(text=t("rw_gitlab_btn"))
+        self._tip_gitlab.set_text(t("rw_gitlab_btn_tip"))
         self.chk_grey.configure(text=t("rw_show_grey"))
         self.chk_reviewed.configure(text=t("rw_show_reviewed"))
         self.tree.heading("risk",     text=t("rw_col_risk"))
@@ -791,3 +853,190 @@ class ReviewWorklistTab:
                 webbrowser.open(event.mr_web_url, new=2)
             except Exception:
                 pass
+
+    # ------------------------------------------------------------------
+    # PR-I: GitLab token 设置对话框
+    # ------------------------------------------------------------------
+    def _open_gitlab_settings(self):
+        """弹一个 modal 对话框：填 base_url + token，测试连接，写配置文件。
+
+        - token 输入框默认 password 模式（show=●），带"显示"复选框。
+        - 已配置 token 时输入框留空表示"保持不变"，只有填了新值才覆盖。
+        - 测试连接走后台线程（verify_connection 是网络调用），结果回主
+          线程渲染。
+        - 检测到 TRANZOR_GITLAB_TOKEN 环境变量时给醒目提示——它的优先级
+          高于配置文件，否则用户会困惑"保存了怎么不生效"。
+        - 保存后自动触发一次「同步并刷新」让新 token 立即生效。
+        """
+        import os as _os
+        import tkinter as tk
+        import gitlab_client as gc
+        from export_gui import FONT_FAMILY
+
+        t = self._t
+        dlg = tk.Toplevel(self.parent)
+        dlg.title(t("rw_gl_title"))
+        dlg.configure(bg="#1a1a2e")
+        try:
+            dlg.transient(self.parent.winfo_toplevel())
+        except Exception:
+            pass
+        # grab_set 在不可见的 root 下会抛 TclError（"window not
+        # viewable"）。生产环境 root 已 deiconify 不会触发，但包 try 让
+        # 对话框在任何状态下都能弹出（最坏退化为非模态）。
+        try:
+            dlg.grab_set()
+        except Exception:
+            pass
+        dlg.resizable(False, False)
+
+        frm = tk.Frame(dlg, bg="#1a1a2e")
+        frm.pack(fill="both", expand=True, padx=20, pady=16)
+
+        def _label(text, fg="#e0e0e0", size=10, bold=False, pady=(0, 2)):
+            tk.Label(
+                frm, text=text, bg="#1a1a2e", fg=fg,
+                font=(FONT_FAMILY, size, "bold" if bold else "normal"),
+                wraplength=460, justify="left",
+            ).pack(anchor="w", pady=pady)
+
+        def _entry(var, show=None):
+            e = tk.Entry(
+                frm, textvariable=var, font=(FONT_FAMILY, 10),
+                bg="#0a0a1a", fg="#fff", insertbackground="#fff",
+                relief="flat", show=show or "")
+            e.pack(fill="x", ipady=4, pady=(0, 8))
+            return e
+
+        # Base URL
+        _label(t("rw_gl_base_url"), bold=True)
+        base_var = tk.StringVar(value=gc.get_base_url())
+        _entry(base_var)
+
+        # Token
+        has_token = bool(gc.get_token())
+        _label(t("rw_gl_token"), bold=True)
+        token_var = tk.StringVar()
+        ent_token = _entry(token_var, show="●")
+        _label(
+            t("rw_gl_token_ph_set") if has_token
+            else t("rw_gl_token_ph_empty"),
+            fg="#7a7d99", size=8, pady=(0, 4))
+
+        show_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(
+            frm, text=t("rw_gl_show"), variable=show_var,
+            command=lambda: ent_token.configure(
+                show="" if show_var.get() else "●"),
+            bg="#1a1a2e", fg="#cbd5e1", selectcolor="#0a0a1a",
+            activebackground="#1a1a2e", activeforeground="#fff",
+            font=(FONT_FAMILY, 9),
+        ).pack(anchor="w", pady=(0, 8))
+
+        _label(t("rw_gl_scope_hint"), fg="#7a7d99", size=8, pady=(0, 8))
+
+        status = tk.Label(
+            frm, text="", bg="#1a1a2e", fg="#9aa0bf",
+            font=(FONT_FAMILY, 9), wraplength=460, justify="left")
+        status.pack(anchor="w", pady=(0, 10))
+
+        # 环境变量覆盖警告——优先级高于配置文件，最容易让用户困惑。
+        if _os.getenv("TRANZOR_GITLAB_TOKEN"):
+            status.configure(text=t("rw_gl_env_override"), fg="#fbbf24")
+
+        state = {"busy": False}
+
+        def _effective():
+            base = base_var.get().strip()
+            tok = token_var.get().strip() or gc.get_token()
+            return base, tok
+
+        def _set_status(text, color):
+            status.configure(text=text, fg=color)
+
+        def _test():
+            if state["busy"]:
+                return
+            base, tok = _effective()
+            if not tok:
+                _set_status(t("rw_gl_need_token"), "#fbbf24")
+                return
+            state["busy"] = True
+            _set_status(t("rw_gl_testing"), "#9aa0bf")
+
+            def _work():
+                res = gc.verify_connection(base_url=base, token=tok)
+
+                def _show():
+                    state["busy"] = False
+                    if res.get("ok"):
+                        _set_status(
+                            t("rw_gl_test_ok").format(
+                                name=res.get("name") or "?",
+                                username=res.get("username") or "?"),
+                            "#34d399")
+                    else:
+                        _set_status(
+                            t("rw_gl_test_fail").format(
+                                error=res.get("error") or "?"),
+                            "#f87171")
+                try:
+                    dlg.after(0, _show)
+                except Exception:
+                    pass
+
+            threading.Thread(target=_work, daemon=True).start()
+
+        def _save():
+            base = base_var.get().strip()
+            new_token = token_var.get().strip()
+            if not new_token and not gc.get_token():
+                _set_status(t("rw_gl_need_token"), "#fbbf24")
+                return
+            kwargs = {"gitlab_base_url": base or None}
+            if new_token:
+                kwargs["gitlab_token"] = new_token
+            gc.update_config(**kwargs)
+            _set_status(t("rw_gl_saved"), "#34d399")
+            # 关对话框 + 触发一次同步刷新让新 token 立即生效。
+            def _close_and_apply():
+                try:
+                    dlg.grab_release()
+                    dlg.destroy()
+                except Exception:
+                    pass
+                self._sync_and_reload()
+            dlg.after(700, _close_and_apply)
+
+        def _cancel():
+            try:
+                dlg.grab_release()
+                dlg.destroy()
+            except Exception:
+                pass
+
+        btns = tk.Frame(frm, bg="#1a1a2e")
+        btns.pack(fill="x", pady=(4, 0))
+
+        def _btn(parent, text, cmd, bg, fg="#fff"):
+            return tk.Button(
+                parent, text=text, command=cmd, font=(FONT_FAMILY, 10),
+                relief="flat", bg=bg, fg=fg, activebackground="#1a3a6a",
+                activeforeground="#fff", padx=14, pady=4)
+
+        _btn(btns, t("rw_gl_test"), _test, "#16213e", "#cbd5e1").pack(
+            side="left")
+        _btn(btns, t("rw_gl_save"), _save, "#0f3460").pack(
+            side="left", padx=(8, 0))
+        _btn(btns, t("rw_gl_cancel"), _cancel, "#16213e", "#cbd5e1").pack(
+            side="right")
+
+        # 居中到父窗。先 update 让 dlg 拿到真实尺寸。
+        try:
+            dlg.update_idletasks()
+            top = self.parent.winfo_toplevel()
+            x = top.winfo_rootx() + (top.winfo_width() - dlg.winfo_width()) // 2
+            y = top.winfo_rooty() + (top.winfo_height() - dlg.winfo_height()) // 3
+            dlg.geometry(f"+{max(0, x)}+{max(0, y)}")
+        except Exception:
+            pass
