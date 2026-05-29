@@ -9,20 +9,130 @@ Supports English / Chinese interface language toggle.
 # Startup instrumentation
 # ---------------------------------------------------------------------------
 # Cold-start has been a moving target — onefile UPX, onedir without UPX,
-# Defender scans, etc. Always record per-stage timestamps to a local log so
-# the next "EXE takes forever to open" complaint has data to look at instead
-# of guesswork. Cost: 4-5 lines per launch in a tiny text file. The first
-# entry below intentionally fires at module-import time, before any heavy
-# subordinate imports — diff against later entries to see where the time
-# actually goes.
+# Defender scans, etc. Two lessons baked in here after the latest "still
+# takes forever AND shows (未响应)" report:
+#
+#   1. ``_BOOT_T0`` only starts when Python begins executing THIS module —
+#      it's blind to the PyInstaller onefile bootloader unpacking the EXE
+#      into %TEMP% first, which is the prime suspect for the long delay.
+#      So we ALSO record the OS process-creation time (GetProcessTimes on
+#      Windows) and log "process create -> module exec" = unpack + interp
+#      init. If that line is huge, no amount of Python-side optimization or
+#      splash screen helps — the fix is the packaging (onedir / smaller
+#      bundle / fewer files for Defender to scan).
+#
+#   2. The old flush only ran at first mainloop idle. If we hang INSIDE
+#      ExportApp construction (before mainloop), the log was never written —
+#      exactly the "未响应" case. So every _boot_mark now appends a line
+#      immediately. Whatever the last line in the log is, that's where it
+#      hung. Cost: ~15 tiny appends per launch.
 import time as _time_for_boot
+import os as _os_for_boot
+import sys as _sys_for_boot
 _BOOT_T0 = _time_for_boot.perf_counter()
+_BOOT_WALL0 = _time_for_boot.time()        # epoch seconds at module-exec start
 _BOOT_STAGES: "list[tuple[str, float]]" = []
+_BOOT_LOG_PATH = None
+_BOOT_HEADER_WRITTEN = False
+
+
+def _boot_log_path():
+    global _BOOT_LOG_PATH
+    if _BOOT_LOG_PATH is None:
+        try:
+            base = _os_for_boot.path.join(
+                _os_for_boot.path.expanduser("~"), ".tranzor_exporter")
+            _os_for_boot.makedirs(base, exist_ok=True)
+            _BOOT_LOG_PATH = _os_for_boot.path.join(base, "startup.log")
+        except Exception:
+            _BOOT_LOG_PATH = ""
+    return _BOOT_LOG_PATH
+
+
+def _process_create_wall_time():
+    """Wall-clock epoch seconds when THIS OS process was created. Windows
+    only (GetProcessTimes); returns None elsewhere or on any error.
+
+    The gap between this and ``_BOOT_WALL0`` is the time the PyInstaller
+    bootloader spent before our Python even started — i.e. the onefile
+    %TEMP% unpack + interpreter bring-up."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k = ctypes.WinDLL("kernel32", use_last_error=True)
+        # MUST declare these — default restype is c_int, which truncates the
+        # 64-bit pseudo-handle from GetCurrentProcess and makes the call fail.
+        k.GetCurrentProcess.restype = wintypes.HANDLE
+        k.GetProcessTimes.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+        ]
+        k.GetProcessTimes.restype = wintypes.BOOL
+        creation = wintypes.FILETIME()
+        dummy = wintypes.FILETIME()
+        ok = k.GetProcessTimes(
+            k.GetCurrentProcess(),
+            ctypes.byref(creation), ctypes.byref(dummy),
+            ctypes.byref(dummy), ctypes.byref(dummy))
+        if not ok:
+            return None
+        ticks = (creation.dwHighDateTime << 32) | creation.dwLowDateTime
+        # FILETIME = 100ns ticks since 1601-01-01 UTC; 11644473600s to epoch.
+        return ticks / 1e7 - 11644473600.0
+    except Exception:
+        return None
+
+
+def _boot_write_header_once():
+    global _BOOT_HEADER_WRITTEN
+    if _BOOT_HEADER_WRITTEN:
+        return
+    _BOOT_HEADER_WRITTEN = True
+    path = _boot_log_path()
+    if not path:
+        return
+    try:
+        # Rotate by truncation when too big — only the last few launches
+        # matter for debugging.
+        try:
+            if _os_for_boot.path.getsize(path) > 64 * 1024:
+                open(path, "w", encoding="utf-8").close()
+        except OSError:
+            pass
+        import datetime as _dt
+        stamp = _dt.datetime.now().isoformat(timespec="seconds")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"\n=== launch {stamp} pid={_os_for_boot.getpid()} "
+                    f"frozen={getattr(_sys_for_boot, 'frozen', False)} ===\n")
+            pc = _process_create_wall_time()
+            if pc is not None:
+                unpack_ms = max(0.0, (_BOOT_WALL0 - pc) * 1000.0)
+                f.write(f"  {unpack_ms:8.0f}ms  bootloader unpack + interp "
+                        f"(process create -> module exec)\n")
+    except Exception:
+        pass
+
 
 def _boot_mark(label: str) -> None:
-    """Record a startup-stage timestamp (best-effort, never raises)."""
+    """Record a startup-stage timestamp AND append it to the log right away
+    (best-effort, never raises). Real-time append means a hang/crash still
+    leaves the trail up to the freeze point in the file."""
     try:
-        _BOOT_STAGES.append((label, _time_for_boot.perf_counter() - _BOOT_T0))
+        t = _time_for_boot.perf_counter() - _BOOT_T0
+        last = _BOOT_STAGES[-1][1] if _BOOT_STAGES else 0.0
+        _BOOT_STAGES.append((label, t))
+    except Exception:
+        return
+    try:
+        _boot_write_header_once()
+        path = _boot_log_path()
+        if path:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(f"  {t*1000:8.0f}ms  (+{(t-last)*1000:7.0f}ms)  "
+                        f"{label}\n")
     except Exception:
         pass
 
@@ -1075,6 +1185,7 @@ class ExportApp:
             except Exception as _e:
                 print(f"[Human Revisions tab] init failed: {_e}")
                 self.hr_tab = None
+        _boot_mark("tab_human_revisions")
 
         # --- Tab 6: Scan Tasks (optional, pure additive) ---
         # 独立显示 Missing Translation Scan 手动触发的扫描任务，与 MR Pipeline
@@ -1091,6 +1202,7 @@ class ExportApp:
             except Exception as _e:
                 print(f"[Scan Tasks tab] init failed: {_e}")
                 self.st_tab = None
+        _boot_mark("tab_scan_tasks")
 
         # --- Tab 7: Term Watchtower (optional, pure additive) ---
         self.tw_tab = None
@@ -1104,6 +1216,7 @@ class ExportApp:
             except Exception as _e:
                 print(f"[Term Watchtower tab] init failed: {_e}")
                 self.tw_tab = None
+        _boot_mark("tab_term_watchtower")
 
         # --- Tab 8: TM & Context Insight (optional, pure additive) ---
         # 可视化 Tranzor TM / Context Service 黑盒，让语言专家直观看到管线路由。
@@ -1119,6 +1232,7 @@ class ExportApp:
             except Exception as _e:
                 print(f"[TM & Context Insight tab] init failed: {_e}")
                 self.tci_tab = None
+        _boot_mark("tab_tm_context_insight")
 
         # --- Tab 9: OPUS ID Monitor (optional, pure additive) ---
         # 本地 SQLite 缓存 Tranzor 出过的所有 opus_id，随时随地看总量 / 新增 /
@@ -1134,6 +1248,7 @@ class ExportApp:
             except Exception as _e:
                 print(f"[OPUS ID Monitor tab] init failed: {_e}")
                 self.opus_tab = None
+        _boot_mark("tab_opus_monitor")
 
         # --- Tab 10: Tranzor Checks (optional, pure additive) ---
         # 全量任务 Checks 状态 + 错误关键词聚合，让 QA 一眼归类 Terminology /
@@ -1149,6 +1264,7 @@ class ExportApp:
             except Exception as _e:
                 print(f"[Tranzor Checks tab] init failed: {_e}")
                 self.tc_tab = None
+        _boot_mark("tab_tranzor_checks")
 
         # --- Tab 11: Review Worklist (PR-A) ---
         # Language Lead 每日唯一入口：把 70+ MR 压成 5-10 条按 merge 紧迫度
@@ -1165,6 +1281,7 @@ class ExportApp:
             except Exception as _e:
                 print(f"[Review Worklist tab] init failed: {_e}")
                 self.rw_tab = None
+        _boot_mark("tab_review_worklist")
 
         # ═══════════════════════════════════════════
         # TAB 1 CONTENTS (File Translation — preserved)
@@ -2178,32 +2295,30 @@ class ExportApp:
 # Entry point
 # ============================================================
 def _flush_boot_log() -> None:
-    """Persist per-stage startup timestamps so we can diagnose slow launches
-    after the fact. Best-effort: any failure here is silently swallowed —
-    diagnostics must never become the reason the GUI didn't open.
+    """Write a one-line summary at first mainloop idle: total time to
+    interactive + the 3 slowest stage deltas. The per-stage lines were
+    already appended live by ``_boot_mark`` (so a hang still leaves a
+    trail); this just adds the at-a-glance verdict at the end.
 
-    File: ``~/.tranzor_exporter/startup.log`` (rotates by simple truncation
-    when it grows past 64 KB so it can't balloon over time)."""
+    Best-effort: any failure is swallowed — diagnostics must never be the
+    reason the GUI didn't open."""
     try:
-        base = os.path.join(os.path.expanduser("~"), ".tranzor_exporter")
-        os.makedirs(base, exist_ok=True)
-        path = os.path.join(base, "startup.log")
-        # Truncate if too big — we only need the last few launches to debug.
-        try:
-            if os.path.getsize(path) > 64 * 1024:
-                with open(path, "w", encoding="utf-8") as _trunc:
-                    _trunc.write("")
-        except OSError:
-            pass
+        path = _boot_log_path()
+        if not path:
+            return
+        # Compute per-stage deltas and rank the slowest.
+        deltas = []
+        last = 0.0
+        for label, t in _BOOT_STAGES:
+            deltas.append((label, t - last))
+            last = t
+        slowest = sorted(deltas, key=lambda x: -x[1])[:3]
+        total_ms = (_BOOT_STAGES[-1][1] * 1000.0) if _BOOT_STAGES else 0.0
+        slow_str = ", ".join(
+            f"{lbl} +{d * 1000:.0f}ms" for lbl, d in slowest)
         with open(path, "a", encoding="utf-8") as f:
-            import datetime as _dt
-            stamp = _dt.datetime.now().isoformat(timespec="seconds")
-            f.write(f"--- launch {stamp} pid={os.getpid()} ---\n")
-            last = 0.0
-            for label, t in _BOOT_STAGES:
-                f.write(f"  {t*1000:7.0f}ms  (+{(t-last)*1000:6.0f}ms)  {label}\n")
-                last = t
-            f.write("\n")
+            f.write(f"  --- summary: {total_ms:.0f}ms module-exec -> first "
+                    f"idle; slowest: {slow_str} ---\n")
     except Exception:
         pass
 
