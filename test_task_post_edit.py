@@ -311,6 +311,77 @@ class CacheTests(unittest.TestCase):
         c.clear()
         self.assertIsNone(c.get("legacy", "t-1"))
 
+    def test_clear_kind_only_drops_matching_kind(self):
+        # GUI Refresh on File Translation must wipe ``legacy`` answers
+        # so a fresh prefetch can pick up edits the user just made in
+        # the Tranzor Platform UI — but it must NOT touch MR / scan
+        # caches, which are owned by other tabs and may still be valid.
+        c = tpe.PostEditCache()
+        c.set("legacy", "t-1", False)
+        c.set("legacy", "t-2", True)
+        c.set("mr", "1066", True)
+        c.set("scan", "s-1", True)
+        removed = c.clear_kind("legacy")
+        self.assertEqual(removed, 2)
+        self.assertIsNone(c.get("legacy", "t-1"))
+        self.assertIsNone(c.get("legacy", "t-2"))
+        # MR / scan untouched.
+        self.assertTrue(c.get("mr", "1066"))
+        self.assertTrue(c.get("scan", "s-1"))
+
+    def test_clear_kind_on_empty_is_noop(self):
+        c = tpe.PostEditCache()
+        self.assertEqual(c.clear_kind("legacy"), 0)
+
+
+# ---------------------------------------------------------------------------
+# _fetch_legacy — uses the server-side ``label_types=post_edited`` filter
+# ---------------------------------------------------------------------------
+class FetchLegacyServerFilterTests(unittest.TestCase):
+    """``_fetch_legacy`` must call the cheap server-side counter (1 HTTP
+    round-trip) and only fall back to the full-scan path when the
+    counter raises — that is the fix for PR #76's missing-badge bug
+    where the full-scan path took long enough on big tasks (e.g.
+    LOC-24765) that the GUI never showed ✏️."""
+
+    def test_server_filter_positive_returns_true(self):
+        # total > 0 → at least one human-edited row → badge.
+        with mock.patch(
+            "export_mr_pipeline.fetch_legacy_post_edit_total",
+            return_value=3,
+        ) as fast, mock.patch(
+            "export_mr_pipeline.fetch_all_legacy_translations_quality",
+        ) as slow:
+            self.assertTrue(tpe._fetch_legacy("253"))
+        fast.assert_called_once_with("253")
+        # Crucial: the heavy paginated scan MUST NOT run when the fast
+        # path succeeds — that's the whole reason this PR exists.
+        slow.assert_not_called()
+
+    def test_server_filter_zero_returns_false(self):
+        with mock.patch(
+            "export_mr_pipeline.fetch_legacy_post_edit_total",
+            return_value=0,
+        ), mock.patch(
+            "export_mr_pipeline.fetch_all_legacy_translations_quality",
+        ) as slow:
+            self.assertFalse(tpe._fetch_legacy("t-1"))
+        slow.assert_not_called()
+
+    def test_falls_back_to_full_scan_when_server_filter_fails(self):
+        # Older Tranzor backends without label_types=post_edited support
+        # would 4xx — _fetch_legacy must still detect via full scan so
+        # the badge keeps working there, just slowly.
+        with mock.patch(
+            "export_mr_pipeline.fetch_legacy_post_edit_total",
+            side_effect=RuntimeError("404 from old backend"),
+        ), mock.patch(
+            "export_mr_pipeline.fetch_all_legacy_translations_quality",
+            return_value=[{"translation_type": "Manual Edit"}],
+        ) as slow:
+            self.assertTrue(tpe._fetch_legacy("t-1"))
+        slow.assert_called_once_with("t-1")
+
 
 # ---------------------------------------------------------------------------
 # prefetch_async

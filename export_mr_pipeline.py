@@ -899,6 +899,29 @@ def fetch_legacy_translation_warnings(task_id):
         return {"inconsistent": [], "untranslated": []}
 
 
+def fetch_legacy_post_edit_total(task_id):
+    """Ask the server how many translations on a legacy task are
+    human-edited — using the ``label_types=post_edited`` server-side
+    filter so the call is O(1) regardless of task size.
+
+    Returns the integer ``total`` reported by the API (only
+    ``Manual Edit`` / ``LLM Retranslate`` rows match, per
+    ``legacy_task_repository.get_paginated_translations``). We request
+    ``limit=1`` because we only care about the count, not the entries.
+
+    Used by the Platform Task Overview / Scan Tasks ✏️ badge prefetch:
+    the legacy fetcher previously paged through the *entire* task to
+    detect a single human edit, which for thousand-string tasks took
+    long enough that the GUI sometimes never showed the badge in
+    practice (see PR #76).
+    """
+    params = {"limit": 1, "offset": 0, "label_types": "post_edited"}
+    resp = _api_get(f"{LEGACY_API}/tasks/{task_id}/translations", params=params)
+    resp.raise_for_status()
+    data = resp.json()
+    return int(data.get("total") or 0)
+
+
 def fetch_legacy_translation_edit_logs(task_id, translation_id):
     """GET /legacy/tasks/{task_id}/translations/{translation_id}/edit-logs"""
     resp = _api_get(
