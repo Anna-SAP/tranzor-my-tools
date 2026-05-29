@@ -56,20 +56,50 @@ MR_API = f"{TRANZOR_URL}/api/v1"
 _session = requests.Session() if requests else None
 MAX_RETRIES = 3
 
+# 默认 (connect, read) 超时。
+#   connect=10s  —— "连不上"要快速失败（VPN 没开 / 后端宕），不要让用户
+#                   干等。
+#   read=120s    —— 容忍慢端点。``/dashboard/cases`` 这类全量端点在大
+#                   数据集下经常 30s+ 才返回，旧的 30s 单值超时让 TM 洞察
+#                   和人工修订两个面板频繁报 "Read timed out (read
+#                   timeout=30)"（用户实测）。120s 给后端足够的喘息。
+# requests 接受 (connect, read) tuple；单个 float 会同时作用于两者。
+_DEFAULT_TIMEOUT = (10, 120)
+
 
 def _api_get(url, **kwargs):
-    """带重试的 GET 请求"""
+    """带重试的 GET 请求。
+
+    重试策略按异常类型区分（这是相对旧实现的关键改动）：
+
+    - **ReadTimeout**：后端就是慢，原样重试只会让用户多等 N 倍同样的
+      时长，体验更差。直接抛出，让上层 UI 显示友好错误，用户可缩小
+      日期范围 / 指定项目后再试。
+    - **ConnectionError / ConnectTimeout / 其它 Timeout**：通常是网络
+      抖动或瞬时拒连，指数退避重试有意义。
+    """
     if _session is None:
         raise RuntimeError("requests package not available")
-    kwargs.setdefault("timeout", 30)
+    kwargs.setdefault("timeout", _DEFAULT_TIMEOUT)
     for attempt in range(MAX_RETRIES):
         try:
             return _session.get(url, **kwargs)
-        except (requests.exceptions.Timeout,
-                requests.exceptions.ConnectionError) as e:
+        except requests.exceptions.ReadTimeout:
+            # 慢端点——不重试，直接抛。
+            raise
+        except (requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout) as e:
+            # 走到这里的是 ConnectionError / ConnectTimeout / 其它非
+            # ReadTimeout 的 Timeout —— 瞬时网络问题，退避后重试。
             if attempt < MAX_RETRIES - 1:
                 wait = 2 ** attempt
-                print(f"    ⚠ 请求超时，{wait}s 后重试 ({attempt+1}/{MAX_RETRIES})...")
+                # print 包 try —— 某些控制台是 GBK，emoji/特殊字符会
+                # 抛 UnicodeEncodeError，绝不能让"日志"反过来弄崩请求。
+                try:
+                    print(f"    连接异常，{wait}s 后重试 "
+                          f"({attempt + 1}/{MAX_RETRIES})...")
+                except Exception:
+                    pass
                 time.sleep(wait)
             else:
                 raise
