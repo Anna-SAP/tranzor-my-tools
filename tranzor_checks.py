@@ -1507,6 +1507,7 @@ def get_worklist_items(
     include_grey: bool = False,
     include_fully_reviewed: bool = False,
     reviewer: str | None = None,
+    known_term_names_lower: frozenset[str] | set[str] | None = None,
     now_utc: datetime | None = None,
 ) -> list[dict]:
     """Review Worklist 主表的数据源。
@@ -1514,7 +1515,8 @@ def get_worklist_items(
     返回按 ``priority`` 降序排列的 MR 列表。每条包含足够 UI 直接渲染的
     字段：``priority`` / ``tier`` / ``zh_issues`` / ``secondary_issues`` /
     ``other_issues`` / ``mr_web_url`` / ``reviewed_count`` /
-    ``unreviewed_count`` / ``fully_reviewed`` 等。
+    ``unreviewed_count`` / ``fully_reviewed`` / ``unregistered_terms``
+    (PR-C) 等。
 
     Args:
         limit: 上限。默认 50 —— Lillian 一天大概看 8-12 条，50 给她足够
@@ -1528,6 +1530,11 @@ def get_worklist_items(
             :func:`_default_reviewer`（``$TRANZOR_REVIEWER`` 优先于
             ``getpass.getuser()``）。多人共用同一 DB 时，传不同 reviewer
             得到各自的 worklist 视图。
+        known_term_names_lower: PR-C 的 🆕 列数据源 —— 已登记术语集合
+            （小写）。``None`` 表示"跳过 🆕 检查"，每行 ``unregistered_terms``
+            落空列表。生产路径由 GUI 传入
+            :func:`tranzor_terminology.load_known_term_names_lower` 的结果；
+            单测可注入任意集合。
         now_utc: 可注入的当前时间，单测专用。
 
     数据源：仅 ``source_kind = 'mr'`` 的 ``task_checks`` 行。Scan / File
@@ -1570,11 +1577,12 @@ def get_worklist_items(
                     rr["opus_id"], rr["target_language"], rr["text_hash"],
                 ))
 
-        # 拉出每个 MR 的 issue 详情，行内算 reviewed_count。
+        # 拉出每个 MR 的 issue 详情，行内算 reviewed_count 和未登记术语。
+        # source_text 也拉了——PR-C 的 🆕 列要在它上面做正则扫描。
         issue_rows = conn.execute(
             """
             SELECT task_id, source_kind, opus_id, target_language,
-                   translated_text
+                   translated_text, source_text
             FROM check_issues
             WHERE source_kind = 'mr'
             """,
@@ -1598,6 +1606,16 @@ def get_worklist_items(
 
     # MR → (reviewed_count, total_count)
     review_map: dict[tuple[str, str], tuple[int, int]] = {}
+    # MR → ordered list[str] of unique unregistered terms (PR-C). Insertion
+    # order preserved to keep the GUI display stable across reloads — same
+    # data in, same output. dict-as-ordered-set is the cheap way.
+    unregistered_map: dict[tuple[str, str], dict[str, None]] = {}
+
+    # PR-C 的 🆕 计算 —— 只有 caller 传 known_term_names_lower 时才跑，
+    # 单测 / 老调用方不传时跳过整段，省一次模块 import 和 regex 扫。
+    do_unregistered = known_term_names_lower is not None
+    if do_unregistered:
+        import unregistered_terms as _ut
     for r in issue_rows:
         key = (r["task_id"], r["source_kind"])
         rc, tc = review_map.get(key, (0, 0))
@@ -1607,6 +1625,15 @@ def get_worklist_items(
         if hk in reviewed_keys:
             rc += 1
         review_map[key] = (rc, tc)
+
+        if do_unregistered:
+            src = r["source_text"]
+            if src:
+                bucket = unregistered_map.setdefault(key, {})
+                for term in _ut.extract_unregistered(
+                    src, known_term_names_lower,
+                ):
+                    bucket.setdefault(term, None)
 
     out: list[dict] = []
     for r in rows:
@@ -1653,6 +1680,14 @@ def get_worklist_items(
         d["fully_reviewed"] = (
             total_issue_count > 0 and reviewed_count >= total_issue_count
         )
+
+        # PR-C: 未登记术语清单。``[]`` 表示要么没有要么 caller 没传 glossary。
+        # 调用方分得清 ``do_unregistered`` 状态，这里不引入第三态字段。
+        terms = unregistered_map.get(
+            (d["task_id"], d["source_kind"]), {},
+        )
+        d["unregistered_terms"] = list(terms.keys())
+        d["unregistered_term_count"] = len(terms)
 
         # 综合 priority：tier×权重 是主轴，issue 数把同 tier 内排序细分。
         # PR-B 起把 reviewed issue 的权重降低 —— 已审的 issue 不再为这条

@@ -323,6 +323,50 @@ class GetWorklistItemsTests(unittest.TestCase):
             self.assertEqual(items[0]["secondary_issues"], 3)
             self.assertEqual(items[0]["other_issues"], 4)
 
+    def test_unregistered_terms_surface_when_glossary_provided(self):
+        # PR-C: When the caller hands in a known-terms set, the worklist
+        # row's source_text gets scanned for "probably product/feature"
+        # names not in the glossary.
+        with _IsolatedDb():
+            tc.init_db()
+            _seed_mr_task(
+                task_id="t-pc", mr_iid=900,
+                upvotes=1, updated_at=_hours_ago_iso(2),
+                issues={"zh-CN": 1},
+            )
+            # Patch one source_text on the seeded issue so we can assert
+            # on a stable extraction. The seeder sets source_text="src".
+            with tc._connect() as conn:
+                conn.execute(
+                    "UPDATE check_issues SET source_text = ? "
+                    "WHERE task_id = ?",
+                    ("Open LiveReports for RingCentral users.", "t-pc"),
+                )
+            # RingCentral known → only LiveReports surfaces.
+            items = tc.get_worklist_items(
+                now_utc=NOW,
+                known_term_names_lower=frozenset({"ringcentral"}),
+            )
+            self.assertEqual(items[0]["task_id"], "t-pc")
+            self.assertIn("LiveReports", items[0]["unregistered_terms"])
+            self.assertNotIn("RingCentral", items[0]["unregistered_terms"])
+            self.assertEqual(items[0]["unregistered_term_count"], 1)
+
+    def test_unregistered_terms_empty_when_glossary_not_provided(self):
+        # No glossary handed in → no extraction work, fields stay empty.
+        # This is what protects existing callers (PR-A / PR-B tests, the
+        # old GUI path) from suddenly seeing 🆕 noise.
+        with _IsolatedDb():
+            tc.init_db()
+            _seed_mr_task(
+                task_id="t-nopc", mr_iid=901,
+                upvotes=1, updated_at=_hours_ago_iso(2),
+                issues={"zh-CN": 1},
+            )
+            items = tc.get_worklist_items(now_utc=NOW)
+            self.assertEqual(items[0]["unregistered_terms"], [])
+            self.assertEqual(items[0]["unregistered_term_count"], 0)
+
     def test_scan_and_legacy_tasks_excluded(self):
         # Worklist is MR-only; the legacy / scan tabs own their own
         # entry points and showing them here would just dilute focus.
