@@ -65,6 +65,13 @@ a = Analysis(
         'gui_tab_tm_context_insight',
         'gui_tab_opus_id_monitor',
         'gui_tab_tranzor_checks',
+        # PR-A..E (Review Worklist series) — Worklist tab and its
+        # support modules are referenced through try/except imports so
+        # PyInstaller's static analyzer might skip them; list explicitly.
+        'gui_tab_review_worklist',
+        'merge_watchdog',
+        'unregistered_terms',
+        'daily_digest',
         'opus_id_monitor',
         'tranzor_checks',
         'terminology_highlight',

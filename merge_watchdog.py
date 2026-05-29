@@ -202,6 +202,9 @@ def check_once() -> tuple[list[MergeEvent], int]:
         limit=500,
         include_grey=False, include_fully_reviewed=True,
     )
+    # PR-F: 严格只看 "red" tier。"unknown" 是数据不全的估算，没必要
+    # 5min 一轮硬刷 GitLab —— sync 的活留给 Tranzor Checks tab 一次性
+    # 拉，否则 token 缺失场景会 N 次 401 一直敲门。
     red_items = [d for d in items if d.get("merge_tier") == "red"]
     red_count = len(red_items)
 

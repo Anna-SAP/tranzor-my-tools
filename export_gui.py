@@ -2208,6 +2208,49 @@ def _flush_boot_log() -> None:
         pass
 
 
+def _show_splash(root):
+    """PR-F: 在主 UI 构造期间盖一个 splash Toplevel。
+
+    用户报"前 10+ 秒白屏 / 未响应"——主 Tk 窗口在 ``ExportApp(root)``
+    里挂 1000+ widget 时仍未完成首次 paint，OS 渲染一片空白。这里先
+    withdraw 主窗，弹一个轻量 Toplevel 立即调 ``update()`` 强制画出来，
+    构造完再 destroy 并 deiconify 主窗。整体启动总时长没变，但用户能
+    看到"正在加载"而不是冷白屏。
+
+    splash 故意没引用图片资源——onefile EXE 加载图片要再解压，反而
+    拖慢启动。文本 + 进度感的 ttk.Progressbar 已经够友好。
+
+    返回创建出的 Toplevel；调用方在 ``ExportApp`` 构造完之后 destroy()。
+    """
+    splash = tk.Toplevel(root)
+    splash.overrideredirect(True)   # 无 chrome，纯净浮窗
+    splash.configure(bg="#1a1a2e")
+    w, h = 480, 160
+    sw = splash.winfo_screenwidth()
+    sh = splash.winfo_screenheight()
+    splash.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}")
+    splash.attributes("-topmost", True)
+
+    tk.Label(
+        splash, text="Tranzor Translation Exporter",
+        bg="#1a1a2e", fg="#e0e0e0",
+        font=(FONT_FAMILY, 16, "bold"),
+    ).pack(pady=(28, 6))
+    tk.Label(
+        splash, text="Loading…",
+        bg="#1a1a2e", fg="#a0a3b8",
+        font=(FONT_FAMILY, 10),
+    ).pack()
+
+    bar = ttk.Progressbar(splash, mode="indeterminate", length=320)
+    bar.pack(pady=18)
+    bar.start(12)
+    # 关键：强制 paint。否则即便 Toplevel 创建了，mainloop 还没起，
+    # 窗口仍然是空白透明。
+    splash.update()
+    return splash
+
+
 def main():
     _boot_mark("main_entry")
     root = tk.Tk()
@@ -2216,8 +2259,27 @@ def main():
         root.iconbitmap(default="")
     except Exception:
         pass
-    app = ExportApp(root)
-    _boot_mark("ExportApp_constructed")
+    # PR-F: 先 withdraw 主窗，弹 splash —— 让用户在 ExportApp 构造期
+    # 间看到"加载中"而不是白屏。任何 splash 失败都被吞掉，绝不阻断启动。
+    splash = None
+    try:
+        root.withdraw()
+        splash = _show_splash(root)
+    except Exception:
+        splash = None
+    try:
+        app = ExportApp(root)
+    finally:
+        _boot_mark("ExportApp_constructed")
+        try:
+            if splash is not None:
+                splash.destroy()
+        except Exception:
+            pass
+        try:
+            root.deiconify()
+        except Exception:
+            pass
     # Don't force a synchronous root.update() here — when there are 1000+
     # widgets across 10 tabs, that single call can take 15-20 s while Tk
     # paints everything. Instead, let mainloop draw the window naturally

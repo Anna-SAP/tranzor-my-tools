@@ -84,7 +84,11 @@ STRINGS = {
             "{project} · MR #{mr} just went {old} → {new}\n"
             "{task}\n\nOpen in browser?"),
         "rw_legend":            (
-            "🔴 Imminent merge · 🟡 Today · 🟢 Can wait · ⚪ Merged / skipped"),
+            "🔴 Imminent merge · 🟡 Today · 🟢 Can wait · "
+            "❔ State unknown — run Sync · ⚪ Merged / skipped"),
+        "rw_unknown_hint":      (
+            "⚠ {n} MR(s) have no GitLab state cached. "
+            "Run Sync on the Tranzor Checks tab to refresh urgency."),
         "rw_no_web_url":        "No MR URL stored — run Sync to populate.",
         "rw_age_just_now":      "just now",
         "rw_age_minutes":       "{m}m ago",
@@ -144,7 +148,11 @@ STRINGS = {
             "{project} · MR #{mr} 状态从 {old} 变成 {new}\n"
             "{task}\n\n是否在浏览器中打开？"),
         "rw_legend":            (
-            "🔴 即将合并 · 🟡 今日必看 · 🟢 可慢慢看 · ⚪ 已合并 / 已跳过"),
+            "🔴 即将合并 · 🟡 今日必看 · 🟢 可慢慢看 · "
+            "❔ 状态未知 — 请 Sync · ⚪ 已合并 / 已跳过"),
+        "rw_unknown_hint":      (
+            "⚠ 有 {n} 条 MR 没有 GitLab 状态缓存，紧迫度只是估算。"
+            "请到「Tranzor Checks」标签运行 Sync 刷新。"),
         "rw_no_web_url":        "尚未存 MR URL — 请先 Sync。",
         "rw_age_just_now":      "刚刚",
         "rw_age_minutes":       "{m} 分钟前",
@@ -157,10 +165,11 @@ STRINGS = {
 # UI 风险圆点 —— 与 compute_merge_urgency 返回的 tier 一一对应。
 # 单字符 emoji 让 Treeview 列宽紧凑；避免长文本撑表头。
 _TIER_DOT = {
-    "red":   "🔴",
-    "amber": "🟡",
-    "green": "🟢",
-    "grey":  "⚪",
+    "red":     "🔴",
+    "amber":   "🟡",
+    "green":   "🟢",
+    "unknown": "❔",   # PR-F: GitLab state 缺失，按估算显示但带提示
+    "grey":    "⚪",
 }
 
 
@@ -213,11 +222,15 @@ class ReviewWorklistTab:
         self._items: list[dict] = []
         self._watchdog = None  # PR-D
         self._build(parent)
-        # 首屏立刻渲染——SQLite local read 是毫秒级的，不需要 spinner。
-        self.parent.after(0, self._reload)
-        # PR-D: 启动 merge watchdog —— 5min 一轮，发现 red MR 转 merged
-        # 时 messagebox 弹窗。daemon 线程，跟随 GUI 关闭自动退出。
-        self.parent.after(0, self._start_watchdog)
+        # 首屏渲染延迟 500ms —— 让 ExportApp 其他 tab 先完成 paint，
+        # 主窗 deiconify 后用户立即看到完整 GUI；worklist 数据这点延迟
+        # 在视觉上没区别。PR-F 修白屏的一部分。
+        self.parent.after(500, self._reload)
+        # PR-D / PR-F: 延迟 3s 启动 merge watchdog —— daemon 线程本身
+        # 不阻 UI，但首轮 check_once() 会对所有 red MR 调 GitLab，遇
+        # token 不存在会快速失败但仍占启动窗口的网络/CPU。3s 后用户已
+        # 在与 GUI 交互，启动体感不被打扰。
+        self.parent.after(3000, self._start_watchdog)
 
     def _t(self, key):
         return self.app._t(key)
@@ -317,6 +330,10 @@ class ReviewWorklistTab:
             "tier_amber", background="#3a2e1f", foreground="#fde68a")
         self.tree.tag_configure(
             "tier_green", background="#1f3a28", foreground="#bbf7d0")
+        # PR-F: unknown 用深蓝紫 —— 与暖色 red/amber 视觉拉开，让 Lillian
+        # 一眼看出"这条是估算的，建议 Sync 一下再下判断"。
+        self.tree.tag_configure(
+            "tier_unknown", background="#1f2540", foreground="#c7d2fe")
         self.tree.tag_configure(
             "tier_grey", background="#222", foreground="#888")
 
@@ -430,7 +447,17 @@ class ReviewWorklistTab:
                 total=summary.get("total", 0),
             ),
         )
-        self.lbl_status.configure(text="")
+        # PR-F: 如果当前视图里有 unknown-tier 行，提示一下"建议 Sync"。
+        # 数量 > 0 才显示——避免在正常状态下也唠叨。
+        n_unknown = sum(
+            1 for d in items if d.get("merge_tier") == "unknown"
+        )
+        if n_unknown:
+            self.lbl_status.configure(
+                text=self._t("rw_unknown_hint").format(n=n_unknown),
+            )
+        else:
+            self.lbl_status.configure(text="")
 
     def _on_error(self, err):
         self._loading = False
