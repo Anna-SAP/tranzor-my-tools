@@ -128,9 +128,29 @@ def has_post_edit_mr_from_cases(cases: Iterable[dict]) -> bool:
 # ---------------------------------------------------------------------------
 
 def _fetch_legacy(task_id: str) -> bool:
+    """Detect whether a File Translation task has any human-edited row.
+
+    Uses the server-side ``label_types=post_edited`` filter so this is a
+    single tiny request (``total > 0``) regardless of task size — the
+    older path fetched ALL translations and filtered client-side, which
+    on multi-thousand-row tasks took long enough that the GUI sometimes
+    never showed the ✏️ badge before the user took action (e.g. Task
+    253 / LOC-24765 in the PR #76 regression).
+
+    Falls back to the full client-side scan ONLY when the server filter
+    fails (older Tranzor backend that doesn't recognise
+    ``label_types=post_edited``) — the fallback preserves correctness at
+    the original cost.
+    """
     import export_mr_pipeline as _mp
-    trs = _mp.fetch_all_legacy_translations_quality(task_id)
-    return has_post_edit_legacy(trs)
+    try:
+        return _mp.fetch_legacy_post_edit_total(task_id) > 0
+    except Exception:
+        # Backend doesn't expose the filter (e.g. pinned to an older
+        # Tranzor) — fall back to the original full-scan behaviour so
+        # the badge still appears, just more slowly.
+        trs = _mp.fetch_all_legacy_translations_quality(task_id)
+        return has_post_edit_legacy(trs)
 
 
 def _fetch_scan(task_id: str) -> bool:
@@ -288,6 +308,21 @@ class PostEditCache:
     def clear(self) -> None:
         with self._lock:
             self._data.clear()
+
+    def clear_kind(self, source_kind: str) -> int:
+        """Drop every cached answer for a given source kind. Returns the
+        number of entries removed.
+
+        Used by the GUI's Refresh button on the File Translation tab so
+        a re-prefetch picks up edits the user made in the Tranzor
+        Platform UI between the first render and the refresh — the
+        previous ``False`` would otherwise stay cached forever.
+        """
+        with self._lock:
+            stale = [k for k in self._data if k[0] == source_kind]
+            for k in stale:
+                self._data.pop(k, None)
+            return len(stale)
 
 
 # Module-level singleton — the GUI imports this name directly.

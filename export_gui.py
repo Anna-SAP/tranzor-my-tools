@@ -1784,9 +1784,23 @@ class ExportApp:
 
     # ── Summary panel data loading ──
     def _load_summary_data(self):
-        """Load task summary data in a background thread."""
+        """Load task summary data in a background thread.
+
+        Also drops the ``legacy`` post-edit cache: if the user clicks
+        Refresh after editing translations in the Tranzor Platform UI,
+        the previous ``False`` answer is now stale and must be re-asked.
+        The MR / scan kinds aren't touched here — the File Translation
+        flow is the one where users actively go-edit-and-come-back, and
+        scoping the invalidation matches the user's intent.
+        """
         if self.summary_loading:
             return
+        try:
+            import task_post_edit as _tpe_local
+            _tpe_local.get_cache().clear_kind("legacy")
+        except Exception:
+            # Cache invalidation is best-effort — never block the refresh.
+            pass
         self.summary_loading = True
         self.lbl_summary_status.configure(
             text=self._t("summary_loading"), foreground="#666")
