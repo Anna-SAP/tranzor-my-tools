@@ -25,6 +25,7 @@ a = Analysis(
         'gui_tab_tm_context_insight',
         'gui_tab_opus_id_monitor',
         'gui_tab_tranzor_checks',
+        'date_picker',  # 共享深色日历选择组件（日期字段 📅 选择器）
         'opus_id_monitor',
         'tranzor_checks',
         'terminology_highlight',
