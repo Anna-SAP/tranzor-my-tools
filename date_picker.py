@@ -277,6 +277,20 @@ class _CalendarPopup(tk.Toplevel):
             self.geometry(f"+{max(0, x)}+{max(0, y)}")
         except tk.TclError:
             pass
+        # 关键修复：overrideredirect 窗口不受窗口管理器管理，没有 z-order
+        # 优先级。主窗最大化时，弹窗会被压在主窗**之下** —— 用户点 📅
+        # 后“看不到日历”，加上 grab_set 把点击劫持到这个看不见的窗口，
+        # 表现就是“点了没反应 / 卡住”。这正是之前的根因。显式抬到最前 +
+        # 置顶 + 抢焦点，强制浮在主窗之上。
+        for _action in (
+            self.lift,
+            lambda: self.attributes("-topmost", True),
+            self.focus_force,
+        ):
+            try:
+                _action()
+            except tk.TclError:
+                pass
 
 
 def _resolve_lang(lang) -> str:
