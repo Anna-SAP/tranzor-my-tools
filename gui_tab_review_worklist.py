@@ -44,12 +44,17 @@ STRINGS = {
         "rw_show_grey_tip":     (
             "Show MRs that are already merged or have skip-translate.\n"
             "Off by default — those need no review action today."),
+        "rw_show_reviewed":     "Show fully-reviewed",
+        "rw_show_reviewed_tip": (
+            "Show MRs whose every issue you've already marked.\n"
+            "Off by default — finished MRs don't need attention."),
         "rw_col_risk":          "Risk",
         "rw_col_project":       "Project",
         "rw_col_mr":            "MR #",
         "rw_col_task":          "Task",
         "rw_col_zh":            "zh issues",
         "rw_col_other":         "other issues",
+        "rw_col_reviewed":      "Reviewed",
         "rw_col_score":         "Avg score",
         "rw_col_activity":      "Last activity",
         "rw_col_state":         "State",
@@ -59,8 +64,13 @@ STRINGS = {
         "rw_loading":           "Loading worklist…",
         "rw_error":             "Failed to load: {error}",
         "rw_count":             "{shown} of {total} MR(s)",
+        "rw_summary_reviewer":  "Reviewer: {reviewer}  ·  today {today} · total {total}",
         "rw_open":              "Open MR",
         "rw_open_tip":           "Open the MR in your default browser.",
+        "rw_menu_mark":         "✓ Mark MR reviewed",
+        "rw_menu_unmark":       "↻ Unmark MR",
+        "rw_marked":            "Marked {n} issue(s) reviewed in MR #{mr}.",
+        "rw_unmarked":          "Unmarked {n} issue(s) in MR #{mr}.",
         "rw_legend":            (
             "🔴 Imminent merge · 🟡 Today · 🟢 Can wait · ⚪ Merged / skipped"),
         "rw_no_web_url":        "No MR URL stored — run Sync to populate.",
@@ -82,12 +92,17 @@ STRINGS = {
         "rw_show_grey_tip":     (
             "显示已 merged 或带 skip-translate 标签的 MR。\n"
             "默认关闭—这些今天无需 Review。"),
+        "rw_show_reviewed":     "包含已全部审完",
+        "rw_show_reviewed_tip": (
+            "显示该 MR 所有 issue 都已被你 Mark 的。\n"
+            "默认关闭—已审完的 MR 无需占视觉空间。"),
         "rw_col_risk":          "风险",
         "rw_col_project":       "项目",
         "rw_col_mr":            "MR #",
         "rw_col_task":          "任务",
         "rw_col_zh":            "中文问题",
         "rw_col_other":         "其它问题",
+        "rw_col_reviewed":      "已审",
         "rw_col_score":         "平均分",
         "rw_col_activity":      "最近活动",
         "rw_col_state":         "状态",
@@ -97,8 +112,13 @@ STRINGS = {
         "rw_loading":           "正在加载清单…",
         "rw_error":             "加载失败：{error}",
         "rw_count":             "共 {total} 条，显示 {shown} 条",
+        "rw_summary_reviewer":  "审阅者：{reviewer}  ·  今日 {today} · 累计 {total}",
         "rw_open":              "打开 MR",
         "rw_open_tip":           "在默认浏览器中打开 MR。",
+        "rw_menu_mark":         "✓ 标记 MR 已审",
+        "rw_menu_unmark":       "↻ 撤回 MR 已审",
+        "rw_marked":            "已将 MR #{mr} 中的 {n} 条 issue 标记为已审。",
+        "rw_unmarked":          "已撤回 MR #{mr} 中的 {n} 条 issue 已审记录。",
         "rw_legend":            (
             "🔴 即将合并 · 🟡 今日必看 · 🟢 可慢慢看 · ⚪ 已合并 / 已跳过"),
         "rw_no_web_url":        "尚未存 MR URL — 请先 Sync。",
@@ -164,6 +184,7 @@ class ReviewWorklistTab:
         self.app = app
         self.parent = parent
         self.include_grey_var = tk.BooleanVar(value=False)
+        self.include_reviewed_var = tk.BooleanVar(value=False)
         self._loading = False
         self._items: list[dict] = []
         self._build(parent)
@@ -218,23 +239,34 @@ class ReviewWorklistTab:
             command=self._reload, style="App.TCheckbutton")
         self.chk_grey.pack(side="left")
 
+        self.chk_reviewed = ttk.Checkbutton(
+            actions, text="", variable=self.include_reviewed_var,
+            command=self._reload, style="App.TCheckbutton")
+        self.chk_reviewed.pack(side="left", padx=(12, 0))
+
+        # 顶右：审阅者徽章——"今日已审 X / 累计 Y"。Lillian 一眼看出
+        # 她今天的工作量，也是给自己的"还差几条"提醒。
+        self.lbl_reviewer = ttk.Label(
+            actions, text="", style="Status.TLabel")
+        self.lbl_reviewer.pack(side="right")
+
         # ── 表格 ──
         tree_frame = ttk.Frame(content, style="App.TFrame")
         tree_frame.pack(fill="both", expand=True, pady=(4, 0))
 
         cols = ("risk", "project", "mr", "task", "zh", "other",
-                "score", "activity", "state")
+                "reviewed", "score", "activity", "state")
         self.tree = ttk.Treeview(
             tree_frame, columns=cols, show="headings",
             selectmode="browse", height=18)
         widths = {
-            "risk": 50, "project": 130, "mr": 60, "task": 280,
-            "zh": 80, "other": 80, "score": 70, "activity": 100,
-            "state": 80,
+            "risk": 50, "project": 130, "mr": 60, "task": 240,
+            "zh": 80, "other": 80, "reviewed": 80,
+            "score": 70, "activity": 100, "state": 80,
         }
         anchors = {
             "risk": "center", "mr": "center", "zh": "center",
-            "other": "center", "score": "center",
+            "other": "center", "reviewed": "center", "score": "center",
             "activity": "center", "state": "center",
         }
         for c in cols:
@@ -261,6 +293,16 @@ class ReviewWorklistTab:
         scroll.pack(side="right", fill="y")
         self.tree.bind("<Double-1>", self._on_double_click)
 
+        # 右键 / Ctrl+Click 弹 Mark / Unmark 菜单。
+        # 行内 ✓ 按钮没用 —— Treeview 不支持嵌入控件，右键菜单是最少
+        # 侵入又不增加 UI 体积的方案。
+        self.context_menu = tk.Menu(self.tree, tearoff=0)
+        # 文案在 refresh_text 里赋；这里先 placeholder。
+        self.context_menu.add_command(label="", command=self._mark_selected)
+        self.context_menu.add_command(label="", command=self._unmark_selected)
+        # Windows 右键事件；macOS 自动 Ctrl+Click 也会触发 Button-3。
+        self.tree.bind("<Button-3>", self._on_right_click)
+
         # ── 状态栏 ──
         self.lbl_status = ttk.Label(
             content, text="", style="Status.TLabel")
@@ -278,15 +320,21 @@ class ReviewWorklistTab:
         self.lbl_legend.configure(text=t("rw_legend"))
         self.btn_refresh.configure(text=t("rw_refresh"))
         self.chk_grey.configure(text=t("rw_show_grey"))
+        self.chk_reviewed.configure(text=t("rw_show_reviewed"))
         self.tree.heading("risk",     text=t("rw_col_risk"))
         self.tree.heading("project",  text=t("rw_col_project"))
         self.tree.heading("mr",       text=t("rw_col_mr"))
         self.tree.heading("task",     text=t("rw_col_task"))
         self.tree.heading("zh",       text=t("rw_col_zh"))
         self.tree.heading("other",    text=t("rw_col_other"))
+        self.tree.heading("reviewed", text=t("rw_col_reviewed"))
         self.tree.heading("score",    text=t("rw_col_score"))
         self.tree.heading("activity", text=t("rw_col_activity"))
         self.tree.heading("state",    text=t("rw_col_state"))
+        # Context menu labels need refreshing too —— entryconfigure 用
+        # 1-based 下标，跟 add_command 的顺序对应。
+        self.context_menu.entryconfigure(0, label=t("rw_menu_mark"))
+        self.context_menu.entryconfigure(1, label=t("rw_menu_unmark"))
         # 行内文案有时也带 i18n（"just now" 等），重绘一次确保跟当前语言。
         if self._items:
             self._render(self._items)
@@ -300,26 +348,38 @@ class ReviewWorklistTab:
         self._loading = True
         self.lbl_status.configure(text=self._t("rw_loading"))
         include_grey = bool(self.include_grey_var.get())
+        include_reviewed = bool(self.include_reviewed_var.get())
         threading.Thread(
-            target=self._fetch_thread, args=(include_grey,),
+            target=self._fetch_thread,
+            args=(include_grey, include_reviewed),
             daemon=True, name="worklist-load",
         ).start()
 
-    def _fetch_thread(self, include_grey):
+    def _fetch_thread(self, include_grey, include_reviewed):
         import tranzor_checks as tc
         try:
             items = tc.get_worklist_items(
-                limit=200, include_grey=include_grey,
+                limit=200,
+                include_grey=include_grey,
+                include_fully_reviewed=include_reviewed,
             )
+            summary = tc.get_review_summary()
         except Exception as e:
             self.parent.after(0, self._on_error, str(e))
             return
-        self.parent.after(0, self._on_loaded, items)
+        self.parent.after(0, self._on_loaded, items, summary)
 
-    def _on_loaded(self, items):
+    def _on_loaded(self, items, summary):
         self._loading = False
         self._items = items
         self._render(items)
+        self.lbl_reviewer.configure(
+            text=self._t("rw_summary_reviewer").format(
+                reviewer=summary.get("reviewer", "—"),
+                today=summary.get("today", 0),
+                total=summary.get("total", 0),
+            ),
+        )
         self.lbl_status.configure(text="")
 
     def _on_error(self, err):
@@ -350,6 +410,11 @@ class ReviewWorklistTab:
             sec = d.get("secondary_issues") or 0
             oth = d.get("other_issues") or 0
             other_total = sec + oth
+            reviewed = d.get("reviewed_count") or 0
+            total_iss = d.get("total_issue_count") or 0
+            reviewed_disp = (
+                f"{reviewed}/{total_iss}" if total_iss else "—"
+            )
             score = d.get("final_score_avg")
             score_disp = f"{score:.0f}" if score is not None else "—"
             activity = _fmt_age(d.get("mr_updated_at"), t)
@@ -359,7 +424,8 @@ class ReviewWorklistTab:
                 "", "end",
                 iid=str(d.get("task_id") or i),
                 values=(dot, project, mr, task_name,
-                        zh, other_total, score_disp, activity, state),
+                        zh, other_total, reviewed_disp,
+                        score_disp, activity, state),
                 tags=(tag,),
             )
         # Count 行：显示"全部 N 条 / 表里 M 条"——超过 200 时让用户知道有更多。
@@ -391,3 +457,75 @@ class ReviewWorklistTab:
         except Exception as e:
             self.lbl_status.configure(
                 text=self._t("rw_error").format(error=str(e)))
+
+    # ------------------------------------------------------------------
+    # 右键菜单 → Mark / Unmark MR
+    # ------------------------------------------------------------------
+    def _on_right_click(self, event):
+        """Treeview 没有原生 right-click-selects-row 行为；自己实现一下，
+        否则用户右键当前未选中的行时菜单上下文就错了。"""
+        row = self.tree.identify_row(event.y)
+        if row:
+            self.tree.selection_set(row)
+            self.tree.focus(row)
+        try:
+            self.context_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.context_menu.grab_release()
+
+    def _selected_item(self):
+        sel = self.tree.selection()
+        if not sel:
+            return None
+        task_id = sel[0]
+        return next(
+            (d for d in self._items
+             if str(d.get("task_id") or "") == task_id),
+            None,
+        )
+
+    def _mark_selected(self):
+        item = self._selected_item()
+        if not item:
+            return
+        threading.Thread(
+            target=self._mark_thread,
+            args=(item.get("task_id"), item.get("mr_iid"), True),
+            daemon=True, name="worklist-mark",
+        ).start()
+
+    def _unmark_selected(self):
+        item = self._selected_item()
+        if not item:
+            return
+        threading.Thread(
+            target=self._mark_thread,
+            args=(item.get("task_id"), item.get("mr_iid"), False),
+            daemon=True, name="worklist-unmark",
+        ).start()
+
+    def _mark_thread(self, task_id, mr_iid, mark):
+        """Mark / unmark 走线程，因为 mark_task_reviewed 要做一次 SELECT
+        全部 issue 再 bulk INSERT；MR 体积大时几十毫秒，放 UI 线程会闪。"""
+        import tranzor_checks as tc
+        try:
+            if mark:
+                n = tc.mark_task_reviewed(str(task_id))
+                msg_key = "rw_marked"
+            else:
+                n = tc.unmark_task_reviewed(str(task_id))
+                msg_key = "rw_unmarked"
+        except Exception as e:
+            self.parent.after(
+                0, self.lbl_status.configure,
+                {"text": self._t("rw_error").format(error=str(e))},
+            )
+            return
+        self.parent.after(0, self._after_mark, n, mr_iid, msg_key)
+
+    def _after_mark(self, n, mr_iid, msg_key):
+        self.lbl_status.configure(
+            text=self._t(msg_key).format(n=n, mr=mr_iid or "—"),
+        )
+        # 重新加载——MR 可能因 fully_reviewed 被默认隐藏，要立即体现。
+        self._reload()
