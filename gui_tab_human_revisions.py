@@ -21,6 +21,7 @@ from datetime import date, timedelta
 import export_mr_pipeline as mr_api
 import terminology_highlight as th
 from export_gui import format_age_days
+from date_picker import attach_calendar
 
 # ---------------------------------------------------------------------------
 # Cross-platform font
@@ -167,17 +168,35 @@ class HumanRevisionsTab:
 
         default_start, default_end = _default_date_range()
 
+        # Date fields: keep manual typing, plus a calendar (date-picker)
+        # button next to each for point-and-click selection.
+        def _entry_setter(entry):
+            def _set(s):
+                entry.delete(0, "end")
+                entry.insert(0, s)
+            return _set
+
         self.date_from = tk.Entry(
             r1, width=12, font=(FONT_FAMILY, 10),
             bg="#0a0a1a", fg="#fff", insertbackground="#fff", relief="flat")
         self.date_from.insert(0, default_start)
-        self.date_from.pack(side="left", padx=(4, 4), ipady=3)
+        self.date_from.pack(side="left", padx=(4, 2), ipady=3)
+        attach_calendar(
+            r1, self.date_from, font_family=FONT_FAMILY,
+            get_value=self.date_from.get,
+            set_value=_entry_setter(self.date_from),
+            lang=lambda: self.app.lang, padx=(0, 6))
         ttk.Label(r1, text="\u2014", style="Card.TLabel").pack(side="left")
         self.date_to = tk.Entry(
             r1, width=12, font=(FONT_FAMILY, 10),
             bg="#0a0a1a", fg="#fff", insertbackground="#fff", relief="flat")
         self.date_to.insert(0, default_end)
-        self.date_to.pack(side="left", padx=(4, 12), ipady=3)
+        self.date_to.pack(side="left", padx=(4, 2), ipady=3)
+        attach_calendar(
+            r1, self.date_to, font_family=FONT_FAMILY,
+            get_value=self.date_to.get,
+            set_value=_entry_setter(self.date_to),
+            lang=lambda: self.app.lang, padx=(0, 12))
 
         self.btn_search = self.app._create_button(
             r1, text="Refresh", command=self._on_refresh,

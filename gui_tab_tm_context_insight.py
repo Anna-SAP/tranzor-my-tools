@@ -33,6 +33,7 @@ from collections import defaultdict
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import export_mr_pipeline as mr_api
 from export_gui import FONT_FAMILY, FONT_MONO, IS_MAC
+from date_picker import attach_calendar
 
 try:
     import requests
@@ -481,7 +482,12 @@ class TmContextInsightTab:
                                   width=14, font=(FONT_FAMILY, 10),
                                   bg="#0a0a1a", fg="#fff",
                                   insertbackground="#fff", relief="flat")
-        self.ent_start.pack(side="left", padx=(4, 12), ipady=3)
+        self.ent_start.pack(side="left", padx=(4, 2), ipady=3)
+        # 📅 日历按钮：保留手输，点开可视化选日期。
+        attach_calendar(
+            r2, self.ent_start, font_family=FONT_FAMILY,
+            get_value=self.start_var.get, set_value=self.start_var.set,
+            lang=lambda: self.app.lang, padx=(0, 12))
 
         self.lbl_date_end = ttk.Label(r2, text="", style="Card.TLabel", width=4)
         self.lbl_date_end.pack(side="left")
@@ -490,7 +496,11 @@ class TmContextInsightTab:
                                 width=14, font=(FONT_FAMILY, 10),
                                 bg="#0a0a1a", fg="#fff",
                                 insertbackground="#fff", relief="flat")
-        self.ent_end.pack(side="left", padx=(4, 12), ipady=3)
+        self.ent_end.pack(side="left", padx=(4, 2), ipady=3)
+        attach_calendar(
+            r2, self.ent_end, font_family=FONT_FAMILY,
+            get_value=self.end_var.get, set_value=self.end_var.set,
+            lang=lambda: self.app.lang, padx=(0, 12))
 
         # Row 3: buttons
         r3 = ttk.Frame(fi, style="Card.TFrame")

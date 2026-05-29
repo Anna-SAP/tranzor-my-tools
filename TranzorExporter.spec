@@ -79,6 +79,10 @@ a = Analysis(
         # support modules are referenced through try/except imports so
         # PyInstaller's static analyzer might skip them; list explicitly.
         'gui_tab_review_worklist',
+        # 共享深色日历选择组件（Human Revisions / TM & Context Insight 的
+        # 📅 日期选择器）。各 tab 通过普通 import 引用，分析器本能找到，这里
+        # 仍按既有惯例显式登记作安全网。
+        'date_picker',
         'merge_watchdog',
         'unregistered_terms',
         'daily_digest',
