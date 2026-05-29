@@ -75,6 +75,14 @@ STRINGS = {
         "rw_copied_terms":      "Copied {n} unregistered term(s) to clipboard.",
         "rw_no_terms":          "No unregistered terms found in this MR.",
         "rw_col_new_terms":     "🆕 New terms",
+        "rw_watchdog_off":      "🛰 Watchdog: off",
+        "rw_watchdog_idle":     "🛰 Watchdog: {red} red MR(s) · last check {age}",
+        "rw_watchdog_error":    "🛰 Watchdog error: {error}",
+        "rw_watchdog_never":    "🛰 Watchdog: running · waiting for first check",
+        "rw_notif_title":       "Tranzor — MR state changed",
+        "rw_notif_body":        (
+            "{project} · MR #{mr} just went {old} → {new}\n"
+            "{task}\n\nOpen in browser?"),
         "rw_legend":            (
             "🔴 Imminent merge · 🟡 Today · 🟢 Can wait · ⚪ Merged / skipped"),
         "rw_no_web_url":        "No MR URL stored — run Sync to populate.",
@@ -127,6 +135,14 @@ STRINGS = {
         "rw_copied_terms":      "已复制 {n} 个未登记术语到剪贴板。",
         "rw_no_terms":          "该 MR 未发现未登记术语。",
         "rw_col_new_terms":     "🆕 新术语",
+        "rw_watchdog_off":      "🛰 Watchdog：关闭",
+        "rw_watchdog_idle":     "🛰 Watchdog：{red} 条红色 MR · {age} 前刚检查",
+        "rw_watchdog_error":    "🛰 Watchdog 出错：{error}",
+        "rw_watchdog_never":    "🛰 Watchdog：运行中 · 等首次检查",
+        "rw_notif_title":       "Tranzor — MR 状态变更",
+        "rw_notif_body":        (
+            "{project} · MR #{mr} 状态从 {old} 变成 {new}\n"
+            "{task}\n\n是否在浏览器中打开？"),
         "rw_legend":            (
             "🔴 即将合并 · 🟡 今日必看 · 🟢 可慢慢看 · ⚪ 已合并 / 已跳过"),
         "rw_no_web_url":        "尚未存 MR URL — 请先 Sync。",
@@ -195,9 +211,13 @@ class ReviewWorklistTab:
         self.include_reviewed_var = tk.BooleanVar(value=False)
         self._loading = False
         self._items: list[dict] = []
+        self._watchdog = None  # PR-D
         self._build(parent)
         # 首屏立刻渲染——SQLite local read 是毫秒级的，不需要 spinner。
         self.parent.after(0, self._reload)
+        # PR-D: 启动 merge watchdog —— 5min 一轮，发现 red MR 转 merged
+        # 时 messagebox 弹窗。daemon 线程，跟随 GUI 关闭自动退出。
+        self.parent.after(0, self._start_watchdog)
 
     def _t(self, key):
         return self.app._t(key)
@@ -257,6 +277,11 @@ class ReviewWorklistTab:
         self.lbl_reviewer = ttk.Label(
             actions, text="", style="Status.TLabel")
         self.lbl_reviewer.pack(side="right")
+
+        # 顶右 (PR-D)：watchdog 状态 —— 跑没跑、上次检查、当前红色 MR 数。
+        self.lbl_watchdog = ttk.Label(
+            actions, text="", style="Status.TLabel")
+        self.lbl_watchdog.pack(side="right", padx=(0, 12))
 
         # ── 表格 ──
         tree_frame = ttk.Frame(content, style="App.TFrame")
@@ -348,6 +373,10 @@ class ReviewWorklistTab:
         self.context_menu.entryconfigure(0, label=t("rw_menu_mark"))
         self.context_menu.entryconfigure(1, label=t("rw_menu_unmark"))
         self.context_menu.entryconfigure(3, label=t("rw_menu_copy_terms"))
+        # Watchdog 状态行：用最近一次 snapshot 重渲染，否则切语言后旧
+        # 文案会残留。
+        if self._watchdog is not None:
+            self._apply_watchdog_status(self._watchdog.last_status)
         # 行内文案有时也带 i18n（"just now" 等），重绘一次确保跟当前语言。
         if self._items:
             self._render(self._items)
@@ -578,3 +607,94 @@ class ReviewWorklistTab:
         self.lbl_status.configure(
             text=self._t("rw_copied_terms").format(n=len(terms)),
         )
+
+    # ------------------------------------------------------------------
+    # PR-D: Pending-Merge watchdog
+    # ------------------------------------------------------------------
+    def _start_watchdog(self):
+        if self._watchdog is not None:
+            return
+        try:
+            import merge_watchdog as _mw
+        except Exception:
+            return
+        self._watchdog = _mw.Watchdog(
+            on_event=self._on_watchdog_event,
+            on_status_change=self._on_watchdog_status,
+        )
+        self._watchdog.start()
+
+    def stop_watchdog(self):
+        """让 ExportApp 在关闭时调一次——避免后台线程持续转。"""
+        if self._watchdog is not None:
+            try:
+                self._watchdog.stop()
+            except Exception:
+                pass
+
+    def _on_watchdog_status(self, snapshot):
+        """工作线程调用——marshal 回 Tk 再更新 label。"""
+        try:
+            self.parent.after(0, self._apply_watchdog_status, snapshot)
+        except Exception:
+            pass
+
+    def _apply_watchdog_status(self, snapshot):
+        if not snapshot.get("running"):
+            self.lbl_watchdog.configure(text=self._t("rw_watchdog_off"))
+            return
+        if snapshot.get("last_error"):
+            self.lbl_watchdog.configure(
+                text=self._t("rw_watchdog_error").format(
+                    error=snapshot["last_error"][:80],
+                ),
+            )
+            return
+        last = snapshot.get("last_checked_at")
+        if not last:
+            self.lbl_watchdog.configure(text=self._t("rw_watchdog_never"))
+            return
+        age = _fmt_age(last, self._t)
+        self.lbl_watchdog.configure(
+            text=self._t("rw_watchdog_idle").format(
+                red=snapshot.get("red_count", 0), age=age,
+            ),
+        )
+
+    def _on_watchdog_event(self, event):
+        """工作线程调用——marshal 回 Tk 再 messagebox。"""
+        try:
+            self.parent.after(0, self._present_event, event)
+        except Exception:
+            pass
+
+    def _present_event(self, event):
+        """主线程：弹窗通知 + 重新加载 worklist。
+
+        terminal state (merged/closed/locked) → 用 messagebox 让 Lillian
+        立刻知道；非 terminal 的状态变化（比如 opened → 又被 reopen）只
+        触发 worklist 重新加载，不打扰。
+        """
+        # 任何 state 变化都先刷新一次 worklist 让排序立即更新。
+        self._reload()
+        if not event.is_terminal():
+            return
+        # 用标准 messagebox.askyesno —— 不引入额外 toast 依赖，所有平台
+        # 都能用。Yes → 在浏览器打开；No → 关掉继续工作。
+        import tkinter.messagebox as messagebox
+        ans = messagebox.askyesno(
+            title=self._t("rw_notif_title"),
+            message=self._t("rw_notif_body").format(
+                project=event.project_name or "—",
+                mr=event.mr_iid or "—",
+                old=event.old_state or "?",
+                new=event.new_state,
+                task=event.task_name or "",
+            ),
+            parent=self.parent,
+        )
+        if ans and event.mr_web_url:
+            try:
+                webbrowser.open(event.mr_web_url, new=2)
+            except Exception:
+                pass

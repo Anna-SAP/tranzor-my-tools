@@ -2161,6 +2161,13 @@ class ExportApp:
                 self.bridge.stop()
         except Exception:
             pass
+        # PR-D: stop the merge watchdog cleanly so we don't leak its
+        # background thread when the user closes the GUI.
+        try:
+            if getattr(self, "rw_tab", None) is not None:
+                self.rw_tab.stop_watchdog()
+        except Exception:
+            pass
         try:
             self.root.destroy()
         except Exception:
