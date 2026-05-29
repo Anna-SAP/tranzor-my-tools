@@ -34,6 +34,16 @@ def _collect_tk_assets():
 tk_binaries, tk_datas = _collect_tk_assets()
 
 
+# PR-J: the build-time embedded GitLab credential module only exists when
+# build_windows.ps1 generated it (i.e. TRANZOR_GITLAB_TOKEN_EMBED was set).
+# Listing a non-existent module in hiddenimports makes PyInstaller error, so
+# add it conditionally. When absent, gitlab_client._read_embedded() simply
+# returns empty and the app falls back to env var / config file.
+_embed_hiddenimports = []
+if os.path.exists(os.path.join(SPECPATH, "gitlab_token_embed.py")):
+    _embed_hiddenimports = ["gitlab_token_embed"]
+
+
 a = Analysis(
     ['export_gui.py'],
     pathex=[],
@@ -78,6 +88,9 @@ a = Analysis(
         'terminology_watchtower',
         'tranzor_terminology',
         'gitlab_client',
+        # PR-J: only present when the build embedded a credential (see above);
+        # empty list otherwise so PyInstaller doesn't error on a missing module.
+        *_embed_hiddenimports,
     ],
     hookspath=['pyinstaller_hooks'],
     hooksconfig={},
