@@ -69,8 +69,12 @@ STRINGS = {
         "rw_open_tip":           "Open the MR in your default browser.",
         "rw_menu_mark":         "✓ Mark MR reviewed",
         "rw_menu_unmark":       "↻ Unmark MR",
+        "rw_menu_copy_terms":   "📋 Copy unregistered terms",
         "rw_marked":            "Marked {n} issue(s) reviewed in MR #{mr}.",
         "rw_unmarked":          "Unmarked {n} issue(s) in MR #{mr}.",
+        "rw_copied_terms":      "Copied {n} unregistered term(s) to clipboard.",
+        "rw_no_terms":          "No unregistered terms found in this MR.",
+        "rw_col_new_terms":     "🆕 New terms",
         "rw_legend":            (
             "🔴 Imminent merge · 🟡 Today · 🟢 Can wait · ⚪ Merged / skipped"),
         "rw_no_web_url":        "No MR URL stored — run Sync to populate.",
@@ -117,8 +121,12 @@ STRINGS = {
         "rw_open_tip":           "在默认浏览器中打开 MR。",
         "rw_menu_mark":         "✓ 标记 MR 已审",
         "rw_menu_unmark":       "↻ 撤回 MR 已审",
+        "rw_menu_copy_terms":   "📋 复制未登记术语",
         "rw_marked":            "已将 MR #{mr} 中的 {n} 条 issue 标记为已审。",
         "rw_unmarked":          "已撤回 MR #{mr} 中的 {n} 条 issue 已审记录。",
+        "rw_copied_terms":      "已复制 {n} 个未登记术语到剪贴板。",
+        "rw_no_terms":          "该 MR 未发现未登记术语。",
+        "rw_col_new_terms":     "🆕 新术语",
         "rw_legend":            (
             "🔴 即将合并 · 🟡 今日必看 · 🟢 可慢慢看 · ⚪ 已合并 / 已跳过"),
         "rw_no_web_url":        "尚未存 MR URL — 请先 Sync。",
@@ -255,18 +263,19 @@ class ReviewWorklistTab:
         tree_frame.pack(fill="both", expand=True, pady=(4, 0))
 
         cols = ("risk", "project", "mr", "task", "zh", "other",
-                "reviewed", "score", "activity", "state")
+                "reviewed", "new_terms", "score", "activity", "state")
         self.tree = ttk.Treeview(
             tree_frame, columns=cols, show="headings",
             selectmode="browse", height=18)
         widths = {
-            "risk": 50, "project": 130, "mr": 60, "task": 240,
-            "zh": 80, "other": 80, "reviewed": 80,
+            "risk": 50, "project": 130, "mr": 60, "task": 200,
+            "zh": 80, "other": 80, "reviewed": 80, "new_terms": 80,
             "score": 70, "activity": 100, "state": 80,
         }
         anchors = {
             "risk": "center", "mr": "center", "zh": "center",
-            "other": "center", "reviewed": "center", "score": "center",
+            "other": "center", "reviewed": "center",
+            "new_terms": "center", "score": "center",
             "activity": "center", "state": "center",
         }
         for c in cols:
@@ -300,6 +309,8 @@ class ReviewWorklistTab:
         # 文案在 refresh_text 里赋；这里先 placeholder。
         self.context_menu.add_command(label="", command=self._mark_selected)
         self.context_menu.add_command(label="", command=self._unmark_selected)
+        self.context_menu.add_separator()
+        self.context_menu.add_command(label="", command=self._copy_terms_selected)
         # Windows 右键事件；macOS 自动 Ctrl+Click 也会触发 Button-3。
         self.tree.bind("<Button-3>", self._on_right_click)
 
@@ -328,13 +339,15 @@ class ReviewWorklistTab:
         self.tree.heading("zh",       text=t("rw_col_zh"))
         self.tree.heading("other",    text=t("rw_col_other"))
         self.tree.heading("reviewed", text=t("rw_col_reviewed"))
+        self.tree.heading("new_terms", text=t("rw_col_new_terms"))
         self.tree.heading("score",    text=t("rw_col_score"))
         self.tree.heading("activity", text=t("rw_col_activity"))
         self.tree.heading("state",    text=t("rw_col_state"))
         # Context menu labels need refreshing too —— entryconfigure 用
-        # 1-based 下标，跟 add_command 的顺序对应。
+        # 0-based 下标。Separator (index 2) 不需要文案。
         self.context_menu.entryconfigure(0, label=t("rw_menu_mark"))
         self.context_menu.entryconfigure(1, label=t("rw_menu_unmark"))
+        self.context_menu.entryconfigure(3, label=t("rw_menu_copy_terms"))
         # 行内文案有时也带 i18n（"just now" 等），重绘一次确保跟当前语言。
         if self._items:
             self._render(self._items)
@@ -357,11 +370,19 @@ class ReviewWorklistTab:
 
     def _fetch_thread(self, include_grey, include_reviewed):
         import tranzor_checks as tc
+        # PR-C: 拉一次已登记术语集合（6h 缓存，几乎无成本）；platform 不可达
+        # 时返回上次的或空集合，Worklist 仍能加载，只是 🆕 列显示 "—"。
+        try:
+            import tranzor_terminology as tt
+            known = tt.load_known_term_names_lower()
+        except Exception:
+            known = None
         try:
             items = tc.get_worklist_items(
                 limit=200,
                 include_grey=include_grey,
                 include_fully_reviewed=include_reviewed,
+                known_term_names_lower=known,
             )
             summary = tc.get_review_summary()
         except Exception as e:
@@ -415,6 +436,8 @@ class ReviewWorklistTab:
             reviewed_disp = (
                 f"{reviewed}/{total_iss}" if total_iss else "—"
             )
+            new_count = d.get("unregistered_term_count") or 0
+            new_terms_disp = str(new_count) if new_count else "—"
             score = d.get("final_score_avg")
             score_disp = f"{score:.0f}" if score is not None else "—"
             activity = _fmt_age(d.get("mr_updated_at"), t)
@@ -424,7 +447,7 @@ class ReviewWorklistTab:
                 "", "end",
                 iid=str(d.get("task_id") or i),
                 values=(dot, project, mr, task_name,
-                        zh, other_total, reviewed_disp,
+                        zh, other_total, reviewed_disp, new_terms_disp,
                         score_disp, activity, state),
                 tags=(tag,),
             )
@@ -529,3 +552,29 @@ class ReviewWorklistTab:
         )
         # 重新加载——MR 可能因 fully_reviewed 被默认隐藏，要立即体现。
         self._reload()
+
+    # ------------------------------------------------------------------
+    # PR-C: 把当前 MR 的未登记术语复制到剪贴板（一行一个），方便 Lillian
+    # 直接粘到 Tranzor Terminology 录入页或自己的待办清单。
+    # ------------------------------------------------------------------
+    def _copy_terms_selected(self):
+        item = self._selected_item()
+        if not item:
+            return
+        terms = item.get("unregistered_terms") or []
+        if not terms:
+            self.lbl_status.configure(text=self._t("rw_no_terms"))
+            return
+        try:
+            self.parent.clipboard_clear()
+            self.parent.clipboard_append("\n".join(terms))
+            # update_idletasks 才能让剪贴板内容真的进 OS 缓冲——Tk 的
+            # clipboard_append 否则会被关 GUI 时丢掉。
+            self.parent.update_idletasks()
+        except Exception as e:
+            self.lbl_status.configure(
+                text=self._t("rw_error").format(error=str(e)))
+            return
+        self.lbl_status.configure(
+            text=self._t("rw_copied_terms").format(n=len(terms)),
+        )

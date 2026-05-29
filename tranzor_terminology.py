@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
@@ -129,6 +131,53 @@ def fetch_terminology_detail(numeric_id: int) -> Dict[str, Any]:
     r = _get(f"{TERMINOLOGY_API}/{int(numeric_id)}")
     r.raise_for_status()
     return r.json()
+
+
+# ---------------------------------------------------------------------------
+# Lazy-cached "set of known term names" — drives the Review Worklist's 🆕
+# column (PR-C). Owned here so the worklist code doesn't reach into the
+# HTTP layer and the cache TTL is settable from one spot.
+# ---------------------------------------------------------------------------
+_KNOWN_NAMES_TTL_SECS = 6 * 3600   # 6h — terms change slowly; refresh is cheap.
+_known_names_cache: frozenset[str] = frozenset()
+_known_names_fetched_at: float = 0.0
+_known_names_lock = threading.Lock()
+
+
+def load_known_term_names_lower(
+    *, force_refresh: bool = False,
+) -> frozenset[str]:
+    """Return the set of registered term names in lowercase form.
+
+    Cached for :data:`_KNOWN_NAMES_TTL_SECS`. Falls back to the previous
+    cache (or empty frozenset on first failure) if the platform is
+    unreachable — the Worklist 🆕 column degrades to "everything looks
+    unregistered" rather than crashing the tab.
+
+    Safe to call from many threads; one slow refresh blocks the others
+    but won't double-fetch.
+    """
+    global _known_names_cache, _known_names_fetched_at
+    now = time.time()
+    with _known_names_lock:
+        if not force_refresh and _known_names_cache and (
+            now - _known_names_fetched_at < _KNOWN_NAMES_TTL_SECS
+        ):
+            return _known_names_cache
+        try:
+            entries = fetch_terminology_list()
+        except Exception:
+            # Platform unreachable — keep the previous cache, just don't
+            # refresh the timestamp so the next attempt happens sooner.
+            return _known_names_cache
+        names = {
+            (e.get("name") or "").strip().lower()
+            for e in entries if e.get("name")
+        }
+        names.discard("")
+        _known_names_cache = frozenset(names)
+        _known_names_fetched_at = now
+        return _known_names_cache
 
 
 def fetch_many_details(
