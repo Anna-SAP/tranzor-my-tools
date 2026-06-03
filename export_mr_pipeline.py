@@ -264,6 +264,37 @@ def fetch_mr_results(task_id, target_language=None,
     return resp.json()
 
 
+def distinct_source_string_count(translations):
+    """Count distinct en-US source strings in a list of MR translation rows.
+
+    A "source string" is identified by its ``opus_id`` (the Tranzor string
+    key). The same en-US string is translated into every target language, so
+    the raw row count over-counts the work by the language fan-out (×18 for
+    CHC). Distinct ``opus_id`` is therefore the workload signal linguists
+    care about. Rows without an ``opus_id`` are ignored.
+    """
+    return len({
+        t.get("opus_id") for t in (translations or []) if t.get("opus_id")
+    })
+
+
+def count_mr_source_strings(task_id):
+    """Distinct en-US source-string count for one MR task.
+
+    Fetches ``/tasks/{id}/results`` and counts distinct ``opus_id``. There is
+    no lighter endpoint for this — ``/tasks`` omits any count and the task
+    detail's ``translations_count`` is the *row* count (strings × languages),
+    not distinct source strings — so the full results payload is the only
+    source of truth. Returns 0 on any error / empty task so callers can render
+    a number without special-casing failures.
+    """
+    try:
+        results = fetch_mr_results(task_id)
+    except Exception:
+        return 0
+    return distinct_source_string_count(results.get("translations", []))
+
+
 def fetch_mr_translation_edit_logs(translation_id):
     """GET /dashboard/translations/{translation_id}/edit-logs
 

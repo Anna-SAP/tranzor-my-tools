@@ -23,6 +23,16 @@ from date_picker import attach_calendar
 class MRPipelineTab:
     """Builds and manages the MR Pipeline tab content."""
 
+    # Single source of truth for the task-list table columns. ``src_strings``
+    # (distinct en-US source-string count) sits between Status and Avg Score
+    # so the two per-task metrics read together; inserting it there keeps the
+    # critical positional reads elsewhere valid (project @ idx 1 for the
+    # post-edit prefix, MR# @ idx 2 for the export filename).
+    _MR_COLUMNS = ("idx", "project", "mr", "release", "status",
+                   "src_strings", "avg_score", "created", "duration")
+    # Columns whose cells sort numerically; everything else sorts as text.
+    _MR_NUMERIC_COLS = frozenset({"idx", "mr", "src_strings", "avg_score"})
+
     def __init__(self, parent, app):
         self.app = app
         self.parent = parent
@@ -48,6 +58,16 @@ class MRPipelineTab:
         # repaints, used by the async post-edit prefetch callback to
         # find the row to mark.
         self._mr_row_iid_by_task: dict[str, str] = {}
+        # task_id → distinct en-US source-string count. Cached so paging
+        # back/forth, re-search and language switches don't re-hit the
+        # results API — a completed task's source-string count is immutable.
+        # Filled from worker threads, so guard it with a lock.
+        self._src_count_cache: dict[str, int] = {}
+        self._src_count_lock = threading.Lock()
+        # Active sort as (column_id, descending) or None. Tracked so the
+        # async source-count prefetch can re-apply the user's sort once the
+        # numbers land, and so the header redraw shows the ▲/▼ marker.
+        self._mr_sort = None
         self._build(parent)
 
     def _t(self, key):
@@ -255,13 +275,18 @@ class MRPipelineTab:
         tree_frame = ttk.Frame(left, style="App.TFrame")
         tree_frame.pack(fill="both", expand=True, pady=(0, 6))
 
-        cols = ("idx", "project", "mr", "release", "status", "avg_score", "created", "duration")
+        cols = self._MR_COLUMNS
         self.mr_tree = ttk.Treeview(tree_frame, columns=cols, show="headings",
                                      style="Summary.Treeview", height=14, selectmode="browse")
         col_widths = {"idx": 35, "project": 140, "mr": 60, "release": 60,
-                      "status": 80, "avg_score": 70, "created": 130, "duration": 70}
+                      "status": 80, "src_strings": 90, "avg_score": 70,
+                      "created": 130, "duration": 70}
         for c in cols:
             self.mr_tree.column(c, width=col_widths.get(c, 80), anchor="center" if c != "project" else "w")
+            # Clickable header → sort the visible rows by that column. Wired
+            # once here; refresh_text only swaps heading *text*, which leaves
+            # the command intact.
+            self.mr_tree.heading(c, command=lambda col=c: self._sort_by(col))
 
         # Warm gold tint for MRs the post-edit prefetch marks. See
         # gui_tab_scan_tasks for the colour-rationale; the three tabs
@@ -380,8 +405,8 @@ class MRPipelineTab:
         self.rb_mr_json.configure(text=t("output_fmt_json"))
         self.btn_mr_refresh.configure(text=t("summary_refresh"))
 
-        for i, col in enumerate(("idx", "project", "mr", "release", "status", "avg_score", "created", "duration")):
-            self.mr_tree.heading(col, text=t(f"mr_col_{col}"))
+        for col in self._MR_COLUMNS:
+            self.mr_tree.heading(col, text=self._sort_heading_text(col))
         self.lbl_mr_post_edit_legend.configure(text=t("mr_post_edit_legend"))
 
         self.lbl_mr_sidebar_title.configure(text=t("mr_sidebar_title"))
@@ -526,15 +551,26 @@ class MRPipelineTab:
             self.btn_mr_load_more.configure(state=state)
 
     def _check_task_translations(self, t):
-        """Check a task's translation count via API; attach _translations_count and average_score."""
+        """Check a task's translation count via API; attach _translations_count,
+        _src_string_count and average_score.
+
+        Runs only on the ``Hide empty MRs`` path, but it already has the full
+        results payload in hand, so it computes the distinct en-US source-string
+        count here too and seeds the shared cache — that way the
+        ``src_strings`` column renders without a second round-trip per row."""
         tid = t.get("task_id")
         if not tid:
             t["_translations_count"] = 0
+            t["_src_string_count"] = 0
             return
         try:
             results = mr_api.fetch_mr_results(tid)
             trs = results.get("translations", [])
             t["_translations_count"] = len(trs)
+            src = mr_api.distinct_source_string_count(trs)
+            t["_src_string_count"] = src
+            with self._src_count_lock:
+                self._src_count_cache[tid] = src
             if trs and t.get("average_score") is None:
                 scores = [tr.get("score") for tr in trs if tr.get("score") is not None]
                 if scores:
@@ -691,9 +727,19 @@ class MRPipelineTab:
                 self.mr_tree.delete(item)
             self._mr_row_iid_by_task = {}
             self.mr_extra_pages = 0
+            # A fresh result set arrives in API order (created desc); drop any
+            # active sort so the ▲/▼ marker doesn't lie about the row order.
+            # An Append (Load More) keeps the sort — _on_src_counts_done folds
+            # the new rows in once their counts land.
+            if self._mr_sort is not None:
+                self._mr_sort = None
+                self._refresh_sort_indicators()
         # Append mode: keep existing rows + row mapping intact so
         # post-edit tagging on older rows still works.
         prefetch_items: list[tuple[str, int]] = []
+        # task_ids whose en-US source-string count isn't cached yet — filled
+        # asynchronously after this page renders (see _prefetch_src_counts).
+        src_prefetch_ids: list[str] = []
 
         for i, t in enumerate(tasks):
             idx = base_offset + i + 1
@@ -733,18 +779,29 @@ class MRPipelineTab:
             # output — see _apply_post_edit_prefix_mr for the tag-replace
             # caveat.
             row_tags = (task_id, "post_edit") if cached else (task_id,)
+            # en-US source-string count: render from cache when known (the
+            # Hide-empty path may have just seeded it), else show a "…"
+            # placeholder and queue an async fetch.
+            with self._src_count_lock:
+                src_count = self._src_count_cache.get(task_id)
+            if src_count is None:
+                src_count = t.get("_src_string_count")
+            src_display = src_count if src_count is not None else "…"
             iid = self.mr_tree.insert(
                 "", "end",
                 iid=task_id or None,
                 values=(
                     idx, display_project, mr_iid,
                     t.get("release", ""), t.get("status", ""),
+                    src_display,
                     avg if avg is not None else "—", created, duration,
                 ),
                 tags=row_tags,
             )
             if task_id:
                 self._mr_row_iid_by_task[task_id] = iid
+                if src_count is None:
+                    src_prefetch_ids.append(task_id)
                 if cache_key is not None and cached is None:
                     prefetch_items.append(("mr", cache_key))
                     # Stash mr_iid → iid so the callback (which carries
@@ -761,6 +818,21 @@ class MRPipelineTab:
                 on_result=self._on_post_edit_result,
                 max_workers=4,
             )
+
+        # Fill the en-US source-string counts asynchronously so the page
+        # stays responsive; cells flip from "…" to the number as each
+        # task's results fetch returns.
+        if src_prefetch_ids:
+            self._prefetch_src_counts(src_prefetch_ids)
+
+        # Keep an active sort applied across Load More appends: the new rows
+        # were just inserted at the bottom in API order, so fold them into the
+        # current order now (using whatever counts are already known). The
+        # async prefetch will re-sort again once the remaining counts land.
+        # On a replace load _mr_sort was reset to None above, so this is a
+        # no-op there — fresh result sets render unsorted.
+        if self._mr_sort is not None:
+            self._apply_sort(*self._mr_sort)
 
         if append:
             # We just appended one more page worth of rows; track that
@@ -854,6 +926,128 @@ class MRPipelineTab:
         self._stop_loading_anim()
         self._set_controls_enabled(True)
         self.lbl_mr_status_bar.configure(text=f"⚠ {err[:60]}")
+
+    # ------------------------------------------------------------------
+    # en-US source-string count — async column fill.
+    #
+    # ``/tasks`` carries no string count, so the only source of truth is
+    # each task's full results payload. We fetch those on worker threads
+    # (capped at 4 — same politeness budget as the post-edit prefetch) and
+    # marshal each count back to Tk via after(). Counts are cached by
+    # task_id; a completed task's source-string count never changes, so the
+    # cache makes paging and re-search effectively free.
+    # ------------------------------------------------------------------
+    def _prefetch_src_counts(self, task_ids):
+        ids = [tid for tid in task_ids if tid]
+        if not ids:
+            return
+
+        def _run():
+            def _work(tid):
+                with self._src_count_lock:
+                    count = self._src_count_cache.get(tid)
+                if count is None:
+                    count = mr_api.count_mr_source_strings(tid)
+                    with self._src_count_lock:
+                        self._src_count_cache[tid] = count
+                try:
+                    self.parent.after(0, self._apply_src_count, tid, count)
+                except Exception:
+                    pass
+
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                list(pool.map(_work, ids))
+            try:
+                self.parent.after(0, self._on_src_counts_done)
+            except Exception:
+                pass
+
+        threading.Thread(target=_run, name="mr-src-count-prefetch",
+                         daemon=True).start()
+
+    def _apply_src_count(self, task_id, count):
+        """Replace one row's "…" placeholder with its real count. Runs on the
+        Tk thread. The row may be gone (user paged / re-searched mid-fetch);
+        a stale write is harmless because iid == task_id, so it can only ever
+        land on the same task — guard the lookup and the set regardless."""
+        iid = self._mr_row_iid_by_task.get(task_id)
+        if not iid:
+            return
+        try:
+            self.mr_tree.set(iid, "src_strings", count)
+        except tk.TclError:
+            pass
+
+    def _on_src_counts_done(self):
+        # Once the numbers have landed, re-apply an active source-string sort
+        # so the final order reflects real workloads — the user may have
+        # clicked the header while cells still read "…".
+        if self._mr_sort and self._mr_sort[0] == "src_strings":
+            self._apply_sort(*self._mr_sort)
+
+    # ------------------------------------------------------------------
+    # Column sorting — click a header to reorder the visible rows.
+    # ------------------------------------------------------------------
+    def _sort_heading_text(self, col):
+        """Heading label for ``col`` with a ▲/▼ marker when it's the active
+        sort column. Driven off ``mr_col_*`` so it follows the UI language."""
+        base = self._t(f"mr_col_{col}")
+        if self._mr_sort and self._mr_sort[0] == col:
+            return base + ("  ▼" if self._mr_sort[1] else "  ▲")
+        return base
+
+    def _refresh_sort_indicators(self):
+        """Redraw every header so only the active column carries the marker."""
+        for col in self._MR_COLUMNS:
+            try:
+                self.mr_tree.heading(col, text=self._sort_heading_text(col))
+            except tk.TclError:
+                pass
+
+    def _sort_by(self, col):
+        """Header-click handler. The first click on the source-string column
+        shows the biggest workload first (descending — that's what "sort by
+        workload" means in practice); the first click on any other column is
+        ascending. Repeated clicks on the same column flip the direction."""
+        if self._mr_sort and self._mr_sort[0] == col:
+            descending = not self._mr_sort[1]
+        else:
+            descending = (col == "src_strings")
+        self._apply_sort(col, descending)
+
+    def _apply_sort(self, col, descending):
+        rows = list(self.mr_tree.get_children(""))
+        prev = self._mr_sort
+        self._mr_sort = (col, descending)
+        if rows:
+            numeric = col in self._MR_NUMERIC_COLS
+            rows.sort(
+                key=lambda iid: self._mr_sort_key(
+                    self.mr_tree.set(iid, col), numeric, descending),
+                reverse=descending,
+            )
+            for pos, iid in enumerate(rows):
+                self.mr_tree.move(iid, "", pos)
+        if prev != self._mr_sort:
+            self._refresh_sort_indicators()
+
+    @staticmethod
+    def _mr_sort_key(value, numeric, descending):
+        """Sort key that keeps "missing" cells (—, …, blank) at the bottom in
+        both directions. ``reverse=descending`` is applied by the caller, so
+        the missing-rank flag is flipped for descending to survive the
+        reversal."""
+        s = ("" if value is None else str(value)).strip()
+        missing = s in ("", "—", "…")
+        missing_rank = (not missing) if descending else missing
+        if numeric:
+            try:
+                primary = float(s)
+            except ValueError:
+                primary = float("-inf")
+        else:
+            primary = s.lower()
+        return (missing_rank, primary)
 
     def _on_export(self):
         sel = self.mr_tree.selection()
