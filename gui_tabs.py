@@ -447,7 +447,38 @@ class MRPipelineTab:
         self.cmb_mr_project.configure(values=pids)
         self.cmb_mr_release.configure(values=rels)
 
+    def _invalidate_post_edit_cache(self):
+        """Drop the cached ✏️ (post-edit) answers for the MR kind.
+
+        The badge is served from a process-lifetime cache
+        (:class:`task_post_edit.PostEditCache`). A Language Lead who fixes a
+        translation in the Tranzor dashboard sets ``fixed_by_lead`` on the
+        case *after* we may have already cached a ``False`` "no edit" answer
+        for that MR. Without this invalidation, re-searching reuses the stale
+        ``False`` — the render only re-fetches when the cached value is
+        ``None`` (see ``_on_tasks_loaded``) — so the badge never lights up
+        even though a fresh Changes export (which reads ``/dashboard/cases``
+        directly, bypassing the cache) correctly detects the edit.
+
+        A transient API failure during a prior fetch also lands here as a
+        cached ``False``; clearing on an explicit re-query lets it self-heal.
+
+        Mirrors the File Translation Refresh, which drops the ``legacy`` kind
+        for exactly the same go-edit-then-come-back reason
+        (``export_gui._load_summary_data``). Scoped to an explicit Search /
+        Reset — paging (Prev / Next / Load More) keeps the cache so flipping
+        pages stays free. Best-effort: never block the search on housekeeping.
+        """
+        try:
+            _tpe.get_cache().clear_kind("mr")
+        except Exception:
+            pass
+
     def _on_search(self):
+        # An explicit re-query means "give me fresh data" — drop stale ✏️
+        # answers so a Language Lead's just-made fixes surface (see
+        # _invalidate_post_edit_cache).
+        self._invalidate_post_edit_cache()
         self.mr_page = 0
         self._load_tasks()
 
@@ -459,6 +490,7 @@ class MRPipelineTab:
         self.mr_task_id_var.set("")
         self.mr_date_from.delete(0, "end")
         self.mr_date_to.delete(0, "end")
+        self._invalidate_post_edit_cache()
         self.mr_page = 0
         self._load_tasks()
 
