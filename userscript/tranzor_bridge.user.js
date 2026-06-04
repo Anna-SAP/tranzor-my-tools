@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tranzor Bridge
 // @namespace    tranzor-my-tools
-// @version      0.6.0
+// @version      0.6.1
 // @description  Receive Exporter selections and walk through them on the Tranzor Platform.
 // @match        http://tranzor-platform.int.rclabenv.com/*
 // @match        https://tranzor-platform.int.rclabenv.com/*
@@ -286,7 +286,7 @@
     // X-Userscript-Version on every /pull so the my-tools setup wizard can
     // detect outdated installs and prompt for re-install. Keep this in sync
     // with the meta block; any change to either MUST bump the other.
-    const USERSCRIPT_VERSION = '0.6.0';
+    const USERSCRIPT_VERSION = '0.6.1';
 
     async function pullEnvelope() {
         if (!endpoint || !endpoint.token) return null;
@@ -834,18 +834,44 @@
         return re.test(txt);
     }
 
+    // True when `key` appears in `text` as a COMPLETE OPUS ID rather than as a
+    // prefix/substring of a longer one. OPUS IDs are runs of [A-Za-z0-9_.], so
+    // an occurrence is "whole" only when the characters bracketing it are not
+    // more identifier characters. This is correctness-critical: a short key
+    // like "…app.rooms.SECONDARY" is a textual prefix of the sibling key
+    // "…app.rooms.SECONDARY_DISPLAY_LAYOUT", and a plain indexOf() match binds
+    // it to whichever row renders first in the DOM (the longer key's row,
+    // which sorts earlier here). That steals the longer row's tick and leaves
+    // the real "SECONDARY" row unticked — the "20 selected → only 18 ticked"
+    // symptom. The whole-key guard rejects the prefix match so the walker
+    // keeps scanning to the genuine row.
+    const KEY_CONTINUATION_RE = /[A-Za-z0-9_.]/;
+    function textContainsWholeKey(text, key) {
+        if (!text || !key) return false;
+        let from = 0;
+        for (;;) {
+            const idx = text.indexOf(key, from);
+            if (idx === -1) return false;
+            const after = text.charAt(idx + key.length);
+            const before = idx > 0 ? text.charAt(idx - 1) : '';
+            if (!KEY_CONTINUATION_RE.test(after) && !KEY_CONTINUATION_RE.test(before)) return true;
+            from = idx + 1;
+        }
+    }
+
     // Find a row that contains BOTH the envelope item's string_key AND its
     // language code. This is the correctness-critical primitive: without the
     // language check, multi-language selections all collapse onto the first
     // language row Tranzor happens to render (e.g. en-GB), wrongly matching
-    // 22 items to the same row.
+    // 22 items to the same row. The string_key is matched whole (see
+    // textContainsWholeKey) so prefix-sibling keys don't cross-bind rows.
     function findRowForItem(item) {
         if (!item || !item.string_key) return null;
         const key = item.string_key;
         const root = document.body;
         const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
             acceptNode: (node) => {
-                if (!node.nodeValue || node.nodeValue.indexOf(key) === -1) return NodeFilter.FILTER_SKIP;
+                if (!node.nodeValue || !textContainsWholeKey(node.nodeValue, key)) return NodeFilter.FILTER_SKIP;
                 let p = node.parentElement;
                 while (p) {
                     if (p.id === 'tz-bridge-panel') return NodeFilter.FILTER_REJECT;

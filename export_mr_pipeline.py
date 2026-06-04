@@ -1122,10 +1122,18 @@ def write_mr_html(results_data, filename, label, bridge_info=None):
                 # presence of scan_task_id picks /static/scans/<id> (Scan
                 # Tasks); plain task_id falls through to the File Translation
                 # /static/legacy/tasks/<id> route.
+                #
+                # mr_id fallback: "all translations" rows carry the MR IID
+                # under "mr_id" (stamped by enrich_translations_with_task),
+                # but "changes" rows come straight from detect_mr_changes,
+                # whose mr_meta names that field "mr_iid". Without the
+                # fallback the changes report ships an empty mr_id, so the
+                # envelope loses its MR coordinates and Send-to-Tranzor
+                # mis-routes to the File Translation legacy task page.
                 "task_id": r.get("task_id") or task_id,
                 "task_name": r.get("task_name", ""),
                 "project_id": r.get("project_id", ""),
-                "mr_id": r.get("mr_id", ""),
+                "mr_id": r.get("mr_id") or r.get("mr_iid", ""),
                 "scan_task_id": r.get("scan_task_id", ""),
                 "translation_type": r.get("translation_type", "MR Pipeline"),
             }
