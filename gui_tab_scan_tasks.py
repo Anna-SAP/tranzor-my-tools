@@ -343,10 +343,45 @@ class ScanTasksTab:
         """Called when tab is first selected — load initial data."""
         self._load_tasks()
 
+    def _invalidate_post_edit_cache(self):
+        """Drop the cached ✏️ (post-edit) answers for the scan kind.
+
+        The badge is served from a process-lifetime cache
+        (:class:`task_post_edit.PostEditCache`). A reviewer who edits a
+        scan-task translation in the Tranzor dashboard does so *after* we may
+        have already cached a ``False`` "no edit" answer for that task.
+        Without this invalidation, re-querying reuses the stale ``False`` —
+        the render only re-fetches when the cached value is ``None`` (see the
+        ``cached is None`` gate in ``_on_tasks_loaded``) — so the badge never
+        lights up even though a fresh detail fetch would now detect the edit.
+
+        A transient API failure during a prior fetch also lands here as a
+        cached ``False``; clearing on an explicit re-query lets it self-heal.
+
+        Mirrors the MR Pipeline tab
+        (``MRPipelineTab._invalidate_post_edit_cache``) and the File
+        Translation Refresh (``export_gui._load_summary_data``), which drop
+        the ``mr`` / ``legacy`` kinds for the same go-edit-then-come-back
+        reason. Scoped to an explicit Refresh / Search / Reset — paging
+        (Prev / Next) keeps the cache so flipping pages stays free.
+        Best-effort: never block the reload on housekeeping.
+        """
+        try:
+            _tpe.get_cache().clear_kind("scan")
+        except Exception:
+            pass
+
     def _refresh_tasks(self):
+        # Refresh is the canonical go-edit-then-come-back gesture — drop stale
+        # ✏️ answers so a reviewer's just-made fixes surface (see
+        # _invalidate_post_edit_cache).
+        self._invalidate_post_edit_cache()
         self._load_tasks()
 
     def _on_search(self):
+        # An explicit re-query means "give me fresh data" — drop stale ✏️
+        # answers (see _invalidate_post_edit_cache).
+        self._invalidate_post_edit_cache()
         self.scan_page = 0
         self._load_tasks()
 
@@ -354,6 +389,7 @@ class ScanTasksTab:
         self.scan_project_var.set("")
         self.scan_status_var.set("")
         self.scan_task_id_var.set("")
+        self._invalidate_post_edit_cache()
         self.scan_page = 0
         self._load_tasks()
 
