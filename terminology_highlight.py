@@ -105,6 +105,17 @@ _locale_re: Dict[str, Optional[re.Pattern]] = {}
 # normalized locale -> {lowercase_match -> {"name", "source_name", "dnt"}}
 _locale_meta: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
+# Skip terminology highlighting for oversized source texts (e.g. UNS
+# handlebars email templates: the whole file is ONE translation unit, ~8KB of
+# HTML). Such a text matches dozens of glossary terms, and prefetch_for_rows
+# then fetches a context-service detail for each (up to DEFAULT_TIMEOUT=30s
+# per call). For a single MR Changes row this is ~7-8s of API traffic and, if
+# the context-service is slow/unreachable on the operator's session, makes the
+# export appear hung at "Exporting...". Normal UI strings are far below this
+# bound, so the guard removes the cost+hang for whole-file templates while
+# leaving highlighting intact everywhere else.
+MAX_HIGHLIGHT_SOURCE_CHARS = 4000
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -126,7 +137,7 @@ def highlight_source(escaped_text: str) -> str:
     Pass HTML-escaped text. The function returns the input unchanged if
     the term list failed to load.
     """
-    if not escaped_text:
+    if not escaped_text or len(escaped_text) > MAX_HIGHLIGHT_SOURCE_CHARS:
         return escaped_text
     pat = _ensure_list_loaded()
     if pat is None:
@@ -142,7 +153,7 @@ def highlight_translation(escaped_text: str, locale: Optional[str]) -> str:
     source name is expected to appear verbatim in the translation are
     included automatically.
     """
-    if not escaped_text or not locale:
+    if not escaped_text or not locale or len(escaped_text) > MAX_HIGHLIGHT_SOURCE_CHARS:
         return escaped_text
     norm = normalize_locale(locale)
     pat = _locale_re.get(norm)
@@ -183,7 +194,9 @@ def prefetch_for_rows(
     hit_ids: set = set()
     for row in rows:
         src = row.get(source_field) or ""
-        if not src:
+        if not src or len(src) > MAX_HIGHLIGHT_SOURCE_CHARS:
+            # Oversized (UNS whole-file template): scanning 8KB would trigger
+            # dozens of context-service detail fetches and can hang the export.
             continue
         for m in _source_re.finditer(src):
             meta = _name_to_meta.get(m.group(0).lower())
