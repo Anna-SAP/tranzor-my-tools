@@ -301,6 +301,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import export_changes
 import export_translations
 import gui_tabs
+import tranzor_auth
 
 _boot_mark("core_siblings_imported")
 
@@ -414,6 +415,19 @@ _boot_mark("optional_tabs_imported")
 TRANZOR_URL = "http://tranzor-platform.int.rclabenv.com"
 API = f"{TRANZOR_URL}/api/v1/legacy"
 
+# The platform now requires a Bearer-JWT Authorization header on its API
+# (it used to be open). Install a one-time requests patch so EVERY platform
+# request — across all modules, sessions, and bare requests.get calls —
+# carries the stored token, and restore any saved (7-day) token from disk.
+# Must run before the first API call (the startup summary load below).
+try:
+    from urllib.parse import urlparse as _urlparse
+    tranzor_auth.configure_hosts(_urlparse(TRANZOR_URL).hostname or "")
+    tranzor_auth.install()
+    tranzor_auth.load()
+except Exception as _auth_init_err:  # pragma: no cover - defensive
+    print(f"[auth] init failed: {_auth_init_err}")
+
 
 # ============================================================
 # i18n — All UI strings in English and Chinese
@@ -460,6 +474,19 @@ STRINGS = {
         "summary_col_id":     "ID",
         "summary_col_name":   "Task Name",
         "summary_col_creator":"Creator",
+        # Platform login (Bearer-JWT auth)
+        "login_title":        "Platform Sign-in",
+        "login_subtitle":     "The platform requires sign-in. Use your LDAP (RingCentral) email and password. Only a 7-day token is stored — never your password.",
+        "login_email":        "Email",
+        "login_password":     "Password",
+        "login_btn":          "Sign In",
+        "login_logging_in":   "⏳ Signing in…",
+        "login_failed":       "Sign-in failed",
+        "login_need_both":    "Enter both email and password",
+        "login_required":     "⚠ Sign-in required — click 🔑 Sign In",
+        "account_login":      "🔑 Sign In",
+        "account_logged_in":  "🔑 {user}",
+        "account_tip":        "Platform sign-in (token valid 7 days)",
         # Messages
         "err_title":          "Input Error",
         "err_task_id":        "Task ID must be a number (e.g. 53), or leave empty to export all.",
@@ -589,6 +616,19 @@ STRINGS = {
         "summary_col_id":     "ID",
         "summary_col_name":   "任务名称",
         "summary_col_creator":"创建者",
+        # Platform login (Bearer-JWT auth)
+        "login_title":        "平台登录",
+        "login_subtitle":     "平台现在需要登录。请使用你的 LDAP（RingCentral）邮箱和密码。本机只保存 7 天有效的令牌，绝不保存密码。",
+        "login_email":        "邮箱",
+        "login_password":     "密码",
+        "login_btn":          "登录",
+        "login_logging_in":   "⏳ 正在登录…",
+        "login_failed":       "登录失败",
+        "login_need_both":    "请输入邮箱和密码",
+        "login_required":     "⚠ 需要登录 —— 点击 🔑 登录",
+        "account_login":      "🔑 登录",
+        "account_logged_in":  "🔑 {user}",
+        "account_tip":        "平台登录（令牌有效期 7 天）",
         # Messages
         "err_title":          "输入错误",
         "err_task_id":        "Task ID 必须是纯数字（如 53），或留空导出全部。",
@@ -961,6 +1001,11 @@ class ExportApp:
         self._recalculate_summary_page_size()
         self.root.after(250, self._recalculate_summary_page_size)
 
+        # Platform now requires sign-in: make sure we have a valid token
+        # before the first API call. Shows a modal login dialog when no
+        # (unexpired) token is saved; otherwise proceeds seamlessly.
+        self._ensure_platform_auth()
+
         # Auto-load legacy summary data on startup (only this – avoid concurrent API overload)
         self._load_summary_data()
 
@@ -1204,6 +1249,18 @@ class ExportApp:
             bg=self.ACCENT, fg="#ccc", activebackground="#1a3a6a",
             activeforeground="#fff", padx=12, pady=2)
         self.btn_lang.pack(side="right", anchor="ne")
+
+        # Platform sign-in button (top-right, left of the language toggle).
+        # The platform now requires Bearer-JWT auth; this lets the user
+        # sign in / re-sign-in (token lasts 7 days) without restarting.
+        self.btn_account = self._create_button(
+            header, text="🔑", command=self._on_account_button,
+            style_name="Secondary",
+            font=(FONT_FAMILY, 10),
+            bg=self.ACCENT, fg="#ccc", activebackground="#1a3a6a",
+            activeforeground="#fff", padx=12, pady=2)
+        self.btn_account.pack(side="right", anchor="ne", padx=(0, 8))
+        self._account_tip = Tooltip(self.btn_account, "")
 
         self.lbl_title = ttk.Label(header, text="", style="Title.TLabel")
         self.lbl_title.pack(anchor="w")
@@ -1657,6 +1714,7 @@ class ExportApp:
         self.lbl_log_header.configure(text=self._t("log_header"))
         self.lbl_footer.configure(text=self._t("footer"))
         self.btn_lang.configure(text=self._t("lang_toggle"))
+        self._update_account_button()
 
         # PR-L: LAZY per-tab refresh — the real fix for the ~57s
         # "(未响应)" gap between window paint and first interactivity
@@ -2127,12 +2185,181 @@ class ExportApp:
         self._render_summary_page()
 
     def _on_summary_error(self, error_msg):
-        """Callback when summary data fails to load."""
+        """Callback when summary data fails to load.
+
+        A 401/Unauthorized means the platform token is missing/expired/
+        revoked — prompt a (re-)sign-in and retry once automatically rather
+        than leaving the user staring at a generic "Failed to load" message.
+        """
         self.summary_loading = False
         self.btn_refresh.configure(state="normal")
+
+        if self._looks_like_auth_error(error_msg) and not getattr(
+                self, "_auth_retry_in_progress", False):
+            self.lbl_summary_status.configure(
+                text=self._t("login_required"), foreground="#e94560",
+                font=(FONT_FAMILY, 9))
+            self._auth_retry_in_progress = True
+            try:
+                signed_in = self._show_login_dialog()
+            finally:
+                self._auth_retry_in_progress = False
+            if signed_in:
+                self._load_summary_data()  # retry now that we have a token
+            return
+
         self.lbl_summary_status.configure(
             text=self._t("summary_error"), foreground="#e94560",
             font=(FONT_FAMILY, 9))
+
+    # ------------------------------------------------------------------
+    # Platform sign-in (Bearer-JWT auth)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _looks_like_auth_error(error_msg):
+        """Heuristic: does this load-error string look like an auth failure?"""
+        msg = str(error_msg or "").lower()
+        return ("401" in msg or "unauthorized" in msg
+                or "authorization" in msg)
+
+    def _ensure_platform_auth(self):
+        """Ensure a valid token exists before the first API call.
+
+        Returns True if authenticated (seamless when a saved 7-day token is
+        still valid); otherwise shows the modal login dialog.
+        """
+        try:
+            if tranzor_auth.has_valid_token():
+                self._update_account_button()
+                return True
+        except Exception:
+            pass
+        return self._show_login_dialog()
+
+    def _update_account_button(self):
+        """Reflect sign-in state on the header button + tooltip."""
+        try:
+            user = tranzor_auth.get_user() or {}
+            if tranzor_auth.has_valid_token():
+                ident = (user.get("email") or user.get("name") or "").split("@")[0]
+                label = (self._t("account_logged_in").format(user=ident)
+                         if ident else "🔑")
+            else:
+                label = self._t("account_login")
+            self.btn_account.configure(text=label)
+            if getattr(self, "_account_tip", None):
+                self._account_tip.set_text(self._t("account_tip"))
+        except Exception:
+            pass
+
+    def _on_account_button(self):
+        """Header 🔑 button: (re-)sign-in, then refresh the current view."""
+        if self._show_login_dialog():
+            self._load_summary_data()
+
+    def _show_login_dialog(self):
+        """Modal LDAP sign-in. Returns True once a token is obtained.
+
+        Login runs on a background thread so the UI never freezes (the
+        codebase is sensitive to '未响应' stalls); the dialog is modal via
+        wait_window so callers can treat it as blocking.
+        """
+        dlg = tk.Toplevel(self.root)
+        dlg.title(self._t("login_title"))
+        dlg.configure(bg=self.BG)
+        dlg.resizable(False, False)
+        try:
+            dlg.transient(self.root)
+        except Exception:
+            pass
+
+        result = {"ok": False}
+
+        wrap = tk.Frame(dlg, bg=self.BG)
+        wrap.pack(fill="both", expand=True, padx=20, pady=16)
+
+        tk.Label(wrap, text=self._t("login_title"), bg=self.BG, fg="#fff",
+                 font=(FONT_FAMILY, 14, "bold")).pack(anchor="w")
+        tk.Label(wrap, text=self._t("login_subtitle"), bg=self.BG, fg="#aaa",
+                 font=(FONT_FAMILY, 9), wraplength=380, justify="left").pack(
+            anchor="w", pady=(4, 12))
+
+        tk.Label(wrap, text=self._t("login_email"), bg=self.BG, fg=self.FG,
+                 font=(FONT_FAMILY, 10)).pack(anchor="w")
+        ent_email = tk.Entry(wrap, width=40, font=(FONT_FAMILY, 11),
+                             bg="#0a0a1a", fg="#fff", insertbackground="#fff",
+                             relief="flat")
+        ent_email.pack(fill="x", ipady=4, pady=(2, 8))
+
+        tk.Label(wrap, text=self._t("login_password"), bg=self.BG, fg=self.FG,
+                 font=(FONT_FAMILY, 10)).pack(anchor="w")
+        ent_pwd = tk.Entry(wrap, width=40, show="•", font=(FONT_FAMILY, 11),
+                           bg="#0a0a1a", fg="#fff", insertbackground="#fff",
+                           relief="flat")
+        ent_pwd.pack(fill="x", ipady=4, pady=(2, 8))
+
+        lbl_status = tk.Label(wrap, text="", bg=self.BG, fg="#e94560",
+                              font=(FONT_FAMILY, 9), wraplength=380,
+                              justify="left")
+        lbl_status.pack(anchor="w", pady=(0, 8))
+
+        # Pre-fill last-known email for convenience.
+        try:
+            last_user = tranzor_auth.get_user() or {}
+            if last_user.get("email"):
+                ent_email.insert(0, last_user["email"])
+        except Exception:
+            pass
+
+        def _done(ok, msg):
+            if ok:
+                result["ok"] = True
+                dlg.destroy()
+            else:
+                btn.configure(state="normal")
+                lbl_status.configure(
+                    text=f"{self._t('login_failed')}: {msg}", fg="#e94560")
+
+        def _do_login(_event=None):
+            email = ent_email.get().strip()
+            pwd = ent_pwd.get()
+            if not email or not pwd:
+                lbl_status.configure(text=self._t("login_need_both"), fg="#e94560")
+                return
+            btn.configure(state="disabled")
+            lbl_status.configure(text=self._t("login_logging_in"), fg="#fbbf24")
+
+            def _work():
+                ok, msg = tranzor_auth.login(email, pwd, TRANZOR_URL)
+                dlg.after(0, _done, ok, msg)
+
+            threading.Thread(target=_work, daemon=True).start()
+
+        btn = self._create_button(
+            wrap, text=self._t("login_btn"), command=_do_login,
+            style_name="Accent", font=(FONT_FAMILY, 11, "bold"),
+            bg=self.ACCENT_BTN, fg="#fff", padx=16, pady=6)
+        btn.pack(anchor="e")
+
+        ent_pwd.bind("<Return>", _do_login)
+        ent_email.bind("<Return>", lambda e: ent_pwd.focus_set())
+        (ent_email if not ent_email.get() else ent_pwd).focus_set()
+
+        # Center over the main window and run modal.
+        dlg.update_idletasks()
+        try:
+            x = self.root.winfo_rootx() + (self.root.winfo_width() // 2) - (dlg.winfo_width() // 2)
+            y = self.root.winfo_rooty() + (self.root.winfo_height() // 2) - (dlg.winfo_height() // 2)
+            dlg.geometry(f"+{max(0, x)}+{max(0, y)}")
+        except Exception:
+            pass
+        try:
+            dlg.grab_set()
+        except Exception:
+            pass
+        self.root.wait_window(dlg)
+        self._update_account_button()
+        return result["ok"]
 
     def _on_task_select(self, event):
         """When user clicks a task row, fill the Task ID entry."""
