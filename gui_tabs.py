@@ -183,6 +183,16 @@ class MRPipelineTab:
             style="Card.TCheckbutton", command=self._on_search)
         self.chk_mr_hide_empty.pack(side="left", padx=(16, 0))
 
+        # Client-side "only post-edited (✏️) MRs" view filter. Post-edit
+        # status is determined asynchronously by the ✏️ prefetch, so this
+        # filters the rows already loaded rather than re-querying the server
+        # (text set in refresh_text, like the legend above).
+        self.mr_post_edit_only_var = tk.BooleanVar(value=False)
+        self.chk_mr_post_edit_only = ttk.Checkbutton(
+            r2, text="", variable=self.mr_post_edit_only_var,
+            style="Card.TCheckbutton", command=self._on_post_edit_only_toggle)
+        self.chk_mr_post_edit_only.pack(side="left", padx=(12, 0))
+
         # ── Action bar (Export + Pagination) — above table for visibility on macOS ──
         action = ttk.Frame(left, style="App.TFrame")
         action.pack(fill="x", pady=(6, 6))
@@ -408,6 +418,7 @@ class MRPipelineTab:
         for col in self._MR_COLUMNS:
             self.mr_tree.heading(col, text=self._sort_heading_text(col))
         self.lbl_mr_post_edit_legend.configure(text=t("mr_post_edit_legend"))
+        self.chk_mr_post_edit_only.configure(text=t("mr_post_edit_only"))
 
         self.lbl_mr_sidebar_title.configure(text=t("mr_sidebar_title"))
         for key in ("total", "completed", "failed", "avg_score"):
@@ -906,6 +917,12 @@ class MRPipelineTab:
             self.btn_mr_export.configure(state="normal" if has_rows else "disabled")
         self.lbl_mr_status_bar.configure(text=self._t("status_ready"))
 
+        # Re-apply the "✏️ only" view filter to the freshly rendered rows
+        # (hides pending / non-edit rows; the prefetch above reveals the
+        # post-edits as their checks confirm).
+        if self.mr_post_edit_only_var.get():
+            self._apply_post_edit_filter()
+
     # ------------------------------------------------------------------
     # Post-edit prefetch callback. The fetcher runs on a worker thread,
     # so we must marshal back to Tk via after() before touching widgets.
@@ -952,6 +969,70 @@ class MRPipelineTab:
             self.mr_tree.item(iid, values=vals, tags=tuple(current_tags))
         except tk.TclError:
             pass
+        # If the "✏️ only" filter is active, this row just qualified — it was
+        # detached as a pending/non-edit row, so reveal it now.
+        if self.mr_post_edit_only_var.get():
+            try:
+                self.mr_tree.move(iid, "", "end")
+                if self._mr_sort is not None:
+                    self._apply_sort(*self._mr_sort)
+                self._update_post_edit_filter_status()
+            except tk.TclError:
+                pass
+
+    # ------------------------------------------------------------------
+    # "✏️ Post-edited only" client-side view filter.
+    #
+    # Post-edit status is resolved asynchronously by the ✏️ prefetch (a row
+    # gains the gold ``post_edit`` tag once a fix is confirmed). This filter
+    # therefore acts on the rows already loaded on the current page(s): with
+    # the box checked, only confirmed post-edit rows stay attached; pending /
+    # non-edit rows are detached and reappear as the prefetch confirms them
+    # (see _apply_post_edit_prefix_mr). It does NOT re-query the server — use
+    # Load More to pull older MRs, and the filter applies to them too.
+    # ------------------------------------------------------------------
+    def _on_post_edit_only_toggle(self):
+        self._apply_post_edit_filter()
+
+    def _apply_post_edit_filter(self):
+        only = self.mr_post_edit_only_var.get()
+        # Iterate task rows in insertion order; skip the "mr:<iid>" alias keys
+        # that _on_tasks_loaded also stashes in the same dict. Detached items
+        # stay in the dict and remain reachable via item()/move().
+        for key, iid in list(self._mr_row_iid_by_task.items()):
+            if isinstance(key, str) and key.startswith("mr:"):
+                continue
+            try:
+                tags = self.mr_tree.item(iid, "tags") or ()
+            except tk.TclError:
+                continue
+            is_post_edit = "post_edit" in tags
+            try:
+                if only and not is_post_edit:
+                    self.mr_tree.detach(iid)
+                else:
+                    # Reattach at end; iterating in insertion order rebuilds
+                    # the original row order among the visible rows.
+                    self.mr_tree.move(iid, "", "end")
+            except tk.TclError:
+                continue
+        if self._mr_sort is not None:
+            self._apply_sort(*self._mr_sort)
+        self._update_post_edit_filter_status()
+
+    def _update_post_edit_filter_status(self):
+        """Reflect the filtered view in the export button + status bar."""
+        visible = self.mr_tree.get_children("")
+        has_rows = bool(visible)
+        if IS_MAC:
+            self.btn_mr_export.state(["!disabled"] if has_rows else ["disabled"])
+        else:
+            self.btn_mr_export.configure(state="normal" if has_rows else "disabled")
+        if self.mr_post_edit_only_var.get():
+            self.lbl_mr_status_bar.configure(
+                text=self._t("mr_post_edit_filter_status").format(n=len(visible)))
+        else:
+            self.lbl_mr_status_bar.configure(text=self._t("status_ready"))
 
     def _on_tasks_error(self, err):
         self.mr_loading = False
