@@ -409,6 +409,38 @@ class GitLabClient:
         self._commits_cache[key] = out
         return out
 
+    def list_mr_commits(self, project_id, mr_iid, *, per_page=100, max_pages=2):
+        """List a merge request's own commits via
+        ``GET /merge_requests/:iid/commits`` (newest-first).
+
+        One round-trip that replaces the ``get_merge_request`` (to learn the
+        source branch) + ``list_commits(ref_name=branch)`` pair the post-edit
+        BATCH_FIX probe used to need — halving GitLab latency per MR, which is
+        the dominant cost of the "✏️ Post-edited only" filter. The Tranzor
+        Language Lead fix commit is always the newest Tranzor-authored commit,
+        so page 1 (per_page=100) reliably contains it; we read up to
+        ``max_pages`` for safety. Cached per ``(project_id, mr_iid)``.
+        """
+        key = (str(project_id), int(mr_iid))
+        if not hasattr(self, "_mr_commits_cache"):
+            self._mr_commits_cache = {}
+        if key in self._mr_commits_cache:
+            return self._mr_commits_cache[key]
+        url = (f"{self.base_url}/api/v4/projects/"
+               f"{self._encode(project_id)}/merge_requests/{int(mr_iid)}/commits")
+        out = []
+        for page in range(1, max_pages + 1):
+            r = self._session.get(
+                url, params={"per_page": per_page, "page": page},
+                timeout=self.timeout)
+            r.raise_for_status()
+            batch = r.json() or []
+            out.extend(batch)
+            if len(batch) < per_page:
+                break
+        self._mr_commits_cache[key] = out
+        return out
+
 
 # ---------------------------------------------------------------------------
 # Fix-commit discovery
@@ -723,6 +755,30 @@ def is_lead_fix_commit(commit):
     title = commit.get("title") or ""
     return (title.startswith(_LEAD_FIX_TITLE_SINGLE)
             or title.startswith(_LEAD_FIX_TITLE_BATCH))
+
+
+def mr_has_lead_fix_commit(client, project_id, mr_iid):
+    """True iff the MR carries a Tranzor Language Lead fix commit (single OR
+    batch) — the fast post-edit signal.
+
+    One GitLab round-trip via the MR's own commits, so it works regardless of
+    the source-branch name and without a separate get_merge_request lookup.
+    Catches both single-row and batch fixes (``is_lead_fix_commit`` matches
+    both title forms), unlike the old branch scan which only fingerprinted
+    batch fixes. Raises ``GitLabAccessError`` on 401/403/404 so the caller can
+    give up on a project the PAT can't read.
+    """
+    if not project_id or mr_iid is None:
+        return False
+    try:
+        commits = client.list_mr_commits(project_id, int(mr_iid))
+    except requests.HTTPError as e:
+        code = getattr(e.response, "status_code", None)
+        if code in (401, 403, 404):
+            raise GitLabAccessError(project_id, code,
+                                    url=getattr(e.response, "url", None)) from e
+        raise
+    return any(is_lead_fix_commit(c) for c in (commits or []))
 
 
 def parse_uns_template_path(path):

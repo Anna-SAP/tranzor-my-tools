@@ -16,19 +16,23 @@ Per-channel rule:
 - MR Pipeline — **two paths in OR**, because Tranzor has two distinct
   human-revision mechanisms that land in different stores:
 
-  1. **Single-row UI fix** — Language Lead clicks "fix" in the dashboard
-     on one row at a time. Lands in ``MrTranslation.fixed_by_lead``.
-     Detected via ``/dashboard/cases?mr_id=…``.
+  1. **GitLab fix commit** — every Language Lead fix (single-row OR bulk)
+     is pushed by the Tranzor service account as a commit on the MR
+     (title ``[Tranzor] Language Lead fix: …`` / ``… batch fix: N
+     translation(s)``). Detected in ONE round-trip via the MR's own
+     commits — ``GET /merge_requests/:iid/commits`` — and the shared
+     ``gitlab_client.is_lead_fix_commit`` fingerprint. This replaced the
+     older get_merge_request + ``/repository/commits?ref_name=<branch>``
+     pair (two slow GitLab calls → one) that dominated the
+     "✏️ Post-edited only" filter's latency.
 
-  2. **BATCH_FIX** — Language Lead does a bulk edit. Tranzor packages
-     the edits as a *single GitLab commit* on the MR's source branch
-     (author=``Tranzor``, title=``[Tranzor] Language Lead batch fix:
-     N translation(s)``). **No** ``fixed_by_lead`` field is written.
-     Detected via GitLab ``GET /repository/commits?ref_name=<branch>``.
+  2. **fixed_by_lead** — a dashboard fix recorded on
+     ``MrTranslation.fixed_by_lead`` whose commit isn't visible on the MR
+     (e.g. a merged MR, or a fix pushed to a separate branch). Detected
+     via ``/dashboard/cases?mr_id=…`` (heavier, ~1-2MB) — only consulted
+     when path 1 finds nothing.
 
-  Both paths are checked; either ✏️ wins. BATCH_FIX is the common case
-  in practice (and was historically missed in PR #72 — see the commit
-  that introduced this two-path logic).
+  Both paths are checked; either ✏️ wins.
 
 API surface:
 
@@ -67,26 +71,9 @@ POST_EDIT_PREFIX = "✏️ "
 # manual fixes and LLM-assisted retranslations performed by a reviewer.
 _HUMAN_TYPES = frozenset({"Manual Edit", "LLM Retranslate"})
 
-# BATCH_FIX commit fingerprint on the GitLab side. The Tranzor backend
-# pushes these from a service account with a deterministic title prefix
-# — verified live across many commits in commit ``…probe-BATCH_FIX``:
-#
-#   author_email = "tranzor.service@rcoffice.ringcentral.com"
-#   author_name  = "Tranzor"
-#   title        = "[Tranzor] Language Lead batch fix: N translation(s)"
-#
-# If a Tranzor deployment ever changes these (e.g. a different service
-# account in a different env), they're easy to rebind here without
-# touching downstream logic.
-_BATCH_FIX_AUTHOR_EMAIL = "tranzor.service@rcoffice.ringcentral.com"
-_BATCH_FIX_TITLE_PREFIX = "[Tranzor] Language Lead batch fix"
-
-# How far back to look on a branch for a BATCH_FIX commit. 30 days is a
-# long enough window to cover any LQA cycle while keeping the commits
-# response bounded (typical feature branch has well under 500 commits
-# in a month). If we ever see a task older than this still pending
-# review, we'll widen the window then.
-_BATCH_FIX_LOOKBACK_DAYS = 30
+# The GitLab fix-commit fingerprint (service-account email + title prefixes)
+# now lives in gitlab_client (LEAD_FIX_AUTHOR_EMAIL / is_lead_fix_commit), so
+# the MR-commits probe and PR #103's source-branch scan share one definition.
 
 
 # ---------------------------------------------------------------------------
@@ -159,57 +146,28 @@ def _fetch_scan(task_id: str) -> bool:
     return has_post_edit_scan(results.get("translations") or [])
 
 
-def _is_batch_fix_commit(commit: dict) -> bool:
-    """Strict identification: an exact author email AND title prefix.
+_shared_client = None
+_shared_client_lock = threading.Lock()
 
-    We require both because GitLab's server-side ``author=`` filter is
-    substring-based and someone could in theory craft a non-Tranzor
-    commit with a similar email; the title check anchors us to the
-    bot's literal output format.
+
+def _shared_gitlab_client():
+    """One process-wide GitLabClient so the parallel post-edit prefetch reuses
+    TCP/TLS connections to the (latency-heavy) GitLab host instead of paying a
+    fresh handshake per MR. Returns None if the client can't be built. The
+    client's caches are append-only, so concurrent double-fetches across the
+    prefetch threads are harmless.
     """
-    if (commit.get("author_email") or "") != _BATCH_FIX_AUTHOR_EMAIL:
-        return False
-    title = commit.get("title") or ""
-    return title.startswith(_BATCH_FIX_TITLE_PREFIX)
-
-
-def _has_batch_fix_on_branch(project_id: str, source_branch: str) -> bool:
-    """Probe GitLab for any BATCH_FIX commit on the given branch within
-    the lookback window.
-
-    Returns False on any error (no token, 404, network, etc.) — failure
-    to detect BATCH_FIX must never produce a false positive. The caller
-    still has the dashboard-cases fallback for single-row fixes.
-
-    The GitLab client maintains its own per-parameter cache so multiple
-    MRs on the same branch share a single commits round-trip.
-    """
-    if not project_id or not source_branch:
-        return False
-    try:
-        import gitlab_client as _gc
-    except Exception:
-        return False
-    try:
-        client = _gc.GitLabClient()
-    except Exception:
-        return False
-    if not client.has_token():
-        return False
-
-    from datetime import datetime, timedelta, timezone
-    since_iso = (datetime.now(timezone.utc)
-                 - timedelta(days=_BATCH_FIX_LOOKBACK_DAYS)).isoformat()
-    try:
-        commits = client.list_commits(
-            project_id,
-            ref_name=source_branch,
-            since=since_iso,
-            author=_BATCH_FIX_AUTHOR_EMAIL,
-        )
-    except Exception:
-        return False
-    return any(_is_batch_fix_commit(c) for c in (commits or []))
+    global _shared_client
+    if _shared_client is not None:
+        return _shared_client
+    with _shared_client_lock:
+        if _shared_client is None:
+            try:
+                import gitlab_client as _gc
+                _shared_client = _gc.GitLabClient()
+            except Exception:
+                return None
+    return _shared_client
 
 
 def _fetch_mr(key) -> bool:
@@ -226,10 +184,11 @@ def _fetch_mr(key) -> bool:
 
     Detection order:
 
-    1. **BATCH_FIX** (GitLab commits on MR's source branch) — fast
-       (~200ms per branch, cached) and catches the common bulk-fix case.
-    2. **Single-row UI fix** (dashboard cases ``fixed_by_lead``) — heavier
-       (~1-2MB response) and catches the dashboard-UI one-by-one case.
+    1. **GitLab fix commit** (single OR batch) via the MR's own commits —
+       ONE round-trip (``GET /merge_requests/:iid/commits``), no separate
+       source-branch lookup. This is the cheap, common-case signal.
+    2. **fixed_by_lead** (dashboard cases) — heavier (~1-2MB response);
+       only consulted when path 1 finds nothing.
 
     Both run only on miss; first hit short-circuits.
     """
@@ -238,22 +197,19 @@ def _fetch_mr(key) -> bool:
     else:
         project_id, mr_iid = None, key
 
-    # Path 1: BATCH_FIX — needs source_branch, fetched via the MR detail.
-    # We resolve source_branch lazily; if GitLab isn't reachable (no
-    # token, restricted env), this whole block is a no-op.
+    # Path 1: a Tranzor Language Lead fix commit on the MR. One GitLab call
+    # via the MR's own commits — half the latency of the old
+    # get_merge_request + branch-scan pair, which dominated the post-edit
+    # filter. No-op if GitLab isn't reachable (no token / restricted env).
     if project_id:
         try:
             import gitlab_client as _gc
-            client = _gc.GitLabClient()
-            if client.has_token():
-                mr = client.get_merge_request(project_id, int(mr_iid))
-                source_branch = mr.get("source_branch") or ""
-                if source_branch and _has_batch_fix_on_branch(
-                    project_id, source_branch,
-                ):
+            client = _shared_gitlab_client()
+            if client is not None and client.has_token():
+                if _gc.mr_has_lead_fix_commit(client, project_id, int(mr_iid)):
                     return True
         except Exception:
-            # Any failure on the BATCH_FIX path falls through to the
+            # Any failure on the fix-commit path falls through to the
             # dashboard-cases path — they're independent signals.
             pass
 
