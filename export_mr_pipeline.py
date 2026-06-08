@@ -939,11 +939,20 @@ def fetch_all_legacy_tasks_for_quality(project_name=None, status="Completed",
 
 
 def fetch_legacy_translations_quality(task_id, limit=200, offset=0,
-                                      target_language=None):
-    """GET /legacy/tasks/{task_id}/translations — 翻译结果含质量评分"""
+                                      target_language=None, label_types=None):
+    """GET /legacy/tasks/{task_id}/translations — 翻译结果含质量评分
+
+    ``label_types`` maps to the server-side row filter (e.g.
+    ``["post_edited"]`` → only ``Manual Edit`` / ``LLM Retranslate`` rows,
+    per backend ``legacy_task_repository.get_paginated_translations``).
+    Passing it lets callers probe a task for human edits with one
+    near-empty request instead of paging the whole task.
+    """
     params = {"limit": limit, "offset": offset}
     if target_language:
         params["target_language"] = target_language
+    if label_types:
+        params["label_types"] = label_types
     resp = _api_get(f"{LEGACY_API}/tasks/{task_id}/translations", params=params)
     resp.raise_for_status()
     data = resp.json()
@@ -993,8 +1002,14 @@ def fetch_legacy_translation_edit_logs(task_id, translation_id):
 
 
 def fetch_all_legacy_translations_quality(task_id, page_size=200,
-                                          target_language=None):
-    """分页获取某个 legacy task 的全部翻译（含质量数据）"""
+                                          target_language=None,
+                                          label_types=None):
+    """分页获取某个 legacy task 的全部翻译（含质量数据）
+
+    ``label_types`` is forwarded to the server-side row filter (see
+    :func:`fetch_legacy_translations_quality`); pass ``["post_edited"]``
+    to fetch only human-edited rows.
+    """
     all_items = []
     offset = 0
     while True:
@@ -1003,6 +1018,7 @@ def fetch_all_legacy_translations_quality(task_id, page_size=200,
             limit=page_size,
             offset=offset,
             target_language=target_language,
+            label_types=label_types,
         )
         all_items.extend(items)
         offset += len(items)
@@ -2289,78 +2305,111 @@ def _collect_mr_revisions(start_time=None, end_time=None,
     return revisions
 
 
+def _revision_in_window(ts, start_time, end_time):
+    """True iff ISO timestamp ``ts`` falls within ``[start_time, end_time]``.
+
+    The window is matched against the **revision** time (an edit-log's
+    ``created_at``), never the parent task's creation time — that is the
+    whole point of the Human Revisions sweep: an old task can receive a
+    fresh fix at any moment.
+
+    Comparison is on the second-resolution prefix so sub-second precision
+    or a trailing ``Z`` never clips a same-day revision (e.g. an edit at
+    ``23:59:59.6`` must still count against an end bound of ``23:59:59``).
+    A missing bound is open-ended; an empty ``ts`` is out-of-window
+    (callers handle the no-timestamp case explicitly).
+    """
+    if not ts:
+        return False
+    norm = ts[:19]
+    if start_time and norm < start_time[:19]:
+        return False
+    if end_time and norm > end_time[:19]:
+        return False
+    return True
+
+
+def _fetch_post_edited_entries(task_id):
+    """Return only the human-edited (``Manual Edit`` / ``LLM Retranslate``)
+    translations for a legacy task.
+
+    Fast path uses the server-side ``label_types=post_edited`` filter so a
+    task with no human edits costs a single near-empty request — essential
+    now that the Human Revisions sweep visits *every* Completed task. Older
+    Tranzor backends that don't understand the filter 4xx; we then fall
+    back to a full scan + client-side ``translation_type`` filter (the same
+    degraded path as ``task_post_edit._fetch_legacy``). Returns ``[]`` if
+    even the fallback fails, so one bad task can't abort the whole sweep.
+    """
+    try:
+        return fetch_all_legacy_translations_quality(
+            task_id, label_types=["post_edited"])
+    except Exception:
+        pass
+    try:
+        all_trs = fetch_all_legacy_translations_quality(task_id)
+    except Exception:
+        return []
+    return [
+        tr for tr in all_trs
+        if tr.get("translation_type", "") in ("Manual Edit", "LLM Retranslate")
+    ]
+
+
 def _collect_legacy_revisions(start_time=None, end_time=None,
                                progress_callback=None):
-    """Collect human edits from File Translation (legacy) channel.
+    """Collect human edits from the File Translation (legacy) channel.
 
-    Reuses the same detection logic as ``export_changes.py``:
-      1. Fetch all completed legacy tasks (optionally filtered by date).
-      2. For each task, fetch translations with
-         ``translation_type in ('Manual Edit', 'LLM Retranslate')``.
-      3. For every such translation, fetch its **edit-logs** to obtain the
-         concrete before/after text and the editor name.
+    Completeness contract — capture *every* recent revision, no matter how
+    old its task is:
+      A revision is included **iff its edit-log timestamp is inside
+      [start_time, end_time]**. We deliberately do NOT pre-filter tasks by
+      their ``created_at``: a task created months ago (e.g. LOC-24054, a
+      March drop) can be fixed by a Language Lead today, and that fix must
+      surface. So we scan *all* Completed tasks and window-filter on each
+      edit-log's own ``created_at`` (the actual revision time).
+
+    Efficiency (mirrors ``export_changes.collect_changes``):
+      * Each task is probed via the server-side ``label_types=post_edited``
+        filter — a task with no human edits costs one near-empty request
+        (with a full-scan fallback for older backends).
+      * Tasks are swept concurrently with ``MAX_WORKERS`` threads; edit-log
+        windowing is the actual date filter.
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import threading
+
     if progress_callback:
         progress_callback("Loading File Translation tasks...")
 
     tasks = fetch_all_legacy_tasks_for_quality(status="Completed")
-
-    # Filter tasks by date
-    if start_time or end_time:
-        filtered = []
-        for t in tasks:
-            created = t.get("created_at", "")
-            if start_time and created < start_time:
-                continue
-            if end_time and created > end_time:
-                continue
-            filtered.append(t)
-        tasks = filtered
-
-    revisions = []
     total_tasks = len(tasks)
 
-    for idx, task in enumerate(tasks):
+    def _scan_one(task):
         task_id = str(task.get("task_id") or task.get("id", ""))
         task_name = task.get("task_name") or task.get("name", "")
         project_name = task.get("project_name", "")
+        out = []
         if not task_id:
-            continue
+            return out
 
-        if progress_callback:
-            progress_callback(
-                f"Scanning File Translation {idx + 1}/{total_tasks}: "
-                f"{task_name[:30]}"
-            )
-
-        # Step A: fetch translations, keep only human-edited ones
-        try:
-            translations = fetch_all_legacy_translations_quality(task_id)
-        except Exception:
-            continue
-
-        manual_entries = [
-            tr for tr in translations
-            if tr.get("translation_type", "") in ("Manual Edit", "LLM Retranslate")
-        ]
-        if not manual_entries:
-            continue
-
-        # Step B: for each manual entry, fetch edit-logs to get before/after
-        for tr in manual_entries:
+        for tr in _fetch_post_edited_entries(task_id):
             tr_id = tr.get("translation_id")
             if not tr_id:
                 continue
-
             try:
                 logs = fetch_legacy_translation_edit_logs(task_id, tr_id)
             except Exception:
                 logs = []
 
             if logs:
-                # Each edit-log entry is one human revision
+                # Each edit-log entry is one human revision; keep only the
+                # ones whose edit time lands in the requested window.
                 for log in logs:
-                    revisions.append({
+                    revised_at = log.get("created_at") or ""
+                    if not _revision_in_window(revised_at, start_time, end_time):
+                        continue
+                    out.append({
                         "channel": "File Translation",
                         "project_id": project_name or task_name,
                         "opus_id": tr.get("opus_id") or tr.get("source_id", ""),
@@ -2371,14 +2420,16 @@ def _collect_legacy_revisions(start_time=None, end_time=None,
                         "machine_score": tr.get("final_score"),
                         "error_category": tr.get("error_category"),
                         "editor": log.get("user_name") or tr.get("translation_type", ""),
-                        "revised_at": log.get("created_at", ""),
+                        "revised_at": revised_at,
                         "task_name": task_name,
                         "notes": log.get("notes", ""),
                     })
             else:
-                # translation_type says edited but no log detail — still
-                # include it so the count is accurate
-                revisions.append({
+                # translation_type says edited but no edit-log detail —
+                # pathological (both edit paths write a log). Keep it so a
+                # human edit is never silently dropped; there's no reliable
+                # timestamp to window on, so it is always included.
+                out.append({
                     "channel": "File Translation",
                     "project_id": project_name or task_name,
                     "opus_id": tr.get("opus_id") or tr.get("source_id", ""),
@@ -2393,6 +2444,25 @@ def _collect_legacy_revisions(start_time=None, end_time=None,
                     "task_name": task_name,
                     "notes": "",
                 })
+        return out
+
+    revisions = []
+    done = {"n": 0}
+    lock = threading.Lock()
+
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        futures = [pool.submit(_scan_one, t) for t in tasks]
+        for f in as_completed(futures):
+            try:
+                revisions.extend(f.result())
+            except Exception:
+                pass
+            if progress_callback:
+                with lock:
+                    done["n"] += 1
+                    n = done["n"]
+                progress_callback(
+                    f"Scanning File Translation {n}/{total_tasks}")
 
     return revisions
 
