@@ -1127,6 +1127,41 @@ def get_opus_detail(opus_id: str, db_path: str | None = None) -> dict:
         }
 
 
+def get_coverage_rows(opus_ids, db_path: str | None = None) -> dict:
+    """Batch coverage lookup for the Pre-Translation Check engine.
+
+    Given a list of ``opus_id`` (the l10n portal Purchase delta), return for
+    each one its index rows so the caller can decide MR-pipeline coverage::
+
+        {opus_id: [{target_language, translated_text, source_kind, mr_iid,
+                    release, project_id, task_id, source_text}, ...]}
+
+    opus_ids absent from the index simply don't appear as keys (the caller
+    treats a missing key as "no coverage at all"). One query per ~800 ids so a
+    whole drop's delta resolves in a couple of round-trips, well under SQLite's
+    host-parameter cap.
+    """
+    ids = [i for i in dict.fromkeys(opus_ids) if i]  # dedupe, keep order, drop blanks
+    out: dict[str, list[dict]] = {}
+    if not ids:
+        return out
+    init_db(db_path)
+    with _connect(db_path) as conn:
+        for start in range(0, len(ids), 800):
+            chunk = ids[start:start + 800]
+            placeholders = ",".join("?" * len(chunk))
+            cur = conn.execute(
+                f"""
+                SELECT opus_id, target_language, translated_text, source_kind,
+                       mr_iid, release, project_id, task_id, source_text
+                FROM opus_index
+                WHERE opus_id IN ({placeholders})
+                """, chunk)
+            for r in cur.fetchall():
+                out.setdefault(r["opus_id"], []).append(dict(r))
+    return out
+
+
 def get_daily_trend(days: int = 30, db_path: str | None = None) -> list[dict]:
     """近 N 天每日新增 distinct opus_id 数。
 

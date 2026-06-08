@@ -407,6 +407,15 @@ except Exception as _rw_e:  # pragma: no cover
 else:
     _rw_import_error = None
 
+# 🚦 Pre-Translation Check —— 人工翻译前判断 Tranzor 是否已覆盖该 Purchase delta。
+try:
+    import gui_tab_pretranslation_check as _ptc_tab_mod
+except Exception as _ptc_e:  # pragma: no cover
+    _ptc_tab_mod = None
+    _ptc_import_error = _ptc_e
+else:
+    _ptc_import_error = None
+
 _boot_mark("optional_tabs_imported")
 
 # ---------------------------------------------------------------------------
@@ -779,6 +788,14 @@ if _tc_tab_mod is not None:
 if _rw_tab_mod is not None:
     try:
         for _lang_code, _extra in _rw_tab_mod.STRINGS.items():
+            STRINGS.setdefault(_lang_code, {}).update(_extra)
+    except Exception:
+        pass
+
+# Merge in strings from the optional Pre-Translation Check tab.
+if _ptc_tab_mod is not None:
+    try:
+        for _lang_code, _extra in _ptc_tab_mod.STRINGS.items():
             STRINGS.setdefault(_lang_code, {}).update(_extra)
     except Exception:
         pass
@@ -1409,6 +1426,24 @@ class ExportApp:
                 self.rw_tab = None
         _boot_mark("tab_review_worklist")
 
+        # --- Tab: 🚦 Pre-Translation Check ---
+        # 人工 File translation 启动前的覆盖预检入口。覆盖判断走本地 opus_index；
+        # 取分数 / 同步索引依赖平台登录（透明 Bearer-JWT）。放在最后，避免位移
+        # 既有 tab 的动态索引。
+        self.ptc_tab = None
+        self._ptc_tab_index = None
+        self._ptc_tab_initialized = False
+        if _ptc_tab_mod is not None:
+            try:
+                tab_ptc = ttk.Frame(self.notebook, style="App.TFrame")
+                self.notebook.add(tab_ptc, text="")
+                self.ptc_tab = _ptc_tab_mod.PreTranslationCheckTab(tab_ptc, self)
+                self._ptc_tab_index = self.notebook.index(tab_ptc)
+            except Exception as _e:
+                print(f"[Pre-Translation Check tab] init failed: {_e}")
+                self.ptc_tab = None
+        _boot_mark("tab_pretranslation_check")
+
         # ═══════════════════════════════════════════
         # TAB 1 CONTENTS (File Translation — preserved)
         # ═══════════════════════════════════════════
@@ -1814,6 +1849,12 @@ class ExportApp:
                 _register_tab_refresh(self.rw_tab, self._rw_tab_index)
             except Exception:
                 pass
+        if self.ptc_tab is not None and self._ptc_tab_index is not None:
+            try:
+                self.notebook.tab(self._ptc_tab_index, text=self._t("tab_pretranslation_check"))
+                _register_tab_refresh(self.ptc_tab, self._ptc_tab_index)
+            except Exception:
+                pass
 
         # Summary panel texts
         self.lbl_summary_title.configure(text=self._t("summary_title"))
@@ -2126,6 +2167,15 @@ class ExportApp:
                 self._opus_tab_initialized = True
                 try:
                     self.opus_tab.on_first_show()
+                except Exception:
+                    pass
+            elif (self.ptc_tab is not None
+                  and self._ptc_tab_index is not None
+                  and tab_idx == self._ptc_tab_index
+                  and not self._ptc_tab_initialized):
+                self._ptc_tab_initialized = True
+                try:
+                    self.ptc_tab.on_first_show()
                 except Exception:
                     pass
 
