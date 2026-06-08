@@ -439,7 +439,7 @@ def collect_all_mr_results(progress_callback=None):
 def detect_mr_changes(task_id, progress_callback=None):
     """检测给定 task 所属 MR 的全生命周期翻译变更。
 
-    两路检测：
+    三路检测：
     1. 任务级 diff：同一 MR 的相邻 completed task 两两对比 translated_text。
     2. Language Lead 修改：通过 /dashboard/cases?mr_id=... 读取 fixed_by_lead
        非空的翻译（BATCH_FIX / 单条 fix-translation 只原地更新，不会产生新 task，
@@ -447,6 +447,10 @@ def detect_mr_changes(task_id, progress_callback=None):
        pre-fix 文本优先取 iteration_history.iteration_1（若存在），
        否则留空 — Tranzor 数据层在 fix 时会用 fixed_text 覆写 translated_text，
        原译文无法复原（详见 TRAN-bug-fix-translation-audit-trail.md）。
+    3. MR 源分支 fix 提交扫描（独立于 fixed_by_lead）：直接扫描源分支上
+       Tranzor 服务账号推送的 Language Lead fix 提交，覆盖「已提交 GitLab 但
+       fixed_by_lead 留成 NULL」的漏报（audit-trail bug / BATCH_FIX 路径不写
+       该字段）。UNS 整文件模板用路径映射 + blob 取全文重建 pre/post。
 
     Returns:
         list[dict]: 每条记录代表一次翻译文本变更，含 prev_translated_text、
@@ -618,8 +622,40 @@ def detect_mr_changes(task_id, progress_callback=None):
                             f"留给 edit_logs / iteration_history 兜底）")
                 log(msg)
 
+    # Step 3d: 独立扫描 MR 源分支上的 Tranzor fix 提交（不依赖 fixed_by_lead）。
+    # 覆盖审计链断裂场景：fix 已提交 GitLab 但 fixed_by_lead 留成 NULL
+    # （单条 fix 的 audit-trail bug，或 BATCH_FIX 路径根本不写该字段），
+    # 这类 post-edit 在 Step 3c / Step 5 的 fixed_by_lead 闸门下会被整条漏掉。
+    #
+    # 扫描目标是 **MR 源分支**：对 open MR（含全部 UNS 邮件模板场景），后端
+    # _build_fix_branch_plan 的默认动作是 commit_existing → 直接提交到源分支，
+    # 故源分支即 fix 落点。merged MR 的 fix 会另建 tranzor-fix/* 分支，仍由既有
+    # find_fix_commit_for_key（fixed_by_lead 闸门）兜底，不在本步覆盖范围内。
+    # branch_fix_by_key: (opus_id, target_language) -> {pre, post, sha, ...}
+    branch_fix_by_key = {}
+    if gl:
+        source_branch = ""
+        try:
+            mr_obj = gl.get_merge_request(project_id, mr_iid)
+            source_branch = (mr_obj or {}).get("source_branch") or ""
+        except Exception as e:
+            log(f"  ⚠ 获取 MR 源分支失败，跳过源分支 fix 扫描: {e}")
+        if source_branch:
+            try:
+                log(f"  正在扫描源分支 {source_branch} 上的 Tranzor fix 提交...")
+                branch_fix_by_key = gitlab_client.scan_branch_fix_commits(
+                    gl, project_id, source_branch, cases_by_key)
+                if branch_fix_by_key:
+                    log(f"  ✓ 源分支 fix 提交命中 {len(branch_fix_by_key)} 条 "
+                        f"(opus_id, lang)，将独立于 fixed_by_lead 计入变更")
+            except gitlab_client.GitLabAccessError as ex:
+                log(f"  ⛔ GitLab 拒绝访问项目 '{project_id}' "
+                    f"(HTTP {ex.status_code})，跳过源分支 fix 扫描")
+            except Exception as e:
+                log(f"  ⚠ 源分支 fix 扫描失败: {e}")
+
     changes = []
-    seen_keys = set()  # (opus_id, target_language) — 避免两路检测重复
+    seen_keys = set()  # (opus_id, target_language) — 避免多路检测重复
 
     # Step 4: 任务级 diff（多 task 时才执行）
     if len(all_tasks) >= 2:
@@ -702,26 +738,36 @@ def detect_mr_changes(task_id, progress_callback=None):
     #   4) 空串（罕见：commit 不在白名单，无任何真值来源）
     lead_fix_count = 0
     refine_only_count = 0
+    branch_fix_count = 0
     for key, case in cases_by_key.items():
         if key in seen_keys:
             continue
         fixer = case.get("fixed_by_lead")
         logs = edit_logs_by_key.get(key) or []
         recovered = gitlab_recovery.get(key)
+        branch_rec = branch_fix_by_key.get(key)
 
-        if not fixer and not logs and not recovered:
-            # 既无 lead fix 也无 edit log → 不是变更
+        if not fixer and not logs and not recovered and not branch_rec:
+            # 既无 lead fix、edit log，也无源分支 fix 提交 → 不是变更
             continue
 
-        # 计算 prev_text / curr_text
+        # 计算 prev_text / curr_text（来源优先级：源分支 fix 提交 >
+        # tranzor-fix 分支恢复 > edit-logs > iteration_history > DB 字段）
         prev_text = ""
         curr_text = ""
         editor_from_logs = ""
 
+        if branch_rec:
+            # 源分支 fix 提交的 blob 全文是最可信的真值（DB 可能 NULL/stale）
+            prev_text = branch_rec.get("pre") or ""
+            curr_text = branch_rec.get("post") or ""
         if recovered:
-            prev_text, recovered_post = recovered
+            r_pre, r_post = recovered
             # GitLab 的 `+` 行就是 post-fix；如空再退化到 DB fields
-            curr_text = recovered_post or ""
+            if not prev_text:
+                prev_text = r_pre or ""
+            if not curr_text:
+                curr_text = r_post or ""
         if logs:
             logs_sorted = sorted(logs, key=lambda l: l.get("created_at") or "")
             if not prev_text:
@@ -745,7 +791,9 @@ def detect_mr_changes(task_id, progress_callback=None):
             # 无实质变化（可能 edit log 记了 no-op），跳过
             continue
 
-        if recovered:
+        if branch_rec:
+            change_source = "language-lead-fix (gitlab-branch)"
+        elif recovered:
             change_source = "language-lead-fix (gitlab)"
         elif fixer:
             change_source = "language-lead-fix"
@@ -753,8 +801,15 @@ def detect_mr_changes(task_id, progress_callback=None):
             change_source = "edit-log"
         if fixer:
             lead_fix_count += 1
+        elif branch_rec:
+            branch_fix_count += 1
         else:
             refine_only_count += 1
+
+        # fixed_at / 操作者：branch-only fix（DB 无痕）退化到提交时间 / 提交
+        # 标题里的操作者邮箱（legacy 标题无操作者 → 留空，如实表示未知）。
+        branch_committed_at = branch_rec.get("committed_at") if branch_rec else ""
+        branch_operator = branch_rec.get("fixed_by") if branch_rec else ""
 
         changes.append({
             **mr_meta,
@@ -766,9 +821,9 @@ def detect_mr_changes(task_id, progress_callback=None):
             "prev_task_id": "",
             "task_id": task_id,
             "prev_task_created": "",
-            "task_created": case.get("fixed_at") or "",
-            "fixed_by": fixer or editor_from_logs or "",
-            "fixed_at": case.get("fixed_at") or "",
+            "task_created": case.get("fixed_at") or branch_committed_at or "",
+            "fixed_by": fixer or editor_from_logs or branch_operator or "",
+            "fixed_at": case.get("fixed_at") or branch_committed_at or "",
             "change_source": change_source,
             "final_score": case.get("final_score"),
             "error_category": case.get("error_category"),
@@ -777,9 +832,12 @@ def detect_mr_changes(task_id, progress_callback=None):
         })
         seen_keys.add(key)
 
+    task_diff_count = (len(changes) - lead_fix_count
+                       - refine_only_count - branch_fix_count)
     log(f"\n  ✓ 检测到 {len(changes)} 条翻译变更 "
-        f"(任务级 diff: {len(changes) - lead_fix_count - refine_only_count}，"
+        f"(任务级 diff: {task_diff_count}，"
         f"Language Lead 修改: {lead_fix_count}，"
+        f"GitLab 源分支 fix: {branch_fix_count}，"
         f"edit-log 修改: {refine_only_count}；跨 {len(all_tasks)} 个任务)")
     return changes
 

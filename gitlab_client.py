@@ -17,7 +17,7 @@ commit diff 中恢复 Language Lead BATCH_FIX 的 pre-fix 原译文。
 import json
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
 import requests
@@ -275,6 +275,41 @@ class GitLabClient:
         data = resp.json() or []
         self._commit_diff_cache[sha] = data
         return data
+
+    def get_file_raw(self, project_id, path, ref):
+        """取某文件在指定 ``ref``（commit sha / 分支名）下的原始全文。
+
+        UNS 整文件模板需要这条：fix 提交把整份 ``.hbs`` 覆写，commit diff
+        默认只带 3 行上下文，无法重建 8KB 全文 —— 必须直接拉 blob。
+
+        Returns:
+            str 文件内容；``404``（该 ref 下文件不存在，例如新增文件没有
+            parent 版本）返回 ``None``。
+
+        Note:
+            ``repository/files/.../raw`` 的项目级 401/403 仍会经
+            ``raise_for_status`` 抛 ``requests.HTTPError``；文件级 404 这里
+            吞掉返回 ``None``（调用方据此回退到其它 pre/post 来源）。缓存
+            按 ``(project_id, path, ref)`` 复用，避免同一文件重复拉取。
+        """
+        if not path or not ref:
+            return None
+        cache_key = (str(project_id), str(path), str(ref))
+        if not hasattr(self, "_file_raw_cache"):
+            self._file_raw_cache = {}
+        if cache_key in self._file_raw_cache:
+            return self._file_raw_cache[cache_key]
+        url = (f"{self.base_url}/api/v4/projects/"
+               f"{self._encode(project_id)}/repository/files/"
+               f"{self._encode(path)}/raw")
+        resp = self._session.get(url, params={"ref": ref}, timeout=self.timeout)
+        if resp.status_code == 404:
+            self._file_raw_cache[cache_key] = None
+            return None
+        resp.raise_for_status()
+        text = resp.text
+        self._file_raw_cache[cache_key] = text
+        return text
 
     def get_merge_request(self, project_id, mr_iid):
         """Fetch full MR metadata from GitLab.
@@ -637,3 +672,236 @@ def extract_diff_values(commit_diff, opus_id, target_language):
             return pre, post
 
     return None, None
+
+
+# ---------------------------------------------------------------------------
+# MR 源分支 Language Lead fix 提交扫描（独立于 fixed_by_lead）
+#
+# 背景：detect_mr_changes 现有的 fix 恢复（find_fix_commit_for_key）面向
+# ``tranzor-fix/<timestamp>`` 分支 + key-value 资源文件，且整条以
+# ``fixed_by_lead`` 非空为前提。但 Tranzor 的 fix endpoint 把审计写在整条
+# git 提交链的最后（commit 在前、写库在后、无重试），任一步失败就只提交了
+# GitLab 却把 ``fixed_by_lead`` 留成 NULL；BATCH_FIX 路径更是根本不写该
+# 字段。这两类「已提交 GitLab 但 DB 无痕」的 post-edit 会被 Changes 报告
+# 整条漏掉。本节直接扫描 **MR 源分支** 上 Tranzor 服务账号推送的 Language
+# Lead fix 提交（单条 + 批量），独立重建 (opus_id, lang) 的 pre/post。
+# UNS 整文件模板走「路径 → key」映射 + blob 取全文；普通 key-value 资源
+# 文件回退到既有 extract_diff_values。
+# ---------------------------------------------------------------------------
+
+# Tranzor 后端推送 Language Lead fix 提交时的服务账号与标题指纹，见
+# app/utils/commit_message.py: build_language_lead_fix_commit_message /
+# build_language_lead_batch_fix_commit_message。task_post_edit.py 里另有
+# 同值的服务账号常量（BATCH_FIX 布尔检测）；两处独立模块刻意不交叉 import
+# 以免环依赖。
+LEAD_FIX_AUTHOR_EMAIL = "tranzor.service@rcoffice.ringcentral.com"
+_LEAD_FIX_TITLE_SINGLE = "[Tranzor] Language Lead fix"
+_LEAD_FIX_TITLE_BATCH = "[Tranzor] Language Lead batch fix"
+_LEAD_FIX_LOOKBACK_DAYS = 30
+
+# UNS 模板根 → 命名空间，镜像 export_import_cli UnsTemplateRootParser。
+_UNS_TEMPLATE_ROOTS = (
+    ("uns-app/templateStorage/", "common.uns"),
+    ("uns-app/newTemplateStorage/", "common.uns.new"),
+)
+_UNS_PARTIALS_DIR = "_partials/"
+_UNS_PARTIALS_NS = ".partials"
+
+
+def is_lead_fix_commit(commit):
+    """True iff ``commit`` 是 Tranzor 推送的 Language Lead fix 提交。
+
+    严格双重判定：作者邮箱 == 服务账号 且 标题命中单条 / 批量 fix 前缀。
+    与 task_post_edit._is_batch_fix_commit 同源，但这里同时覆盖单条
+    ``[Tranzor] Language Lead fix: <lang> - <opus_id>`` 与批量
+    ``[Tranzor] Language Lead batch fix: N translation(s)``。
+    """
+    if not isinstance(commit, dict):
+        return False
+    if (commit.get("author_email") or "") != LEAD_FIX_AUTHOR_EMAIL:
+        return False
+    title = commit.get("title") or ""
+    return (title.startswith(_LEAD_FIX_TITLE_SINGLE)
+            or title.startswith(_LEAD_FIX_TITLE_BATCH))
+
+
+def parse_uns_template_path(path):
+    """``uns-app/templateStorage/<feature>/<feature>__<type>__<brand>__<locale>.hbs``
+    → ``(opus_id, target_language)``；非 UNS 模板路径返回 ``None``。
+
+    镜像 export_import_cli 的 UnsKeyStrategy / UnsTemplateRootParser：
+    opus_id = ``<namespace>.<feature>__<type>__<brand>``，locale 的下划线
+    还原为连字符（``fr_CA`` → ``fr-CA``）。``_partials/`` 子目录命名空间
+    追加 ``.partials``。
+    """
+    if not path:
+        return None
+    dir_prefix = None
+    namespace = None
+    for root_dir, root_ns in _UNS_TEMPLATE_ROOTS:
+        if path.startswith(root_dir):
+            remainder0 = path[len(root_dir):]
+            if remainder0.startswith(_UNS_PARTIALS_DIR):
+                dir_prefix = root_dir + _UNS_PARTIALS_DIR
+                namespace = root_ns + _UNS_PARTIALS_NS
+            else:
+                dir_prefix = root_dir
+                namespace = root_ns
+            break
+    if dir_prefix is None:
+        return None
+
+    remainder = path[len(dir_prefix):]
+    segments = remainder.split("/")
+    if len(segments) != 2:
+        return None
+    feature, filename = segments
+    prefix = feature + "__"
+    if (not feature or not filename.startswith(prefix)
+            or not filename.endswith(".hbs")):
+        return None
+    file_body = filename[len(prefix):-len(".hbs")]
+    parts = file_body.split("__")
+    if len(parts) != 3:
+        return None
+    type_format, brand, locale = parts
+    if not type_format or not brand or not locale:
+        return None
+    opus_id = f"{namespace}.{feature}__{type_format}__{brand}"
+    target_language = locale.replace("_", "-")
+    return opus_id, target_language
+
+
+def _operator_from_fix_title(title):
+    """从 es_format 提交标题里抽操作者邮箱（``... | Language Lead <email>
+    fix | ...``）；legacy 标题不含操作者身份，返回 ""。"""
+    if not title:
+        return ""
+    m = re.search(r"Language Lead\s+(\S+@\S+?)\s+(?:batch\s+)?fix", title)
+    return m.group(1) if m else ""
+
+
+def _merge_branch_fix(result, key, pre, post, sha, committed_at, title):
+    """累积同一 key 跨多个 fix 提交的变更：保留最旧的 pre、采用最新的 post
+    （调用方按提交时间升序遍历，故首见即最旧）。"""
+    fixed_by = _operator_from_fix_title(title)
+    existing = result.get(key)
+    if existing is None:
+        result[key] = {
+            "pre": pre or "",
+            "post": post or "",
+            "sha": sha,
+            "committed_at": committed_at,
+            "title": title,
+            "fixed_by": fixed_by,
+        }
+        return
+    # 旧→新遍历：pre 保留首见（最旧），post / sha / committed_at 取最新非空。
+    if post:
+        existing["post"] = post
+    existing["sha"] = sha
+    existing["committed_at"] = committed_at
+    existing["title"] = title
+    if fixed_by:
+        existing["fixed_by"] = fixed_by
+
+
+def _list_lead_fix_commits(client, project_id, source_branch, *,
+                           lookback_days=_LEAD_FIX_LOOKBACK_DAYS):
+    """列出源分支上、回溯窗口内、Tranzor 服务账号推送的 fix 提交，按提交
+    时间升序（旧→新）。访问受限（401/403/404）抛 GitLabAccessError。"""
+    since_iso = (datetime.now(timezone.utc)
+                 - timedelta(days=lookback_days)).isoformat()
+    try:
+        commits = client.list_commits(
+            project_id, ref_name=source_branch, since=since_iso,
+            author=LEAD_FIX_AUTHOR_EMAIL)
+    except requests.HTTPError as e:
+        code = getattr(e.response, "status_code", None)
+        if code in (401, 403, 404):
+            raise GitLabAccessError(project_id, code,
+                                    url=getattr(e.response, "url", None)) from e
+        raise
+    fixes = [c for c in (commits or []) if is_lead_fix_commit(c)]
+    fixes.sort(key=lambda c: c.get("committed_date") or c.get("created_at") or "")
+    return fixes
+
+
+def scan_branch_fix_commits(client, project_id, source_branch, cases_by_key,
+                            *, lookback_days=_LEAD_FIX_LOOKBACK_DAYS):
+    """扫描 MR 源分支上 Tranzor 的 Language Lead fix 提交，重建每个
+    ``(opus_id, target_language)`` 的 pre/post —— **独立于 fixed_by_lead**。
+
+    仅回填出现在 ``cases_by_key`` 里的 (opus_id, lang)，既避免把无关文件 /
+    旁支 key 带进报告，也把 blob 拉取限制在本 MR 的翻译单元内。
+
+    Args:
+        client: GitLabClient（或等价 duck-type；需 list_commits /
+            get_commit_diff / get_file_raw）。
+        cases_by_key: ``{(opus_id, target_language): case}``，限定范围 +
+            供普通资源文件做 key 回退匹配。None 视为空 dict。
+
+    Returns:
+        ``{(opus_id, target_language): {"pre", "post", "sha",
+        "committed_at", "title", "fixed_by"}}``。访问受限抛
+        ``GitLabAccessError``；单点 diff / blob 失败就地跳过，不影响其它。
+    """
+    result = {}
+    if not project_id or not source_branch:
+        return result
+    cases_by_key = cases_by_key or {}
+
+    fixes = _list_lead_fix_commits(
+        client, project_id, source_branch, lookback_days=lookback_days)
+
+    for commit in fixes:
+        sha = commit.get("id")
+        if not sha:
+            continue
+        parents = commit.get("parent_ids") or []
+        parent_sha = parents[0] if parents else None
+        committed_at = (commit.get("committed_date")
+                        or commit.get("created_at") or "")
+        title = commit.get("title") or ""
+        try:
+            diff = client.get_commit_diff(project_id, sha)
+        except Exception:
+            continue
+
+        for file_diff in diff or []:
+            path = (file_diff.get("new_path")
+                    or file_diff.get("old_path") or "")
+            if not path:
+                continue
+
+            uns = parse_uns_template_path(path)
+            if uns is not None:
+                if uns not in cases_by_key:
+                    continue  # 只回填本 MR 已跟踪的单元
+                post = pre = None
+                try:
+                    post = client.get_file_raw(project_id, path, sha)
+                except Exception:
+                    post = None
+                if parent_sha:
+                    try:
+                        pre = client.get_file_raw(project_id, path, parent_sha)
+                    except Exception:
+                        pre = None
+                _merge_branch_fix(result, uns, pre, post, sha,
+                                  committed_at, title)
+                continue
+
+            # 普通 key-value 资源文件：对范围内、语言路径匹配的 key 走既有
+            # diff 解析（覆盖非 UNS 项目同样的 fixed_by_lead=NULL 漏报）。
+            for key in cases_by_key:
+                opus_id, lang = key
+                if not any(frag in path for frag in _lang_path_variants(lang)):
+                    continue
+                pre, post = extract_diff_values([file_diff], opus_id, lang)
+                if pre is None and post is None:
+                    continue
+                _merge_branch_fix(result, key, pre, post, sha,
+                                  committed_at, title)
+
+    return result
