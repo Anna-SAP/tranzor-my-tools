@@ -13,6 +13,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 import webbrowser
 from collections import OrderedDict
@@ -20,6 +21,48 @@ from datetime import date
 
 import terminology_highlight as th
 from tranzor_truncation import hydrate_truncated_entries
+
+
+# Hard wall-clock cap for terminology-highlight prefetch during HTML export.
+# Prefetch loads the full glossary from the context-service (sequential
+# pagination, 30s timeout per page) plus per-term details. When that service
+# is slow/unreachable the load can run for minutes and the export appears hung
+# at "Exporting...". Highlighting is cosmetic, never a correctness
+# requirement, so we cap it and proceed without (full) highlighting on
+# timeout. A healthy load is well under this bound.
+TERMINOLOGY_PREFETCH_DEADLINE_S = 12
+
+
+def _prefetch_terminology_bounded(translations,
+                                  deadline_s=TERMINOLOGY_PREFETCH_DEADLINE_S):
+    """Run ``th.prefetch_for_rows`` with a hard deadline so a slow/unreachable
+    context-service can never hang the HTML export.
+
+    The worker is a daemon thread; if it overruns ``deadline_s`` we return and
+    let the caller render with whatever highlighting caches are ready (often
+    none — ``highlight_source``/``highlight_translation`` then no-op). A
+    still-running prefetch keeps populating caches harmlessly and never blocks
+    process exit.
+    """
+    done = threading.Event()
+
+    def _run():
+        try:
+            th.prefetch_for_rows(translations,
+                                 source_field="source_text",
+                                 lang_field="target_language")
+        except Exception:
+            pass
+        finally:
+            done.set()
+
+    threading.Thread(target=_run, name="term-prefetch", daemon=True).start()
+    if not done.wait(deadline_s):
+        try:
+            print(f"  ⚠ 术语高亮预取超过 {deadline_s}s 未完成，跳过高亮继续导出"
+                  f"（context-service 可能慢/不可达）", flush=True)
+        except Exception:
+            pass
 
 
 def _tokenize(text):
@@ -1155,12 +1198,12 @@ def write_mr_html(results_data, filename, label, bridge_info=None):
     task_id = results_data.get("task_id", "")
 
     # Pre-build the terminology highlight regexes for every locale that
-    # appears in this batch. Cheap: scans source text for hits first,
-    # then fetches detail only for those term IDs (degrades silently on
-    # API errors — the source-side regex is the only must-have).
-    th.prefetch_for_rows(translations,
-                         source_field="source_text",
-                         lang_field="target_language")
+    # appears in this batch. Scans source text for hits first, then fetches
+    # detail only for those term IDs (degrades silently on API errors — the
+    # source-side regex is the only must-have). Bounded by a hard deadline so
+    # a slow/unreachable context-service can't hang the export at
+    # "Exporting..." (see TERMINOLOGY_PREFETCH_DEADLINE_S).
+    _prefetch_terminology_bounded(translations)
 
     # Detect if this is a "changes" export (translations have prev_translated_text)
     is_changes = any(t.get("prev_translated_text") is not None for t in translations)
