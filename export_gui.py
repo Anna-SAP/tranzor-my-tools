@@ -542,6 +542,8 @@ STRINGS = {
         "mr_col_created":   "Created",
         "mr_col_duration":  "Duration",
         "mr_post_edit_legend": "✏️ = MR contains at least one human-edited translation (post-edit)",
+        "mr_post_edit_only": "✏️ Post-edited only",
+        "mr_post_edit_filter_status": "✏️ Showing {n} post-edited MR(s) on loaded pages",
         "summary_post_edit_legend": "✏️ = task contains at least one human-edited translation (post-edit)",
         # Quality Overview tab
         "qa_language":      "Language",
@@ -684,6 +686,8 @@ STRINGS = {
         "mr_col_created":   "创建时间",
         "mr_col_duration":  "耗时",
         "mr_post_edit_legend": "✏️ = 该 MR 至少含一条经过人工编辑（post-edit）的翻译",
+        "mr_post_edit_only": "✏️ 仅含 post-edit",
+        "mr_post_edit_filter_status": "✏️ 已加载页中显示 {n} 个含 post-edit 的 MR",
         "summary_post_edit_legend": "✏️ = 该任务至少含一条经过人工编辑（post-edit）的翻译",
         # Quality Overview tab
         "qa_language":      "语言",
