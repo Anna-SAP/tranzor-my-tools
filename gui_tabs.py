@@ -851,15 +851,16 @@ class MRPipelineTab:
                     # mr_iid in the key tuple) can find this row again.
                     self._mr_row_iid_by_task[f"mr:{mr_iid}"] = iid
 
-        # Kick off the dashboard-cases fetch for newly-seen MRs. This is
-        # heavier than the legacy/scan path (each MR returns its full
-        # case list, ~1-2 MB) so we cap workers at 4 instead of the
-        # default 8 to be a polite neighbour to the platform.
+        # Kick off the post-edit probe for newly-seen MRs. Each probe now
+        # leads with a single cheap GitLab MR-commits call and only falls
+        # through to the heavy ~1-2 MB dashboard-cases response when no fix
+        # commit is found, so 8 workers (was 4) roughly halves the wall-clock
+        # for the "✏️ Post-edited only" filter without hammering the platform.
         if prefetch_items:
             _tpe.prefetch_async(
                 prefetch_items,
                 on_result=self._on_post_edit_result,
-                max_workers=4,
+                max_workers=8,
             )
 
         # Fill the en-US source-string counts asynchronously so the page

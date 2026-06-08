@@ -309,5 +309,53 @@ class TestScanBranchFixCommits(unittest.TestCase):
             {})
 
 
+class TestMrHasLeadFixCommit(unittest.TestCase):
+    """The cheap one-call post-edit signal: does the MR's own commit list
+    contain a Tranzor Language Lead fix commit?"""
+
+    class _C:
+        def __init__(self, commits=None, error=None):
+            self._commits = commits or []
+            self._error = error
+
+        def list_mr_commits(self, project_id, mr_iid, **kw):
+            if self._error is not None:
+                raise self._error
+            return self._commits
+
+    def test_true_for_batch_fix(self):
+        c = self._C(commits=[
+            commit("a", title="UIA-1: feature work", author="dev@ringcentral.com"),
+            commit("b", title="[Tranzor] Language Lead batch fix: 1 translation(s)"),
+        ])
+        self.assertTrue(
+            gitlab_client.mr_has_lead_fix_commit(c, "common/uns", 3868))
+
+    def test_true_for_single_row_fix(self):
+        c = self._C(commits=[commit(
+            "b", title="[Tranzor] Language Lead fix: fr-CA - common.uns.x__y__z")])
+        self.assertTrue(gitlab_client.mr_has_lead_fix_commit(c, "p", 1))
+
+    def test_false_when_no_fix_commit(self):
+        c = self._C(commits=[
+            commit("a", title="[Tranzor] Add translations for task x"),
+            commit("b", title="feat: x", author="dev@ringcentral.com"),
+        ])
+        self.assertFalse(gitlab_client.mr_has_lead_fix_commit(c, "p", 1))
+
+    def test_false_on_empty_inputs(self):
+        c = self._C(commits=[commit("b", title="[Tranzor] Language Lead fix: x")])
+        self.assertFalse(gitlab_client.mr_has_lead_fix_commit(c, "", 1))
+        self.assertFalse(gitlab_client.mr_has_lead_fix_commit(c, "p", None))
+
+    def test_access_error_propagates(self):
+        resp = requests.Response()
+        resp.status_code = 403
+        c = self._C(error=requests.HTTPError(response=resp))
+        with self.assertRaises(gitlab_client.GitLabAccessError) as ctx:
+            gitlab_client.mr_has_lead_fix_commit(c, "p", 1)
+        self.assertEqual(ctx.exception.status_code, 403)
+
+
 if __name__ == "__main__":
     unittest.main()
