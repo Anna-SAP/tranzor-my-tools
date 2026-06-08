@@ -1001,13 +1001,15 @@ class ExportApp:
         self._recalculate_summary_page_size()
         self.root.after(250, self._recalculate_summary_page_size)
 
-        # Platform now requires sign-in: make sure we have a valid token
-        # before the first API call. Shows a modal login dialog when no
-        # (unexpired) token is saved; otherwise proceeds seamlessly.
-        self._ensure_platform_auth()
-
-        # Auto-load legacy summary data on startup (only this – avoid concurrent API overload)
-        self._load_summary_data()
+        # Platform sign-in + first data load are DEFERRED to a post-startup
+        # tick (NOT run inline here). main() withdraws the root and shows a
+        # "Loading…" splash while ExportApp(root) runs, then destroys the
+        # splash and deiconifies AFTER __init__ returns. A blocking modal
+        # login dialog here would freeze construction forever — the splash
+        # would never close and the dialog would sit hidden behind it.
+        # after() runs the flow once the window is visible and the mainloop
+        # is live, so the dialog is actually usable.
+        self.root.after(0, self._startup_auth_then_load)
 
         # Lazy-load MR Pipeline / Quality Overview / Full Translations data
         # when their tabs are first selected
@@ -2221,6 +2223,20 @@ class ExportApp:
         msg = str(error_msg or "").lower()
         return ("401" in msg or "unauthorized" in msg
                 or "authorization" in msg)
+
+    def _startup_auth_then_load(self):
+        """Post-startup tick: ensure sign-in, then load the first data.
+
+        Deferred out of __init__ via ``root.after`` so the modal login dialog
+        never blocks construction. If it ran inline, main()'s "Loading…"
+        splash (shown while ExportApp is built) would never close and the
+        dialog would sit hidden behind it — the exact freeze this fixes.
+        """
+        try:
+            self._ensure_platform_auth()
+        except Exception as e:
+            print(f"[auth] startup sign-in failed: {e}")
+        self._load_summary_data()
 
     def _ensure_platform_auth(self):
         """Ensure a valid token exists before the first API call.
