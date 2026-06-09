@@ -386,6 +386,16 @@ except Exception as _opus_e:  # pragma: no cover
 else:
     _opus_import_error = None
 
+# Optional: OPUS Search tab — full-index search over opus_index.db for
+# bug-fixing (paste an OPUS ID / source / translation -> source + all langs).
+try:
+    import gui_tab_opus_search as _opus_search_tab_mod
+except Exception as _opus_search_e:  # pragma: no cover
+    _opus_search_tab_mod = None
+    _opus_search_import_error = _opus_search_e
+else:
+    _opus_search_import_error = None
+
 # Optional: Tranzor Checks tab — issue-level aggregation of task check
 # results (Terminology Inconsistency / Parameter Format / …) with sortable
 # keyword column, designed to help QA spot false positives at a glance.
@@ -776,6 +786,14 @@ if _tci_tab_mod is not None:
 if _opus_tab_mod is not None:
     try:
         for _lang_code, _extra in _opus_tab_mod.STRINGS.items():
+            STRINGS.setdefault(_lang_code, {}).update(_extra)
+    except Exception:
+        pass
+
+# Merge in strings from the optional OPUS Search tab.
+if _opus_search_tab_mod is not None:
+    try:
+        for _lang_code, _extra in _opus_search_tab_mod.STRINGS.items():
             STRINGS.setdefault(_lang_code, {}).update(_extra)
     except Exception:
         pass
@@ -1448,6 +1466,25 @@ class ExportApp:
                 self.ptc_tab = None
         _boot_mark("tab_pretranslation_check")
 
+        # --- Tab: 🔎 OPUS Search (optional, pure additive) ---
+        # Bug-fixing 主入口：跨本地全量索引 (opus_index.db) 按 OPUS ID /
+        # 源文 / 译文 / 产品搜索，返回英文源 + 全语种最新译文。放在最后，
+        # 避免位移既有 tab 的动态索引。
+        self.opus_search_tab = None
+        self._opus_search_tab_index = None
+        self._opus_search_tab_initialized = False
+        if _opus_search_tab_mod is not None:
+            try:
+                tab_opus_search = ttk.Frame(self.notebook, style="App.TFrame")
+                self.notebook.add(tab_opus_search, text="")
+                self.opus_search_tab = _opus_search_tab_mod.OpusSearchTab(
+                    tab_opus_search, self)
+                self._opus_search_tab_index = self.notebook.index(tab_opus_search)
+            except Exception as _e:
+                print(f"[OPUS Search tab] init failed: {_e}")
+                self.opus_search_tab = None
+        _boot_mark("tab_opus_search")
+
         # ═══════════════════════════════════════════
         # TAB 1 CONTENTS (File Translation — preserved)
         # ═══════════════════════════════════════════
@@ -1841,6 +1878,13 @@ class ExportApp:
                 _register_tab_refresh(self.opus_tab, self._opus_tab_index)
             except Exception:
                 pass
+        if (self.opus_search_tab is not None
+                and self._opus_search_tab_index is not None):
+            try:
+                self.notebook.tab(self._opus_search_tab_index, text=self._t("tab_opus_search"))
+                _register_tab_refresh(self.opus_search_tab, self._opus_search_tab_index)
+            except Exception:
+                pass
         if self.tc_tab is not None and self._tc_tab_index is not None:
             try:
                 self.notebook.tab(self._tc_tab_index, text=self._t("tab_tranzor_checks"))
@@ -2180,6 +2224,15 @@ class ExportApp:
                 self._ptc_tab_initialized = True
                 try:
                     self.ptc_tab.on_first_show()
+                except Exception:
+                    pass
+            elif (self.opus_search_tab is not None
+                  and self._opus_search_tab_index is not None
+                  and tab_idx == self._opus_search_tab_index
+                  and not self._opus_search_tab_initialized):
+                self._opus_search_tab_initialized = True
+                try:
+                    self.opus_search_tab.on_first_show()
                 except Exception:
                     pass
 
