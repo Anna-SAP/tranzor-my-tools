@@ -1,0 +1,174 @@
+{
+  "_meta": {
+    "purpose": "本地化经理负责的产品 → GitLab 仓库 / 本地化文件格式 注册表。供「GitLab 产品仓库全量基线摄取」(Phase 1b) 使用：按产品拉取已合并的全套 locale 文件，解析出 (opus_id, en-US 源, 各语言译文) 灌入本地索引 opus_index.db，使 OPUS 搜索从「最新但不全」升级为「最新 + 最全」。",
+    "background": "Tranzor 上线后翻译只回写 GitLab 产品仓库，不再回写旧 OPUS/loc-central，故 l10n-tool HTTP 目录的全量包 (UNS.zip 等) 严重滞后。GitLab 产品仓库才是唯一「最新 + 最全」的数据源。详见项目记忆 project-loc-full-export-pivot。",
+    "opus_id_algorithm": "RingCentral.{alias}.{md5(sourceRelativePath)}.{logicalKey} —— 已用真实 opus_index.db 交叉验证：path_hash == md5(源相对路径)（无归一化，UTF-8）。每个产品最大的正确性工作量是复刻其 sourceRelativePath 字符串约定（与 l10n-cli 一致），否则重建出的 opus_id 对不上。",
+    "alias_source": "aliases 与 gitlab 路径来自真实 opus_index.db 的 alias / project_id 字段交叉比对（截至 2026-06-09，库内约 127 万行）。verified=false 的条目需在 Phase 1b 实接仓库时确认 group、default_branch、locale_globs、format。",
+    "gitlab_base": "https://git.ringcentral.com",
+    "source_locale": "en-US",
+    "default_branch_note": "default_branch 暂统一标 master，摄取时应改为通过 GitLab API 解析各仓库真实默认分支。",
+    "supported_locales_tierA": ["de-DE", "en-AU", "en-GB", "en-US", "es-ES", "es-419", "fr-FR", "fr-CA", "it-IT", "nl-NL", "pt-BR", "pt-PT", "fi-FI", "ko-KR", "ja-JP", "zh-CN", "zh-TW", "zh-HK"]
+  },
+  "products": [
+    {
+      "group": "UNS", "name": "UNS", "aliases": ["uns"],
+      "gitlab": "common/uns", "repo_hint": "uns.git", "default_branch": "master",
+      "formats": ["properties", "hbs"],
+      "locale_globs": [
+        "uns-app/metadataStorage/translations/Translations_*.properties",
+        "uns-app/templateStorage/**/*.hbs",
+        "uns-app/newTemplateStorage/**/*.hbs"
+      ],
+      "source_locale_token": "en_US",
+      "verified": true,
+      "notes": "con-001 实证仓库与路由：.properties→default handler；.hbs→uns handler。本地已有检出 C:/Users/susu82/SW/UNS 可离线验证。"
+    },
+    {
+      "group": "SW", "name": "SCL (Service Web main)", "aliases": ["webModule"],
+      "gitlab": "web/web", "repo_hint": "web.git", "default_branch": "master",
+      "formats": ["ts"],
+      "locale_globs": ["src/app/lang/**/index-*.ts"],
+      "source_locale_token": "en_US",
+      "verified": false,
+      "notes": "alias webModule (库内 ~33k 行)；sfp 实证 src/app/lang/common/index-en_US.ts。"
+    },
+    {
+      "group": "SW", "name": "JWL", "aliases": ["jedi"],
+      "gitlab": "web/jedi", "repo_hint": "jedi.git", "default_branch": "master",
+      "formats": ["ts"], "locale_globs": ["src/app/lang/**/index-*.ts"],
+      "source_locale_token": "en_US", "verified": false
+    },
+    {
+      "group": "SW", "name": "NPA", "aliases": ["npa"],
+      "gitlab": "web/npa", "repo_hint": "npa.git", "default_branch": "master",
+      "formats": ["ts"], "locale_globs": ["src/app/lang/**/index-*.ts"],
+      "source_locale_token": "en_US", "verified": false,
+      "notes": "sfp 实证 src/app/lang/common/index-en_US.ts。"
+    },
+    {
+      "group": "SW", "name": "STC", "aliases": ["stc"],
+      "gitlab": "web/stc", "repo_hint": "stc.git", "default_branch": "master",
+      "formats": ["ts"], "locale_globs": ["src/app/lang/**/index-*.ts"],
+      "source_locale_token": "en_US", "verified": false,
+      "notes": "sfp 实证 src/app/lang/common/index-en_US.ts。"
+    },
+    {
+      "group": "SW", "name": "PTT", "aliases": ["pushToTalk"],
+      "gitlab": "web/push-to-talk", "repo_hint": "push-to-talk.git", "default_branch": "master",
+      "formats": ["ts"], "locale_globs": ["src/app/lang/**/index-*.ts"],
+      "source_locale_token": "en_US", "verified": false
+    },
+    {
+      "group": "SW", "name": "MAA", "aliases": ["maa"],
+      "gitlab": "common/maa", "repo_hint": "maa.git", "default_branch": "master",
+      "formats": [], "locale_globs": [],
+      "source_locale_token": "en_US", "verified": false,
+      "notes": "库内数据少 (17 行)，格式/路径待实接确认。"
+    },
+    {
+      "group": "SW", "name": "CLW", "aliases": ["clw"],
+      "gitlab": "common/clw", "repo_hint": "clw.git", "default_branch": "master",
+      "formats": [], "locale_globs": [],
+      "source_locale_token": "en_US", "verified": false,
+      "notes": "库内数据少 (86 行)，格式/路径待实接确认。"
+    },
+    {
+      "group": "SW", "name": "WMC", "aliases": ["webModuleCore"],
+      "gitlab": "web-modules/web-modules-core", "repo_hint": "web-modules-core.git", "default_branch": "master",
+      "formats": [], "locale_globs": [],
+      "source_locale_token": "en_US", "verified": false,
+      "notes": "group 为 web-modules，与其他 SW 不同；格式/路径待确认。"
+    },
+    {
+      "group": "SW", "name": "Platform i18n", "aliases": ["platform"],
+      "gitlab": "platform/i18n", "repo_hint": "platform/i18n", "default_branch": "master",
+      "formats": [], "locale_globs": [],
+      "source_locale_token": "en_US", "verified": false,
+      "notes": "用户给出完整 URL git.ringcentral.com/platform/i18n；alias platform 在库内为 file 源。与 NGBS Platform 可能为同一仓库。"
+    },
+    {
+      "group": "IVA", "name": "IVA Frontend", "aliases": ["iva"],
+      "gitlab": "iva/iva-ui", "repo_hint": "iva-ui.git", "default_branch": "master",
+      "formats": ["po"],
+      "locale_globs": ["apps/**/locales/**/messages.po"],
+      "source_locale_token": "en-US", "verified": false,
+      "notes": "gettext .po；sfp 实证 apps/shopify/src/shared/locales/en-US/messages.po。"
+    },
+    {
+      "group": "IVA", "name": "IVA Backend", "aliases": ["ivaa", "ivar"],
+      "gitlab": "iva/agent-service", "repo_hint": "agent-service.git", "default_branch": "master",
+      "formats": [], "locale_globs": [],
+      "source_locale_token": "en-US", "verified": false,
+      "notes": "alias 可能为 ivaa / ivar，待确认。"
+    },
+    {
+      "group": "SCP", "name": "SCP Frontend", "aliases": ["scp"],
+      "gitlab": "admin-web/frontend", "repo_hint": "frontend.git", "default_branch": "master",
+      "formats": [], "locale_globs": [],
+      "source_locale_token": "en-US", "verified": false,
+      "notes": "group 为 admin-web（非裸 frontend）；含品牌变体 alias scpb。格式/路径待确认（疑似 json）。"
+    },
+    {
+      "group": "SCP", "name": "SCP Backend", "aliases": ["scpb"],
+      "gitlab": "admin-web/backend", "repo_hint": "backend.git", "default_branch": "master",
+      "formats": [], "locale_globs": [],
+      "source_locale_token": "en-US", "verified": false,
+      "notes": "scpb 也用于 SCP 品牌特定串 (CHC_Source_Package_Reference Scenario)。"
+    },
+    {
+      "group": "CHC", "name": "CHC", "aliases": ["chc"],
+      "gitlab": "web/chc", "repo_hint": "chc.git", "default_branch": "master",
+      "formats": ["ts"], "locale_globs": ["src/app/lang/**/index-*.ts"],
+      "source_locale_token": "en_US", "verified": false,
+      "notes": "sfp 实证 src/app/lang/company/index-en_US.ts。"
+    },
+    {
+      "group": "CHC", "name": "CIC", "aliases": ["cic"],
+      "gitlab": "web/cic", "repo_hint": "cic.git", "default_branch": "master",
+      "formats": ["ts"], "locale_globs": ["src/app/lang/**/index-*.ts"],
+      "source_locale_token": "en_US", "verified": false,
+      "notes": "库内数据少 (18 行)，路径沿用 web/* 约定待确认。"
+    },
+    {
+      "group": "BUI", "name": "BUI", "aliases": ["bui"],
+      "gitlab": null, "repo_hint": "bui.git", "default_branch": "master",
+      "formats": [], "locale_globs": [],
+      "source_locale_token": "en-US", "verified": false,
+      "notes": "alias bui 在库内为 file 源，未暴露 GitLab group；需用户提供完整路径 (group/bui?)。"
+    },
+    {
+      "group": "AP", "name": "Analytics Portal Frontend", "aliases": ["apTwilight", "analyticsPortal"],
+      "gitlab": null, "repo_hint": "twilight.git", "default_branch": "master",
+      "formats": [], "locale_globs": [],
+      "source_locale_token": "en-US", "verified": false,
+      "notes": "alias apTwilight/analyticsPortal 在库内为 file 源，未暴露 group；需完整路径 (analytics-portal/twilight?)。"
+    },
+    {
+      "group": "AP", "name": "Analytics Portal Backend", "aliases": ["dash"],
+      "gitlab": null, "repo_hint": "dash.git", "default_branch": "master",
+      "formats": [], "locale_globs": [],
+      "source_locale_token": "en-US", "verified": false,
+      "notes": "库内暂未见对应 alias 数据；需用户提供完整路径与 alias。"
+    },
+    {
+      "group": "ES", "name": "ES Nova", "aliases": ["expressSetupNova"],
+      "gitlab": "es/express-setup-nova-next-generation", "repo_hint": "express-setup-nova-next-generation.git", "default_branch": "master",
+      "formats": [], "locale_globs": [],
+      "source_locale_token": "en-US", "verified": false
+    },
+    {
+      "group": "ES", "name": "ES Rena", "aliases": ["expressSetupRena", "expressSetup"],
+      "gitlab": "es/express-setup-renaissance", "repo_hint": "express-setup-renaissance.git", "default_branch": "master",
+      "formats": [], "locale_globs": [],
+      "source_locale_token": "en-US", "verified": false,
+      "notes": "alias 待确认（库内见 expressSetup=52）；group 假定 es/ 沿用 Nova。"
+    },
+    {
+      "group": "NGBS", "name": "SCI", "aliases": ["sci"],
+      "gitlab": "web/i18n", "repo_hint": "i18n.git", "default_branch": "master",
+      "formats": [], "locale_globs": [],
+      "source_locale_token": "en_US", "verified": false,
+      "notes": "alias sci → web/i18n (库内 ~17k 行)；与 platform/i18n 不同仓库。"
+    }
+  ]
+}
