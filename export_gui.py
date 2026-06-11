@@ -1021,6 +1021,13 @@ class ExportApp:
         # __init__ before the window could draw. The watchdog below already
         # tolerates self.bridge=None during the brief async startup window.
         self._start_bridge_async()
+        # Warm the terminology highlighter off the main thread: loading the
+        # ~2.5k-term glossary (network) plus building+verifying the match regex
+        # is a one-time cost that the FIRST export would otherwise pay on its
+        # critical path (the report wouldn't "pop up" until it finished).
+        # Highlighting degrades to a no-op until this completes, so a very
+        # early export is still correct — just not yet term-highlighted.
+        self._start_terminology_preload_async()
         # Bridge-setup auto-trigger: per-session "already prompted" guard
         # so a dismissed wizard doesn't re-pop on every poll within the same
         # session. Cross-session re-trigger is decided by the heuristic in
@@ -2643,6 +2650,21 @@ class ExportApp:
     # ------------------------------------------------------------------
     # Tranzor Bridge integration
     # ------------------------------------------------------------------
+    def _start_terminology_preload_async(self):
+        """Warm terminology_highlight's glossary + match regex in the
+        background so the first export doesn't pay the one-time load/build on
+        its critical path. Best-effort: any failure degrades highlighting to a
+        no-op (the exporters already tolerate that) and never blocks startup."""
+        def _work():
+            try:
+                import terminology_highlight as _th
+                _th.preload()
+            except Exception as exc:  # never let a warm-up break the app
+                print(f"[terminology] preload skipped: {exc!r}")
+        threading.Thread(
+            target=_work, daemon=True, name="terminology-preload"
+        ).start()
+
     def _start_bridge_async(self):
         """Boot the loopback bridge on a background thread so the main window
         can draw without waiting for port scans / file I/O. Until the thread
