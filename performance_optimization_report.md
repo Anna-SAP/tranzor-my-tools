@@ -5,6 +5,35 @@
 
 ---
 
+## 0. 已实施 — 服务端「生成」优化 (2026-06-11)
+
+> 本节是上面浏览器端分析的**补充实现**：聚焦"点击导出 → HTML 报告弹出"之间的
+> Python 生成耗时。瓶颈用合成的 UNS（Handlebars 大翻译单元）数据实测剖析后定位，
+> 而非凭猜测。改动文件：`terminology_highlight.py`、`export_changes.py`、
+> `export_mr_pipeline.py`、`export_gui.py`。`export_translations.py` 未改，自动继承
+> 术语高亮提速。
+
+| # | 瓶颈（实测） | 优化 | 效果（实测） |
+|---|---|---|---|
+| 1 | 术语高亮：~2.5k 词的扁平 alternation 正则，每行跑一次 → **21 ms/行** | 用**前缀 trie 因子化**正则（可证明等价；构建时差分自检 + 回退到扁平正则兜底） | **0.014 ms/行 ≈ 1500×** |
+| 2 | 全量翻译：同一 en-US source 在每个目标语言行重复高亮（30 语言 = 30×） | `highlight_source`/`highlight_translation` **记忆化** + `prefetch` 去重扫描 | 多语言冗余 **~29×**（8000 行塌缩到 800 次高亮）|
+| 3 | `export_changes.py` `write_html` 用 `table_rows += …` 拼接，最坏 O(n²)；UNS 行每个 cell 数 KB 转义 HTML，累积巨大 | 改 `list.append + "".join`（与 `export_translations.py` 一致，保证线性） | 隔离拼接步骤 **200–9000×**；`write_html` 现随行数线性增长 |
+| 4 | `word_diff` 对超大 UNS 整文件单元无大小保护 | 合并长度 > 20K 字符时回退到**行级 diff**（`splitlines(keepends=True)`，保持 `"".join==text` 不变式）；`export_changes` + `export_mr_pipeline` 同步 | 超大单元 diff 从「字符级数千 token」降到「数十行」|
+| 5 | 术语正则**一次性构建+自检 6.2s** 落在首次导出关键路径上（`preload()` 从未被调用）| 自检采样收敛到 ~0.3s（穷举验证移入单测）；GUI 启动**后台 `preload()`** 预热 | 首次导出不再为术语库加载/构建买单 |
+
+**正确性保障**：trie 正则是前缀因子化，对 alternation 是可证明等价变换；并经
+`test_terminology_highlight_trie.py` 在**全部真实风格词条 × 多探针 + 20000 随机/对抗输入**
+上验证 0 不匹配（含 CJK、大小写变体前缀、非词尾字符等）。记忆化在术语库刷新/拉到新
+词条时会一并失效 per-locale 正则与缓存，避免高亮漏标新词（经对抗式审查发现并修复的
+潜在 staleness）。覆盖测试：`test_terminology_highlight_trie.py`、
+`test_export_diff_size_guard.py`，并通过既有 `test_terminology_highlight_size_guard.py`
+/ `test_terminology_prefetch_deadline.py`。
+
+> 下面第 1–6 节是针对**浏览器端**渲染（150K+ 行 DOM）的进一步规划，仍然有效，属于
+> 后续阶段（虚拟滚动 / 数据-视图分离）。
+
+---
+
 ## 1. 瓶颈分析 — 五层级诊断
 
 以 **149,813 条数据** 为例，逐层量化当前实现的性能开销：

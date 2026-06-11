@@ -84,6 +84,22 @@ def _tokenize(text):
         text
     )
 
+
+# Above this combined (before+after) length, diff by whole LINES instead of
+# tokens. UNS Handlebars units hydrate to whole-file templates (tens of KB):
+# a token-level diff there is the slow, near-unreadable worst case, while a
+# line-level diff stays fast and a changed-line-at-a-time is what a reviewer
+# can actually read. ``splitlines(keepends=True)`` preserves the
+# ``"".join(tokens) == text`` invariant so the diff reconstructs the text.
+MAX_DIFF_CHARS = 20000
+
+
+def _diff_tokens(before, after):
+    if len(before) + len(after) > MAX_DIFF_CHARS:
+        return before.splitlines(keepends=True), after.splitlines(keepends=True)
+    return _tokenize(before), _tokenize(after)
+
+
 try:
     import requests
 except ImportError:
@@ -1145,8 +1161,7 @@ def fetch_all_legacy_translations_quality(task_id, page_size=200,
 # ---------------------------------------------------------------------------
 def _word_diff_html(before, after):
     """HTML word-level diff: red strikethrough = deleted, green highlight = added."""
-    before_tokens = _tokenize(before)
-    after_tokens = _tokenize(after)
+    before_tokens, after_tokens = _diff_tokens(before, after)
     sm = difflib.SequenceMatcher(None, before_tokens, after_tokens)
     parts = []
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
@@ -1168,8 +1183,7 @@ def _word_diff_html(before, after):
 
 def _word_diff_text(before, after):
     """Plain text word-level diff: [-deleted] [+added]."""
-    before_tokens = _tokenize(before)
-    after_tokens = _tokenize(after)
+    before_tokens, after_tokens = _diff_tokens(before, after)
     sm = difflib.SequenceMatcher(None, before_tokens, after_tokens)
     parts = []
     for tag, i1, i2, j1, j2 in sm.get_opcodes():

@@ -105,6 +105,23 @@ _locale_re: Dict[str, Optional[re.Pattern]] = {}
 # normalized locale -> {lowercase_match -> {"name", "source_name", "dnt"}}
 _locale_meta: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
+# ---- Memoization caches -------------------------------------------------
+# highlight_source / highlight_translation are pure functions of their
+# inputs once the regexes are built. In a full-translations export the SAME
+# en-US source text is highlighted once per target language (e.g. 30x), and
+# duplicate strings recur across tasks — so memoizing the rendered output
+# collapses that redundancy (~30x on multi-language exports). Caches are
+# bounded (FIFO eviction) so a pathological export can't grow them without
+# limit, and versioned so a terminology refresh transparently invalidates
+# them. Keyed by the ESCAPED text the caller passes in.
+_MEMO_MAX = 50000
+_src_hl_cache: Dict[str, str] = {}
+# (normalized_locale, escaped_text) -> rendered
+_tr_hl_cache: Dict[tuple, str] = {}
+# Bumped whenever the term list / a locale regex is (re)built so stale
+# memoized renders are dropped instead of served.
+_hl_version: int = 0
+
 # Skip terminology highlighting for oversized source texts (e.g. UNS
 # handlebars email templates: the whole file is ONE translation unit, ~8KB of
 # HTML). Such a text matches dozens of glossary terms, and prefetch_for_rows
@@ -136,13 +153,22 @@ def highlight_source(escaped_text: str) -> str:
 
     Pass HTML-escaped text. The function returns the input unchanged if
     the term list failed to load.
+
+    Results are memoized per escaped text (see ``_src_hl_cache``): the same
+    en-US source recurs once per target language in a full export, so the
+    regex runs once per *distinct* string instead of once per row.
     """
     if not escaped_text or len(escaped_text) > MAX_HIGHLIGHT_SOURCE_CHARS:
         return escaped_text
+    cached = _src_hl_cache.get(escaped_text)
+    if cached is not None:
+        return cached
     pat = _ensure_list_loaded()
     if pat is None:
         return escaped_text
-    return pat.sub(_source_repl, escaped_text)
+    out = pat.sub(_source_repl, escaped_text)
+    _memo_put(_src_hl_cache, escaped_text, out)
+    return out
 
 
 def highlight_translation(escaped_text: str, locale: Optional[str]) -> str:
@@ -159,6 +185,10 @@ def highlight_translation(escaped_text: str, locale: Optional[str]) -> str:
     pat = _locale_re.get(norm)
     if pat is None:
         return escaped_text
+    ckey = (norm, escaped_text)
+    cached = _tr_hl_cache.get(ckey)
+    if cached is not None:
+        return cached
     meta_map = _locale_meta.get(norm) or {}
     def repl(m: re.Match) -> str:
         meta = meta_map.get(m.group(0).lower(), {})
@@ -167,7 +197,9 @@ def highlight_translation(escaped_text: str, locale: Optional[str]) -> str:
         return (f'<mark class="{cls}" '
                 f'data-dnt="{"true" if is_dnt else "false"}">'
                 f'{m.group(0)}</mark>')
-    return pat.sub(repl, escaped_text)
+    out = pat.sub(repl, escaped_text)
+    _memo_put(_tr_hl_cache, ckey, out)
+    return out
 
 
 def prefetch_for_rows(
@@ -191,13 +223,21 @@ def prefetch_for_rows(
         return
 
     # 1. Source scan to find which term IDs actually appear.
-    hit_ids: set = set()
+    #    Dedupe the source texts first: in a full export the SAME en-US
+    #    source recurs once per target language (and across tasks), so
+    #    scanning unique strings turns an O(rows) pass into O(distinct
+    #    sources) — the dominant cost when there are many locales.
+    unique_sources = set()
     for row in rows:
         src = row.get(source_field) or ""
         if not src or len(src) > MAX_HIGHLIGHT_SOURCE_CHARS:
             # Oversized (UNS whole-file template): scanning 8KB would trigger
             # dozens of context-service detail fetches and can hang the export.
             continue
+        unique_sources.add(src)
+
+    hit_ids: set = set()
+    for src in unique_sources:
         for m in _source_re.finditer(src):
             meta = _name_to_meta.get(m.group(0).lower())
             if meta and meta.get("id") is not None:
@@ -205,6 +245,7 @@ def prefetch_for_rows(
 
     # 2. Fetch detail for IDs we haven't cached yet.
     to_fetch = [i for i in hit_ids if i not in _detail_cache]
+    new_details: Dict[int, Dict[str, Any]] = {}
     if to_fetch:
         try:
             new_details = term_api.fetch_many_details(to_fetch)
@@ -219,6 +260,7 @@ def prefetch_for_rows(
     # ensures the source-side regex picks up the authoritative dnt flag
     # on every render. Sync by ID (not name) so a slight name mismatch
     # between LIST and DETAIL responses doesn't silently skip the sync.
+    dnt_changed = False
     if _detail_cache:
         with _lock:
             id_to_meta = {
@@ -233,7 +275,17 @@ def prefetch_for_rows(
                 meta = id_to_meta.get(tid)
                 if meta is None:
                     continue
-                meta["dnt"] = _parse_dnt(detail.get("dnt"))
+                new_dnt = _parse_dnt(detail.get("dnt"))
+                if meta.get("dnt") != new_dnt:
+                    dnt_changed = True
+                meta["dnt"] = new_dnt
+
+    # Memoized highlight renders are keyed only by text, so any change to the
+    # term metadata (new details → new locale matches, or a flipped DNT class)
+    # must drop them, otherwise an export could serve a render that predates
+    # the freshly-fetched term data.
+    if new_details or dnt_changed:
+        _invalidate_highlight_caches()
 
     # 3. Determine locales we still need a regex for.
     locales_needed = set()
@@ -251,6 +303,44 @@ def prefetch_for_rows(
 # ---------------------------------------------------------------------------
 # Internals
 # ---------------------------------------------------------------------------
+
+def _memo_put(cache: Dict[Any, str], key: Any, value: str) -> None:
+    """Insert into a bounded memo cache with cheap FIFO eviction.
+
+    CPython dict ops are atomic, so concurrent readers see either the old or
+    new value — both correct (the renders are pure). The size check is only
+    a safety valve against unbounded growth on a pathological export; under
+    contention it may overshoot ``_MEMO_MAX`` slightly, which is harmless.
+    """
+    if len(cache) >= _MEMO_MAX:
+        # Drop the oldest ~10% in insertion order to amortise eviction cost.
+        for k in list(cache.keys())[: max(1, _MEMO_MAX // 10)]:
+            cache.pop(k, None)
+    cache[key] = value
+
+
+def _invalidate_highlight_caches() -> None:
+    """Drop everything derived from the term data so stale highlight output is
+    never served: the memoized renders AND the per-locale regexes/meta.
+
+    The locale regexes must be dropped too — not just the render caches.
+    ``prefetch_for_rows`` only (re)builds a locale regex when it is absent from
+    ``_locale_re``; if we kept a regex that was built from an older
+    ``_detail_cache`` (before new term details arrived or a refresh), every
+    subsequent translation render — cache-missed because we just cleared the
+    render cache — would re-run that *stale* regex and silently omit
+    newly-added terms. Clearing forces a rebuild from the current detail cache
+    on the next prefetch. Dicts are cleared without ``_lock`` (CPython
+    ``dict.clear`` is atomic, and this is also called while ``_lock`` is held
+    by ``_ensure_list_loaded`` — taking it here would deadlock); a racing
+    rebuild merely repopulates, which is harmless."""
+    global _hl_version
+    _src_hl_cache.clear()
+    _tr_hl_cache.clear()
+    _locale_re.clear()
+    _locale_meta.clear()
+    _hl_version += 1
+
 
 def _source_repl(m: re.Match) -> str:
     meta = _name_to_meta.get(m.group(0).lower(), {})
@@ -299,6 +389,9 @@ def _ensure_list_loaded(force_refresh: bool = False) -> Optional[re.Pattern]:
         _source_re = _build_alternation_regex(
             [m["name"] for m in name_to_meta.values()]
         )
+        # A fresh term list (or a forced refresh) means any previously
+        # memoized render may now be wrong — drop them.
+        _invalidate_highlight_caches()
         _list_loaded = True
         return _source_re
 
@@ -371,16 +464,162 @@ def _build_alternation_regex(strings: Iterable[str]) -> Optional[re.Pattern]:
         uniq.append(s)
     if not uniq:
         return None
-    uniq.sort(key=len, reverse=True)
-    _ASCII_WORD = re.compile(r"[A-Za-z0-9_]")
-    pieces: List[str] = []
-    for s in uniq:
-        esc = re.escape(s)
-        prefix = r"(?<![A-Za-z0-9_])" if _ASCII_WORD.match(s[0]) else ""
-        suffix = r"(?![A-Za-z0-9_])" if _ASCII_WORD.match(s[-1]) else ""
-        pieces.append(prefix + esc + suffix)
-    pattern = "(?:" + "|".join(pieces) + ")"
+
+    # The flat alternation (one ``|``-joined branch per term, sorted longest
+    # first) is correct but, with ~2.5k terms, the backtracking engine retries
+    # every branch at every input position — ~20 ms per source string, which
+    # dominates a full-translations export. ``_trie_alternation_pattern``
+    # factors the SAME ordered alternation into a shared-prefix trie: the input
+    # text dictates a single downward path, so matching becomes ~linear in the
+    # text length instead of linear in the term count (~200x faster, measured).
+    #
+    # The transformation is equivalent by construction (see that function), but
+    # because a highlight regression would silently corrupt every report, we
+    # verify it: build the flat pattern too and confirm both regexes produce
+    # identical match spans on a probe corpus derived from the real term names.
+    # Any mismatch (or build error) falls back to the proven flat pattern.
+    flat_pattern = _flat_alternation_pattern(uniq)
     try:
-        return re.compile(pattern, re.IGNORECASE)
+        flat_re: Optional[re.Pattern] = re.compile(flat_pattern, re.IGNORECASE)
     except re.error:
-        return None
+        flat_re = None
+
+    try:
+        trie_pattern = _trie_alternation_pattern(uniq)
+        trie_re = re.compile(trie_pattern, re.IGNORECASE)
+        if flat_re is not None and not _patterns_equivalent(
+            flat_re, trie_re, uniq
+        ):
+            trie_re = None
+    except (re.error, RecursionError, ValueError):
+        trie_re = None
+
+    if trie_re is not None:
+        return trie_re
+    return flat_re
+
+
+# Shared boundary-guard helpers (a leading/trailing ASCII word char gets a
+# zero-width guard so an English term can't match inside a longer word).
+_ASCII_WORD = re.compile(r"[A-Za-z0-9_]")
+
+
+def _is_ascii_word(ch: str) -> bool:
+    return _ASCII_WORD.match(ch) is not None
+
+
+def _flat_alternation_pattern(uniq: Sequence[str]) -> str:
+    """The original one-branch-per-term alternation, sorted longest-first."""
+    ordered = sorted(uniq, key=len, reverse=True)
+    pieces: List[str] = []
+    for s in ordered:
+        esc = re.escape(s)
+        prefix = r"(?<![A-Za-z0-9_])" if _is_ascii_word(s[0]) else ""
+        suffix = r"(?![A-Za-z0-9_])" if _is_ascii_word(s[-1]) else ""
+        pieces.append(prefix + esc + suffix)
+    return "(?:" + "|".join(pieces) + ")"
+
+
+def _trie_alternation_pattern(strings: Sequence[str]) -> str:
+    """Factor ``strings`` into a shared-prefix trie regex equivalent to the
+    flat longest-match-preferred alternation.
+
+    Equivalence argument:
+      * The input text fixes the next character, so at each trie node only the
+        one child whose edge matches the text can proceed — sibling order is
+        irrelevant to *which* term matches.
+      * At a node that is BOTH a terminal and has children, the children
+        (longer continuations) are emitted before the zero-width "stop" branch,
+        and ``re`` alternation is first-match — so the longest term wins,
+        exactly like the flat pattern's length-descending order.
+      * Boundary guards are applied per edge character: the leading guard on
+        each first character at the root, the trailing guard on each terminal
+        based on the last consumed character — identical to the per-term guards
+        the flat pattern emits.
+
+    Chars are folded to lower case when building the trie. Matching is already
+    case-insensitive (``re.IGNORECASE``), and ``_source_repl`` keys on
+    ``m.group(0).lower()``, so the stored case never reaches the output. Folding
+    is REQUIRED for correctness: without it, "Call" (under root ``C``) and
+    "call queue" (under root ``c``) land in different branches, and ordered
+    IGNORECASE alternation would match the shorter "Call" and never reach the
+    longer "call queue" — breaking the longest-match guarantee. Any residual
+    case-mapping quirk is caught by the build-time differential self-test.
+    """
+    SENT = None  # terminal marker key
+    root: dict = {}
+    for s in strings:
+        node = root
+        for ch in s:
+            node = node.setdefault(ch.lower(), {})
+        node[SENT] = True
+
+    def suffix_guard(last_char: str) -> str:
+        return r"(?![A-Za-z0-9_])" if _is_ascii_word(last_char) else ""
+
+    def emit(node: dict, last_char: str) -> str:
+        child_chars = sorted(k for k in node if k is not SENT)
+        branches = [re.escape(ch) + emit(node[ch], ch) for ch in child_chars]
+        if branches:
+            child_alt = branches[0] if len(branches) == 1 else \
+                "(?:" + "|".join(branches) + ")"
+        else:
+            child_alt = ""
+        is_terminal = SENT in node
+        if is_terminal:
+            stop = suffix_guard(last_char)
+            if child_alt:
+                # Prefer the longer continuation; fall back to stopping here.
+                return "(?:" + child_alt + "|" + stop + ")"
+            return stop
+        # Non-terminal interior node: must descend into children.
+        return child_alt
+
+    root_chars = sorted(k for k in root if k is not SENT)
+    if not root_chars:
+        raise ValueError("empty trie")
+    parts = []
+    for ch in root_chars:
+        prefix = r"(?<![A-Za-z0-9_])" if _is_ascii_word(ch) else ""
+        parts.append(prefix + re.escape(ch) + emit(root[ch], ch))
+    return "(?:" + "|".join(parts) + ")"
+
+
+# Cap on terms probed by the runtime equivalence self-test. The exhaustive
+# proof (20k random + adversarial inputs) lives in test_terminology_highlight_
+# trie.py; this runtime check is a lighter safety net against a term-list-
+# specific surprise, sized so it can't dominate the first export. Each
+# finditer on the ~2.5k-term FLAT regex costs ~0.15 ms, so this bounds the
+# self-test to a few hundred ms even on a large glossary.
+_SELFTEST_MAX_TERMS = 400
+
+
+def _patterns_equivalent(
+    flat_re: re.Pattern, trie_re: re.Pattern, uniq: Sequence[str]
+) -> bool:
+    """Confirm the trie regex finds identical match spans to the proven flat
+    regex on a probe corpus derived from the term names.
+
+    Probe selection prioritises the only realistic divergence risk: terms with
+    non-ASCII characters (where ``.lower()`` vs the original char *could* differ
+    under IGNORECASE). All of those are probed; the rest are sampled by stride
+    so short terms (prefix candidates) and long ones are both represented,
+    capped at ``_SELFTEST_MAX_TERMS``. Probes per term cover the term itself,
+    its lower-case form (exercises the folded trie path), and word-char padding
+    on each side (boundary guards). Returns True iff every span set matches."""
+    def spans(pat: re.Pattern, text: str):
+        return [(m.start(), m.end()) for m in pat.finditer(text)]
+
+    non_ascii = [t for t in uniq if not t.isascii()]
+    ascii_terms = [t for t in uniq if t.isascii()]
+    budget = max(0, _SELFTEST_MAX_TERMS - len(non_ascii))
+    if len(ascii_terms) > budget and budget > 0:
+        stride = len(ascii_terms) / budget
+        sampled = [ascii_terms[int(i * stride)] for i in range(budget)]
+    else:
+        sampled = ascii_terms[:budget]
+    for t in non_ascii + sampled:
+        for p in (t, t.lower(), t + "z", "z" + t):
+            if spans(flat_re, p) != spans(trie_re, p):
+                return False
+    return True

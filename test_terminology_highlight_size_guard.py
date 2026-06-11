@@ -40,6 +40,11 @@ class _StateGuard(unittest.TestCase):
         th._name_to_meta = {"widget": {"id": 42, "name": "Widget"}}
         th._detail_cache = {}
         th._locale_re = {}
+        # Highlight memo caches are keyed only by text, so a leaked entry from
+        # another test (or a real session) could otherwise mask a re-render
+        # under this test's term setup. Clear them for a hermetic start.
+        th._src_hl_cache.clear()
+        th._tr_hl_cache.clear()
         # Record detail fetches; never hit the network.
         self.fetch_calls = []
 
@@ -58,6 +63,8 @@ class _StateGuard(unittest.TestCase):
         th._locale_re = self._saved["_locale_re"]
         th.term_api.fetch_many_details = self._saved["fetch_many_details"]
         th._build_locale_regex = self._saved["_build_locale_regex"]
+        th._src_hl_cache.clear()
+        th._tr_hl_cache.clear()
 
 
 class TestPrefetchSizeGuard(_StateGuard):

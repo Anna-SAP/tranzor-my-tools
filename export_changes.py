@@ -25,6 +25,15 @@ from datetime import date
 import terminology_highlight as th
 
 
+# Above this combined (before+after) length, ``difflib`` runs on whole LINES
+# instead of word/char tokens. UNS Handlebars units hydrate to whole-file
+# templates (tens of KB); a token-level diff there yields thousands of tokens
+# whose SequenceMatcher pass is the slow, near-unreadable worst case. A
+# line-level diff stays fast and the rendered <del>/<ins> granularity (a
+# changed line at a time) is what a reviewer can actually read at that size.
+MAX_DIFF_CHARS = 20000
+
+
 def _tokenize(text):
     """Split text into diff-friendly tokens.
 
@@ -43,6 +52,17 @@ def _tokenize(text):
         r'|\s+',                    # whitespace runs
         text
     )
+
+
+def _diff_tokens(before, after):
+    """Pick a tokenizer by size. Small texts \u2192 word/char tokens (fine-grained
+    diff). Oversized texts \u2192 ``splitlines(keepends=True)`` so SequenceMatcher
+    works on a handful of lines instead of thousands of tokens. Both keep the
+    invariant ``"".join(tokens) == text`` so the diff reconstructs the text
+    exactly."""
+    if len(before) + len(after) > MAX_DIFF_CHARS:
+        return before.splitlines(keepends=True), after.splitlines(keepends=True)
+    return _tokenize(before), _tokenize(after)
 
 try:
     import requests
@@ -255,8 +275,7 @@ def collect_changes(task_id=None):
 # ---------------------------------------------------------------------------
 def word_diff_text(before, after):
     """纯文本 diff: [-删除] [+新增]"""
-    before_tokens = _tokenize(before)
-    after_tokens = _tokenize(after)
+    before_tokens, after_tokens = _diff_tokens(before, after)
     sm = difflib.SequenceMatcher(None, before_tokens, after_tokens)
     parts = []
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
@@ -277,8 +296,7 @@ def word_diff_text(before, after):
 # ---------------------------------------------------------------------------
 def word_diff_html(before, after):
     """HTML diff: 红色删除线 = 删除, 绿色高亮 = 新增"""
-    before_tokens = _tokenize(before)
-    after_tokens = _tokenize(after)
+    before_tokens, after_tokens = _diff_tokens(before, after)
     sm = difflib.SequenceMatcher(None, before_tokens, after_tokens)
     parts = []
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
@@ -345,17 +363,25 @@ def write_html(rows, filename, label):
     rows_json = json.dumps(js_rows, ensure_ascii=False)
     langs_json = json.dumps(sorted(all_langs), ensure_ascii=False)
 
-    sections_html = ""
+    # Build with list-append + ''.join, NOT ``str +=``. CPython's in-place
+    # ``str +=`` optimization is not guaranteed (it needs a refcount-1 target
+    # and an extensible buffer) and degrades toward O(n²) for large/heavy
+    # reports — and UNS rows make it heavy: each cell holds kilobytes of
+    # escaped Handlebars HTML, so the accumulated string is huge. ''.join is
+    # always linear; measured 200–9000× faster on the isolated concat step
+    # depending on row count. (export_translations.py already builds this way.)
+    sections_parts = []
     global_idx = 0
     for editor_i, (editor_name, editor_rows) in enumerate(groups.items()):
         color_pair = editor_colors[editor_i % len(editor_colors)]
         header_bg = color_pair[0]
         section_bg = color_pair[1]
 
-        table_rows = ""
+        row_parts = []
         for r in editor_rows:
             diff = word_diff_html(r["before"], r["after"])
-            table_rows += f"""
+            row_parts.append(
+                f"""
             <tr>
                 <td class="cb-cell"><input type="checkbox" class="row-cb" data-idx="{global_idx}"></td>
                 <td class="num">{global_idx + 1}</td>
@@ -369,10 +395,11 @@ def write_html(rows, filename, label):
                 <td class="after">{th.highlight_translation(html.escape(r['after']), r['language'])}</td>
                 <td class="diff">{diff}</td>
                 <td>{html.escape(r['notes'] or '')}</td>
-            </tr>"""
+            </tr>""")
             global_idx += 1
+        table_rows = "".join(row_parts)
 
-        sections_html += f"""
+        sections_parts.append(f"""
         <div class="editor-section" data-editor="{html.escape(editor_name)}" style="background: {section_bg}; border-left: 4px solid {header_bg}; border-radius: 8px; padding: 16px; margin-bottom: 24px;">
             <h2 style="color: {header_bg}; margin-bottom: 12px; font-size: 17px;">
                 👤 {html.escape(editor_name)}
@@ -390,7 +417,8 @@ def write_html(rows, filename, label):
                 <tbody>{table_rows}
                 </tbody>
             </table>
-        </div>"""
+        </div>""")
+    sections_html = "".join(sections_parts)
 
     # 顶部 Editor 索引
     toc_items = ""
