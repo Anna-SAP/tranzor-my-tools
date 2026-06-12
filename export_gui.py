@@ -2597,7 +2597,8 @@ class ExportApp:
                     bridge_info=bridge_info, open_after=False)
             else:
                 saved = export_changes.save_file(
-                    rows, filepath, label, fmt, open_after=False)
+                    rows, filepath, label, fmt,
+                    bridge_info=bridge_info, open_after=False)
 
             self.root.after(0, self._on_done, saved or filepath, True)
 
