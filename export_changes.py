@@ -316,8 +316,15 @@ def word_diff_html(before, after):
     return "".join(parts)
 
 
-def write_html(rows, filename, label):
-    """生成带可视化 Diff 的 HTML 报告，按 Editor 分组，支持筛选和交互式 TMX 导出"""
+def write_html(rows, filename, label, bridge_info=None):
+    """生成带可视化 Diff 的 HTML 报告，按 Editor 分组，支持筛选和交互式 TMX 导出
+
+    bridge_info: optional dict from BridgeServer.html_info(); when present, the
+        report can POST selected change rows directly to the local bridge for
+        hand-off to the Tranzor Platform browser tab. Falsy values disable the
+        bridge transport but keep the clipboard/hash fallbacks usable. Mirrors
+        export_translations.write_html so both reports behave identically.
+    """
     import json
     from collections import OrderedDict
 
@@ -362,6 +369,8 @@ def write_html(rows, filename, label):
             all_langs.add(r["language"])
     rows_json = json.dumps(js_rows, ensure_ascii=False)
     langs_json = json.dumps(sorted(all_langs), ensure_ascii=False)
+    bridge_json = json.dumps(bridge_info or None, ensure_ascii=False)
+    report_basename = os.path.basename(filename)
 
     # Build with list-append + ''.join, NOT ``str +=``. CPython's in-place
     # ``str +=`` optimization is not guaranteed (it needs a refcount-1 target
@@ -475,6 +484,9 @@ def write_html(rows, filename, label):
     .btn-export {{ background: #4472C4; color: #fff; }}
     .btn-export:hover {{ background: #3461b0; }}
     .btn-export:disabled {{ background: #a8b8d0; cursor: not-allowed; opacity: .7; }}
+    .btn-send {{ background: #27AE60; color: #fff; }}
+    .btn-send:hover {{ background: #1f8c4f; }}
+    .btn-send:disabled {{ background: #a8d0b9; cursor: not-allowed; opacity: .7; }}
     .badge {{ background: #4472C4; color: #fff; border-radius: 12px; padding: 2px 10px; font-size: 12px; font-weight: 700; min-width: 28px; text-align: center; }}
     .badge.zero {{ background: #bbb; }}
     .toolbar-sep {{ width: 1px; height: 24px; background: #dde; }}
@@ -628,6 +640,9 @@ def write_html(rows, filename, label):
     <button class="btn btn-export" id="btnExport" onclick="exportTMX()" disabled>📦 Export TMX</button>
     <span id="exportStatus" style="font-size:12px;color:#888;"></span>
     <div class="toolbar-sep"></div>
+    <button class="btn btn-send" id="btnSendTz" onclick="sendToTranzor()" disabled>↗ Send to Tranzor</button>
+    <span id="sendStatus" style="font-size:12px;color:#888;"></span>
+    <div class="toolbar-sep"></div>
     <button class="btn btn-filter" id="btnFilterToggle" onclick="toggleFilterPanel()">🔍 Filters</button>
     <span class="filter-info" id="filterInfo"></span>
 </div>
@@ -686,6 +701,9 @@ def write_html(rows, filename, label):
 // ============================================================
 const ROWS = {rows_json};
 const ALL_LANGS = {langs_json};
+const BRIDGE = {bridge_json};
+const TRANZOR_BASE = "{TRANZOR_URL}";
+const REPORT_NAME = "{report_basename}";
 let allSelected = false;
 
 // Populate lang multi-select
@@ -984,6 +1002,8 @@ function updateBadge() {{
     badge.textContent = n;
     badge.className = n ? 'badge' : 'badge zero';
     document.getElementById('btnExport').disabled = (n === 0);
+    const sendBtn = document.getElementById('btnSendTz');
+    if (sendBtn) sendBtn.disabled = (n === 0);
 }}
 
 function toggleSelectAll() {{
@@ -1120,6 +1140,148 @@ async function exportTMX() {{
         status.textContent = '✓ Downloaded ZIP with ' + langs.length + ' languages, ' + totalEntries + ' entries';
     }}
 }}
+
+// ============================================================
+// Tranzor Bridge — hand selected change rows off to the Tranzor Platform tab
+// Mirrors export_translations.py. The only difference is buildEnvelope, which
+// maps the Changes report's row shape: `after` is the corrected translation,
+// and there is no translation_type column (sent as '').
+// ============================================================
+function uuidv4() {{
+    if (crypto && crypto.randomUUID) return crypto.randomUUID();
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {{
+        const r = Math.random() * 16 | 0;
+        const v = c === 'x' ? r : (r & 0x3 | 0x8);
+        return v.toString(16);
+    }});
+}}
+
+function buildEnvelope(checkedRows) {{
+    const items = checkedRows.map(row => ({{
+        string_key: row.string_key,
+        task_id: row.task_id,
+        task_name: row.task_name,
+        language: row.language,
+        source_text: row.source_text,
+        translated_text: row.after,
+        translation_type: '',
+    }}));
+    // Single-task / single-lang context shortcut (null when mixed).
+    const taskIds = Array.from(new Set(items.map(i => i.task_id).filter(Boolean)));
+    const langs = Array.from(new Set(items.map(i => i.language).filter(Boolean)));
+    return {{
+        '$schema': 'tranzor-bridge/handoff/v1',
+        envelope_id: uuidv4(),
+        created_at: new Date().toISOString(),
+        source: {{ tool: 'TranzorExporter', report_file: REPORT_NAME }},
+        context: {{
+            task_id: taskIds.length === 1 ? taskIds[0] : null,
+            task_name: items.length ? items[0].task_name : null,
+            language: langs.length === 1 ? langs[0] : null,
+        }},
+        items: items,
+    }};
+}}
+
+async function tryBridge(envelope) {{
+    if (!BRIDGE || !BRIDGE.port || !BRIDGE.token) {{
+        return {{ ok: false, reason: 'no_bridge' }};
+    }}
+    const url = 'http://127.0.0.1:' + BRIDGE.port + '/handoff';
+    try {{
+        const resp = await fetch(url, {{
+            method: 'POST',
+            mode: 'cors',
+            credentials: 'omit',
+            headers: {{
+                'Content-Type': 'application/json',
+                'X-Bridge-Token': BRIDGE.token,
+            }},
+            body: JSON.stringify(envelope),
+        }});
+        if (!resp.ok) {{
+            return {{ ok: false, reason: 'http_' + resp.status }};
+        }}
+        const body = await resp.json();
+        return {{ ok: true, seq: body.seq }};
+    }} catch (e) {{
+        return {{ ok: false, reason: 'network_' + (e && e.message ? e.message.slice(0, 60) : 'err') }};
+    }}
+}}
+
+async function tryClipboard(envelope) {{
+    try {{
+        await navigator.clipboard.writeText(JSON.stringify(envelope, null, 2));
+        return {{ ok: true }};
+    }} catch (e) {{
+        return {{ ok: false, reason: 'clipboard_' + (e && e.message ? e.message.slice(0, 60) : 'denied') }};
+    }}
+}}
+
+function tryHash(envelope) {{
+    // Base64url-encode envelope into URL hash. Cap at ~6 KB to keep URLs sane.
+    try {{
+        const json = JSON.stringify(envelope);
+        const b64 = btoa(unescape(encodeURIComponent(json)))
+            .replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');
+        if (b64.length > 6000) {{
+            return {{ ok: false, reason: 'too_large_for_hash', truncated: true }};
+        }}
+        return {{ ok: true, hash: '#tzbridge=' + b64 }};
+    }} catch (e) {{
+        return {{ ok: false, reason: 'encode_err' }};
+    }}
+}}
+
+async function sendToTranzor() {{
+    const status = document.getElementById('sendStatus');
+    const checked = document.querySelectorAll('tr:not(.row-hidden) input.row-cb:checked');
+    if (!checked.length) return;
+
+    const rows = Array.from(checked).map(cb => ROWS[parseInt(cb.dataset.idx)]);
+    const envelope = buildEnvelope(rows);
+    status.textContent = 'Sending ' + rows.length + ' item(s)…';
+
+    // Route to the task-specific page so the user lands on the actual list,
+    // not the bare domain (which is unreachable through the corporate proxy).
+    // When the envelope spans multiple tasks, fall back to the first item's task.
+    const taskId = (envelope.context && envelope.context.task_id)
+                || (envelope.items[0] && envelope.items[0].task_id);
+    const taskPath = taskId ? ('/static/legacy/tasks/' + encodeURIComponent(taskId)) : '/';
+
+    // Transport 1: bridge
+    const br = await tryBridge(envelope);
+    let openUrl = TRANZOR_BASE + taskPath;
+    let toast;
+    if (br.ok) {{
+        // Pair the userscript with the bridge: pass token via one-time URL hash.
+        // The userscript stashes it in GM storage and history.replaceState's it away.
+        if (BRIDGE && BRIDGE.token) {{
+            openUrl = TRANZOR_BASE + taskPath + '#tzbridge_token=' + encodeURIComponent(BRIDGE.token);
+        }}
+        toast = '✓ Sent ' + rows.length + ' item(s) via bridge (seq=' + br.seq + '). Switching to Tranzor…';
+    }} else {{
+        // Transport 2: clipboard
+        const cb = await tryClipboard(envelope);
+        if (cb.ok) {{
+            toast = '⚠ Bridge unavailable (' + br.reason + '). Copied to clipboard — press Ctrl+Shift+V in Tranzor tab.';
+        }} else {{
+            // Transport 3: URL hash (last resort, truncates if too large)
+            const hashResult = tryHash(envelope);
+            if (hashResult.ok) {{
+                openUrl = TRANZOR_BASE + taskPath + hashResult.hash;
+                toast = '⚠ Bridge + clipboard unavailable. Embedding selections in URL hash.';
+            }} else {{
+                toast = '✗ All transports failed (bridge=' + br.reason + ', clipboard=' + cb.reason + ', hash=' + hashResult.reason + ')';
+                status.textContent = toast;
+                return;
+            }}
+        }}
+    }}
+    status.textContent = toast;
+    // Reuse a named tab so repeat clicks don't spawn windows.
+    window.open(openUrl, 'tranzor_bridge_target', 'noopener,noreferrer');
+}}
 </script>
 </body>
 </html>"""
@@ -1198,7 +1360,7 @@ def write_excel(rows, filename):
 # ---------------------------------------------------------------------------
 # 9) 保存文件（含文件被占用时自动重命名）
 # ---------------------------------------------------------------------------
-def save_file(rows, filename, label, fmt, open_after=True):
+def save_file(rows, filename, label, fmt, bridge_info=None, open_after=True):
     """保存文件，文件被占用时自动加序号。
 
     open_after: when True (default) and the output is HTML, open the result
@@ -1214,7 +1376,7 @@ def save_file(rows, filename, label, fmt, open_after=True):
     for attempt in range(100):
         try:
             if fmt == "html":
-                write_html(rows, save_path, label)
+                write_html(rows, save_path, label, bridge_info=bridge_info)
                 print(f"已导出: {save_path}")
             elif fmt == "json":
                 import export_json
