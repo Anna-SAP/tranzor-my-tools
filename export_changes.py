@@ -112,30 +112,95 @@ def fetch_tasks(created_after=None, created_before=None):
 # ---------------------------------------------------------------------------
 # 2) 获取某个 task 下所有 "Manual Edit" 类型的翻译
 # ---------------------------------------------------------------------------
-def fetch_manual_edits(task_id):
-    """获取某个 task 中所有手动编辑过的翻译"""
-    manual_translations = []
-    offset = 0
-    limit = 200
+_POST_EDIT_TYPES = ("Manual Edit", "LLM Retranslate")
 
-    while True:
-        params = {"limit": limit, "offset": offset}
+
+def _discover_languages(task_id):
+    """探测该 task 数据里实际出现的目标语言集合（取首页即可）。
+
+    ``/legacy/tasks/{id}/translations`` 结果按 source(key) 分组，首页前若干个
+    完整 key 即覆盖该 task 全部语言。仅在人工编辑行超过一页、需要逐语言抓取时
+    才会用到。
+    """
+    observed = set()
+    try:
         resp = _api_get(
-            f"{API}/tasks/{task_id}/translations", params=params
+            f"{API}/tasks/{task_id}/translations",
+            params={"limit": 200, "offset": 0},
         )
         resp.raise_for_status()
+        for e in (resp.json().get("entries") or []):
+            lg = e.get("target_language")
+            if lg:
+                observed.add(lg)
+    except Exception:
+        pass
+    return observed
+
+
+def _fetch_post_edits_for_language(task_id, lang):
+    """逐语言稳定分页抓取某 task 下某语言的全部人工编辑行。
+
+    单语言内 opus_id 唯一 → OFFSET/LIMIT 分页稳定。按"实际返回行数"步进、
+    到 total 或读空即止（绝不按请求的 limit 步进，否则短页会跳行）。
+    """
+    out = []
+    offset = 0
+    limit = 200
+    while True:
+        params = {"limit": limit, "offset": offset,
+                  "target_language": lang, "label_types": "post_edited"}
+        resp = _api_get(f"{API}/tasks/{task_id}/translations", params=params)
+        resp.raise_for_status()
         data = resp.json()
-
-        for entry in data.get("entries", []):
-            t_type = entry.get("translation_type", "")
-            if t_type in ("Manual Edit", "LLM Retranslate"):
-                manual_translations.append(entry)
-
+        entries = data.get("entries", [])
+        for e in entries:
+            el = e.get("target_language")
+            if el and el != lang:        # 防御：服务端忽略语言过滤时不混入别的语言
+                continue
+            if e.get("translation_type", "") in _POST_EDIT_TYPES:
+                out.append(e)
         total = data.get("total", 0)
-        offset += limit
-        if offset >= total:
+        offset += len(entries)
+        if not entries or offset >= total:
             break
+        if offset > 1_000_000:
+            break
+    return out
 
+
+def fetch_manual_edits(task_id):
+    """获取某个 task 中所有手动编辑过的翻译（Manual Edit / LLM Retranslate）。
+
+    ⚠️ 用服务端 ``label_types=post_edited`` 过滤，绝大多数任务的人工编辑行一页
+    就能取完（无分页边界）。一旦超过一页，改按目标语言逐语言抓取——
+    ``/legacy/tasks/{id}/translations`` 不带语言过滤时按 source 级非唯一键排序，
+    整表 OFFSET/LIMIT 分页会在页边界确定性地漏/重 (key, language) 行（与
+    ``export_translations`` 修掉的漏行 bug 同源），可能让 Changes 报告漏掉真实
+    的人工修改。逐语言后单语言内 opus_id 唯一、分页稳定。
+    """
+    resp = _api_get(
+        f"{API}/tasks/{task_id}/translations",
+        params={"limit": 200, "offset": 0, "label_types": "post_edited"},
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    entries = data.get("entries", [])
+    total = data.get("total", 0)
+
+    # 常见情况：人工编辑行一页装得下 → 单次请求即完整，无分页边界 bug
+    if total <= len(entries):
+        return [e for e in entries
+                if e.get("translation_type", "") in _POST_EDIT_TYPES]
+
+    # 人工编辑行超过一页（罕见）：逐语言抓取以规避整表分页漏行
+    languages = {e.get("target_language") for e in entries
+                 if e.get("target_language")}
+    languages |= _discover_languages(task_id)
+    manual_translations = []
+    for lang in sorted(languages):
+        manual_translations.extend(
+            _fetch_post_edits_for_language(task_id, lang))
     return manual_translations
 
 
