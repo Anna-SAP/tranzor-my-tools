@@ -2613,7 +2613,8 @@ def collect_human_revisions(start_time=None, end_time=None,
     }
 
 
-def save_mr_file(results_data, filename, label, fmt, bridge_info=None, open_after=True):
+def save_mr_file(results_data, filename, label, fmt, bridge_info=None,
+                 open_after=True, fill_missing=False):
     """保存 MR 翻译结果，文件被占用时自动加序号。
 
     bridge_info: optional dict from BridgeServer.html_info(); threaded into
@@ -2621,6 +2622,12 @@ def save_mr_file(results_data, filename, label, fmt, bridge_info=None, open_afte
     open_after: when True (default) and the output is HTML, open the result
         in the user's default browser. The GUI passes False because its
         own export-done callback already handles auto-open.
+
+    fill_missing: 仅 JSON 全量导出（"All Translations"）传 True，让 export_json
+        把每个 key 补齐到其所属 task 内观察到的全部目标语言（缺失填 ""），满足
+        QA 100% 语言覆盖的硬要求。MR/Scan 任务不在 task 级暴露 target_languages，
+        因此走"观察到的语言并集"补齐即可。Changes/变更导出必须传 False（保持
+        稀疏，只含真正变更的语言）。
 
     fmt 支持 "html" / "xlsx" / "json"。json 走 export_json.write_translations_json，
     输出的 schema 与翻译 QA Skill（如 /rc-core-products-trans-checker）期望的
@@ -2636,7 +2643,8 @@ def save_mr_file(results_data, filename, label, fmt, bridge_info=None, open_afte
             elif fmt == "json":
                 # 延迟导入避免循环依赖（GUI 启动时 export_json 尚未加载）
                 import export_json
-                export_json.write_translations_json(results_data, save_path)
+                export_json.write_translations_json(
+                    results_data, save_path, fill_missing=fill_missing)
             else:
                 write_mr_excel(results_data, save_path)
                 print(f"已导出: {save_path}")

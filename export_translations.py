@@ -80,6 +80,25 @@ def fetch_task_info(task_id):
         return f"Task {task_id}"
 
 
+def fetch_task_languages(task_id):
+    """返回单个 task 配置的目标语言列表（用于全量 JSON 导出的语言补齐）。
+
+    全量导出要求每个 key 100% 覆盖配置目标语言。源数据稀疏，光靠"观察到的
+    语言并集"无法覆盖"整个 task 一条译文都没有"的语言，因此从 task 详情
+    （``GET /tasks/{id}``，字段 ``target_languages``）取权威配置列表。
+
+    任何异常都降级为空列表——此时调用方仍会用"观察到的语言并集"补齐，
+    不会让导出失败。
+    """
+    try:
+        resp = _api_get(f"{API}/tasks/{task_id}")
+        resp.raise_for_status()
+        data = resp.json() or {}
+        return [str(x) for x in (data.get("target_languages") or []) if x]
+    except Exception:
+        return []
+
+
 # ---------------------------------------------------------------------------
 # 2) 获取 task 列表
 # ---------------------------------------------------------------------------
@@ -1322,7 +1341,8 @@ def _write_index_html(filepath, label, lang_files, total_count):
         f.write(page)
 
 
-def save_file(rows, filename, label, fmt, bridge_info=None, open_after=True):
+def save_file(rows, filename, label, fmt, bridge_info=None, open_after=True,
+              all_languages=None):
     """保存文件，文件被占用时自动加序号；大数据 HTML 自动按语言分页
 
     bridge_info: optional dict from BridgeServer.html_info(); threaded into
@@ -1333,6 +1353,12 @@ def save_file(rows, filename, label, fmt, bridge_info=None, open_after=True):
         its _on_done callback already handles auto-open — avoids the
         duplicate-tab bug.
 
+    all_languages: 仅 JSON 全量导出使用，透传给 ``export_json`` 做全量语言
+        补齐。single-task 导出传该 task 的配置目标语言，可保证连"零译文"的
+        配置语言也出现；all-tasks 导出不传（按 task 观察到的语言补齐即可，
+        避免跨产品误填）。无论是否传入，JSON 全量导出都会启用 fill_missing，
+        保证每个 key 100% 覆盖目标语言。
+
     fmt 支持 "html" / "xlsx" / "json"。json 走 export_json 透视为
     {key, en-US, de-DE, ...} 供翻译 QA Skill 直接消费；单文件输出，
     不按语言分页（QA 工具期望整体 schema）。
@@ -1341,13 +1367,19 @@ def save_file(rows, filename, label, fmt, bridge_info=None, open_after=True):
 
     base, ext = os.path.splitext(filename)
 
-    # JSON：单文件、无浏览器、无分页（始终输出整份给 QA 工具消费）
+    # JSON：单文件、无浏览器、无分页（始终输出整份给 QA 工具消费）。
+    # 这是"全量翻译/All Translations"导出，启用 fill_missing 强制每个 key
+    # 覆盖全部目标语言（缺失填 ""），满足 QA 100% 语言覆盖的硬要求。
     if fmt == "json":
         import export_json
         save_path = filename
         for attempt in range(100):
             try:
-                export_json.write_translations_json(rows, save_path)
+                export_json.write_translations_json(
+                    rows, save_path,
+                    all_languages=all_languages,
+                    fill_missing=True,
+                )
                 return save_path
             except PermissionError:
                 attempt_num = attempt + 1

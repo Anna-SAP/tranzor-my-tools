@@ -1241,8 +1241,11 @@ class MRPipelineTab:
             # Capture the actual saved path so we can both display its basename
             # and reveal it in the OS file manager — otherwise the user sees
             # only "Export complete" with no clue where the JSON / Excel went.
+            # 全量翻译 JSON 导出（非 changes）需要每个 key 100% 覆盖目标语言，
+            # 启用 fill_missing 做缺失语言补齐；Changes 导出保持稀疏。
             saved = mr_api.save_mr_file(
-                results, filepath, label, fmt, bridge_info=bridge_info) or filepath
+                results, filepath, label, fmt, bridge_info=bridge_info,
+                fill_missing=(export_type != "changes")) or filepath
             basename = os.path.basename(saved)
             self.parent.after(0, lambda b=basename: self.lbl_mr_status_bar.configure(
                 text=self._t("status_saved").format(filename=b)))

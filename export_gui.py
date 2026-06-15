@@ -2586,6 +2586,20 @@ class ExportApp:
             filepath = os.path.join(script_dir, filename)
 
             bridge_info = self._bridge_info_for_export()
+
+            # 全量翻译 JSON 导出需要每个 key 100% 覆盖目标语言。single-task 导出
+            # 额外取该 task 的配置目标语言传给 save_file，连"零译文"的配置语言也
+            # 能补齐；all-tasks 导出不取配置（save_file 仍启用 fill_missing，按
+            # 各 key 所属 task 观察到的语言补齐，避免跨产品误填）。任何失败都降级，
+            # 绝不让导出本身失败。
+            all_languages = None
+            if export_type == "translations" and fmt == "json" and task_id:
+                try:
+                    all_languages = export_translations.fetch_task_languages(
+                        task_id)
+                except Exception:
+                    all_languages = None
+
             # open_after=False — _on_done handles the auto-open so we don't
             # spawn two browser tabs for the same report.
             # Capture the actual saved path so the UI reflects PermissionError
@@ -2594,7 +2608,8 @@ class ExportApp:
             if export_type == "translations":
                 saved = export_translations.save_file(
                     rows, filepath, label, fmt,
-                    bridge_info=bridge_info, open_after=False)
+                    bridge_info=bridge_info, open_after=False,
+                    all_languages=all_languages)
             else:
                 saved = export_changes.save_file(
                     rows, filepath, label, fmt,
