@@ -704,8 +704,11 @@ class ScanTasksTab:
             # Capture actual save_path so the status bar shows the real filename
             # (PermissionError renames it to ..._1.json on collision) and we
             # reveal that exact file in the OS file manager below.
+            # 全量翻译 JSON 导出（非 changes）需要每个 key 100% 覆盖目标语言，
+            # 启用 fill_missing 做缺失语言补齐；Changes 导出保持稀疏。
             saved = mr_api.save_mr_file(
-                results, filepath, label, fmt, bridge_info=bridge_info) or filepath
+                results, filepath, label, fmt, bridge_info=bridge_info,
+                fill_missing=(export_type != "changes")) or filepath
             basename = os.path.basename(saved)
             self.parent.after(0, lambda b=basename: self.lbl_scan_status_bar.configure(
                 text=self._t("status_saved").format(filename=b)))
