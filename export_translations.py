@@ -126,45 +126,91 @@ def fetch_tasks():
 
 # ---------------------------------------------------------------------------
 # 3) 获取某个 task 下的全部翻译（不筛选 translation_type）
-#    使用并发分页加速大数据量 task
+#    按目标语言逐语言分页，规避服务端整表分页的漏行 bug
 # ---------------------------------------------------------------------------
-def fetch_all_translations(task_id):
-    """获取某个 task 中所有翻译条目（全量，不筛选类型）。
-    对于大数据 task，使用并发分页获取以大幅缩短耗时。
+def _fetch_language_translations(task_id, lang, limit=200):
+    """逐语言分页抓取某 task 下某个目标语言的全部非空译文。
+
+    ⚠️ 关键：必须按 ``target_language`` 过滤后再分页。
+
+    服务端 ``GET /tasks/{id}/translations`` 不带语言过滤时，返回结果按
+    ``opus_id`` 排序，而同一个 opus_id 在 N 种目标语言下有 N 行、共享同一个
+    ``opus_id`` 排序键。OFFSET/LIMIT 分页在页边界（offset=200/400/…）落到某个
+    key 的多语言行中间时，因为这些并列行缺乏稳定的次级排序键，会确定性地把
+    其中部分语言行重复返回、另一部分整段跳过——净条数对得上（``total`` 仍是
+    1245），但具体 (key, language) 组合有的重复、有的彻底丢失。表现就是导出里
+    个别 key 缺了 zh-CN / fi-FI 等真实存在的译文。
+
+    带上 ``target_language=<lang>`` 后，单语言结果里 opus_id 唯一，排序键不再
+    并列，分页稳定，可 100% 取回该语言全部行（已对 task 292 实测：逐语言 15×83
+    = 1245 行全部非空、无重复无遗漏）。
+    """
+    out = []
+    offset = 0
+    while True:
+        resp = _api_get(
+            f"{API}/tasks/{task_id}/translations",
+            params={"limit": limit, "offset": offset,
+                    "target_language": lang},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        entries = data.get("entries", [])
+        for entry in entries:
+            # 防御：万一服务端某天不再支持该过滤，避免把别的语言行混进来
+            el = entry.get("target_language")
+            if el and el != lang:
+                continue
+            if entry.get("translated_text", ""):
+                out.append(entry)
+        # 按"实际返回行数"翻页、到 total 或读空即止——与本仓库其它分页
+        # （export_mr_pipeline.fetch_all_legacy_translations_quality /
+        # fetch_scan_results）一致。绝不按"请求的 limit"步进：服务端对该接口
+        # 硬性 limit<=200，一旦某页因限流/上限返回不足 limit 行，用 offset+=limit
+        # 会直接跳过中间整段行（见 review 确认的 bug）。用 len(entries) 步进既能
+        # 正确处理"短页"，又能在 total 不准时靠空页自终止。
+        total = data.get("total", 0)
+        offset += len(entries)
+        if not entries or offset >= total:
+            break
+        # 防御性兜底：服务端 total 不准、永不读空时避免无限循环
+        if offset > 1_000_000:
+            break
+    return out
+
+
+def _fetch_all_translations_flat(task_id):
+    """旧的"整表分页"实现，仅在拿不到 task 目标语言时作为兜底。
+
+    ⚠️ 已知会漏行（见 :func:`_fetch_language_translations` 的说明）；正常路径
+    一律走逐语言抓取。保留它只是为了在 task 详情拿不到 target_languages 时
+    不至于直接空导出。
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     limit = 200
-
-    # 第 1 步：探测总条目数（只取 1 条以获取 total）
     probe_resp = _api_get(
         f"{API}/tasks/{task_id}/translations",
-        params={"limit": 1, "offset": 0}
+        params={"limit": 1, "offset": 0},
     )
     probe_resp.raise_for_status()
-    probe_data = probe_resp.json()
-    total = probe_data.get("total", 0)
-
+    total = probe_resp.json().get("total", 0)
     if total == 0:
         return []
 
-    # 第 2 步：计算所有分页偏移量
     offsets = list(range(0, total, limit))
 
-    # 第 3 步：并发获取所有分页
     def _fetch_page(offset):
         resp = _api_get(
             f"{API}/tasks/{task_id}/translations",
-            params={"limit": limit, "offset": offset}
+            params={"limit": limit, "offset": offset},
         )
         resp.raise_for_status()
         return offset, resp.json().get("entries", [])
 
     page_results = {}
     workers = min(MAX_PAGE_WORKERS, len(offsets))
-
     if workers <= 1:
-        # 只有 1 页，直接获取
         _, entries = _fetch_page(0)
         page_results[0] = entries
     else:
@@ -174,14 +220,75 @@ def fetch_all_translations(task_id):
                 offset_val, entries = f.result()
                 page_results[offset_val] = entries
 
-    # 第 4 步：按 offset 顺序合并结果
-    all_translations = []
+    out = []
     for o in offsets:
         for entry in page_results.get(o, []):
             if entry.get("translated_text", ""):
-                all_translations.append(entry)
+                out.append(entry)
+    return out
 
-    # 第 5 步：对 UNS 任务的 truncated preview 拉取完整 source/translated_text
+
+def _discover_languages(task_id):
+    """探测该 task 数据里实际出现的目标语言集合（用于逐语言抓取）。
+
+    取首页（flat）即可：``/translations`` 结果按 source(key) 分组，前若干个 key
+    已是完整的多语言组，足以覆盖该 task 的全部语言。这一步的好处：
+      - 自愈：即便 task 详情拿不到 ``target_languages``（旧后端 / 详情接口报错），
+        也能从数据里识别出语言，照样走稳定的逐语言抓取，而不是退回会漏行的整表
+        分页（见 review 确认的兜底缺陷）。
+      - 不漏"配置外"语言：若某语言存在真实译文但已不在 task 配置的
+        ``target_languages`` 里（任务改配/历史遗留 locale），也能被抓到——这是
+        inventory / monitor 等跨任务消费方需要的（旧整表实现本来也会带上它）。
+
+    再并上 task 配置的 ``target_languages`` 兜底，确保连首页里恰好稀疏缺席的
+    配置语言也不漏。识别不出任何语言（空任务或全失败）时返回空集合，由调用方
+    决定兜底。
+    """
+    observed = set()
+    try:
+        resp = _api_get(
+            f"{API}/tasks/{task_id}/translations",
+            params={"limit": 200, "offset": 0},
+        )
+        resp.raise_for_status()
+        for e in (resp.json().get("entries") or []):
+            lg = e.get("target_language")
+            if lg:
+                observed.add(lg)
+    except Exception:
+        pass
+    return observed | set(fetch_task_languages(task_id) or [])
+
+
+def fetch_all_translations(task_id):
+    """获取某个 task 中所有翻译条目（全量，不筛选类型）。
+
+    按目标语言逐语言分页抓取——这是规避服务端整表分页漏行 bug 的关键（详见
+    :func:`_fetch_language_translations`）。语言之间并发，语言内部顺序分页
+    （单语言内 opus_id 唯一，分页稳定）。语言集合来自"数据首页观察 ∪ task 配置"
+    （见 :func:`_discover_languages`）。万一一种语言都识别不出，才退回旧整表
+    分页兜底，避免空导出。
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    languages = _discover_languages(task_id)
+
+    if not languages:
+        # 极端兜底：连一种语言都识别不出时才走旧整表分页（已知会漏行，但好过空）
+        print("    [!] 未能识别任务的目标语言，退回整表分页（可能漏行）")
+        all_translations = _fetch_all_translations_flat(task_id)
+    else:
+        all_translations = []
+        workers = max(1, min(MAX_PAGE_WORKERS, len(languages)))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(_fetch_language_translations, task_id, lang): lang
+                for lang in sorted(languages)
+            }
+            for f in as_completed(futures):
+                all_translations.extend(f.result())
+
+    # 对 UNS 任务的 truncated preview 拉取完整 source/translated_text，
     # 否则导出文件里只有 ~500 字符的 UI 预览（见 closed bug TRAN-161）
     hydrated = hydrate_truncated_entries(
         all_translations,

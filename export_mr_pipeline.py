@@ -1118,14 +1118,26 @@ def fetch_legacy_translation_edit_logs(task_id, translation_id):
     return resp.json()
 
 
-def fetch_all_legacy_translations_quality(task_id, page_size=200,
-                                          target_language=None,
-                                          label_types=None):
-    """分页获取某个 legacy task 的全部翻译（含质量数据）
+def _discover_legacy_languages(task_id, label_types=None):
+    """探测 legacy task 数据里实际出现的目标语言集合（取首页即可）。
 
-    ``label_types`` is forwarded to the server-side row filter (see
-    :func:`fetch_legacy_translations_quality`); pass ``["post_edited"]``
-    to fetch only human-edited rows.
+    ``/legacy/tasks/{id}/translations`` 结果按 source(key) 分组，首页前若干个
+    完整 key 即覆盖该 task 全部语言。供 :func:`fetch_all_legacy_translations_quality`
+    在未指定语言时改走"逐语言抓取"以规避整表分页漏行 bug。
+    """
+    try:
+        entries, _ = fetch_legacy_translations_quality(
+            task_id, limit=200, offset=0, label_types=label_types)
+        return sorted({e.get("target_language") for e in (entries or [])
+                       if e.get("target_language")})
+    except Exception:
+        return []
+
+
+def _fetch_legacy_quality_flat(task_id, page_size, target_language, label_types):
+    """稳定分页抓取某 legacy task（可选某语言）的全部质量数据行。
+
+    按"实际返回行数"翻页、短页/读空即止，绝不按请求的 limit 步进。
     """
     all_items = []
     offset = 0
@@ -1144,6 +1156,39 @@ def fetch_all_legacy_translations_quality(task_id, page_size=200,
         # 防御性兜底：服务端 total 不准时避免无限循环
         if offset > 100_000:
             break
+    return all_items
+
+
+def fetch_all_legacy_translations_quality(task_id, page_size=200,
+                                          target_language=None,
+                                          label_types=None):
+    """分页获取某个 legacy task 的全部翻译（含质量数据）
+
+    ``label_types`` is forwarded to the server-side row filter (see
+    :func:`fetch_legacy_translations_quality`); pass ``["post_edited"]``
+    to fetch only human-edited rows.
+
+    ⚠️ 未指定 ``target_language`` 时按目标语言逐语言抓取。``/translations`` 不带
+    语言过滤时按 source 级排序键（非唯一）排序，整表 OFFSET/LIMIT 分页会在页
+    边界确定性地重复/跳过部分 (key, language) 行（与 export_translations 修掉的
+    那个漏行 bug 同源——已对后端 ``legacy_task_repository.get_paginated_translations``
+    的 ORDER BY 核实）。逐语言抓取后单语言内 opus_id 唯一，分页稳定。
+    指定了 ``target_language``（如 gui_tabs 单语言导出）则本来就稳定，直接抓。
+    """
+    if target_language is None:
+        languages = _discover_legacy_languages(task_id, label_types=label_types)
+        if languages:
+            all_items = []
+            for lang in languages:
+                all_items.extend(_fetch_legacy_quality_flat(
+                    task_id, page_size, lang, label_types))
+        else:
+            # 兜底：识别不出语言时退回整表分页（已知可能漏行，但好过空）
+            all_items = _fetch_legacy_quality_flat(
+                task_id, page_size, None, label_types)
+    else:
+        all_items = _fetch_legacy_quality_flat(
+            task_id, page_size, target_language, label_types)
 
     # UNS 长文本任务的列表 entry 返回的是 500 字符 preview；导出/质检/同步
     # 需要 DB 中的完整内容（见 closed bug TRAN-161）。
