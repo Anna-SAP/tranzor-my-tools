@@ -1436,6 +1436,11 @@ class FullTranslationsTab:
                 legacy_project_filter=legacy_filter or None,
                 mr_project_filter=mr_filter or None,
                 scan_project_filter=scan_filter or None,
+                # Hard contract for the export surface: if any task can't be
+                # fetched after retries, fail loudly with the missing-task list
+                # instead of writing a file that looks complete but isn't.
+                # (Override per-run with env TRANZOR_ALLOW_PARTIAL_EXPORT=1.)
+                strict_complete=True,
             )
             if not heavy_inv.data:
                 self.parent.after(
