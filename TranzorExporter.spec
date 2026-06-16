@@ -71,6 +71,8 @@ a = Analysis(
         'gui_tab_full_translations',
         'gui_tab_human_revisions',
         'gui_tab_scan_tasks',
+        # Shared Advanced Filters panel (MR Pipeline + Scan Tasks tabs).
+        'advanced_filter',
         'gui_tab_term_watchtower',
         'gui_tab_tm_context_insight',
         'gui_tab_opus_id_monitor',
