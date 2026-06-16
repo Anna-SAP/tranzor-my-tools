@@ -1441,6 +1441,10 @@ class FullTranslationsTab:
                 # instead of writing a file that looks complete but isn't.
                 # (Override per-run with env TRANZOR_ALLOW_PARTIAL_EXPORT=1.)
                 strict_complete=True,
+                # Merge-to-JSON keeps full per-key provenance so the file can
+                # carry _all_sources + inconsistencies_in_new. The zip path
+                # doesn't need it (and skipping keeps its memory footprint low).
+                track_all_sources=(mode == "json"),
             )
             if not heavy_inv.data:
                 self.parent.after(

@@ -200,6 +200,46 @@ def _dedupe_tasks(tasks: List[dict], id_key: str) -> List[dict]:
     return out
 
 
+# Translation_type values that mean "a human touched this string" (vs LLM /
+# Cached / LLM Retranslate, which are machine output). Lower-cased for compare.
+_HUMAN_EDIT_TYPES = {"manual edit", "language lead fix", "lead fix"}
+
+
+def _is_human_edited(translation_type, fixed_by=None) -> bool:
+    """True when a translation row was produced/blessed by a human.
+
+    Signals (whichever the source exposes): a ``translation_type`` of
+    "Manual Edit" / a Language-Lead fix, or a non-empty ``fixed_by_lead``.
+    Legacy ``/translations`` exposes ``translation_type``; the MR/Scan
+    ``/results`` endpoint exposes neither, so MR/Scan rows fall back to
+    score+recency (documented limitation — the backend is read-only).
+    """
+    if fixed_by:
+        return True
+    if not translation_type:
+        return False
+    return str(translation_type).strip().lower() in _HUMAN_EDIT_TYPES
+
+
+def _quality_key(human_edited: bool, score, recency: str, task_id: str = ""):
+    """Total order for "which translation is the most authoritative".
+
+    Priority high→low (matches the user's policy "prefer human-reviewed /
+    high-score, then newest"):
+      1. human_edited  — a human-blessed row beats any machine row.
+      2. score         — higher final_score wins (missing score sorts last).
+      3. recency       — newer task (created_at) wins.
+      4. task_id       — final deterministic tiebreaker so equal-everything
+                         candidates resolve identically across threads/runs.
+    Returned as a tuple; ``max(...)`` selects the winner.
+    """
+    try:
+        s = float(score)
+    except (TypeError, ValueError):
+        s = -1.0
+    return (1 if human_edited else 0, s, recency or "", task_id or "")
+
+
 # ---------------------------------------------------------------------------
 # 核心聚合
 # ---------------------------------------------------------------------------
@@ -225,12 +265,20 @@ class FullTranslationInventory:
         # so AP.zip / any existing consumer that iterates ``data`` stays
         # byte-identical.
         self.sources: Dict[str, Dict[str, Dict[str, dict]]] = {}
-        # Parallel to ``data``: the recency key (task created_at, lexically
-        # comparable ISO string) of the row currently stored for each
-        # (product, locale, opus_id). Drives deterministic "newest wins" so
-        # the final value never depends on thread-completion order and a stale
-        # older run can't clobber a newer translation.
-        self._recency: Dict[str, Dict[str, Dict[str, str]]] = {}
+        # Parallel to ``data``: the quality key (see _quality_key) of the row
+        # currently stored for each (product, locale, opus_id). Drives the
+        # deterministic winner policy "prefer human-reviewed / high-score,
+        # then newest" — independent of thread-completion order.
+        self._quality: Dict[str, Dict[str, Dict[str, tuple]]] = {}
+        # Optional full-provenance store. Only populated when
+        # ``track_all_sources`` is set (the Merge-to-JSON path), because for a
+        # huge project it holds every candidate row. Shape:
+        #   _cands[opus_id][locale][(source, task_id)] = {
+        #       "value", "recency", "q", "meta", "human_edited", "score"}
+        # Used to emit ``_all_sources`` (every task that translated a key) and
+        # the ``inconsistencies_in_new`` flag in build_merged_json.
+        self.track_all_sources: bool = False
+        self._cands: Dict[str, Dict[str, Dict[tuple, dict]]] = {}
         # Tasks that could not be fetched after retries. A non-empty list means
         # the inventory is provably incomplete; collect_full_translations turns
         # this into an IncompleteExportError in strict mode.
@@ -249,28 +297,43 @@ class FullTranslationInventory:
 
     def ingest(self, opus_id: str, locale: str, value: str,
                source_meta: Optional[dict] = None,
-               recency: str = "") -> None:
+               recency: str = "", score=None,
+               human_edited: bool = False) -> None:
         if not opus_id or not locale or value is None:
             return
         product = parse_product(opus_id)
+        tid = str((source_meta or {}).get("task_id") or "")
+        q = _quality_key(human_edited, score, recency, tid)
         with self._lock:
             prod_map = self.data.setdefault(product, {})
             loc_map = prod_map.setdefault(locale, {})
-            rec_loc = self._recency.setdefault(product, {}).setdefault(locale, {})
-            prev = rec_loc.get(opus_id)
-            # Deterministic "newest wins": skip when the incoming row is
-            # strictly older than what we already stored. Ties (==) still let
-            # the last writer win, which is harmless. An unknown recency ("")
-            # never overrides a known-timestamp value, and is itself overridden
-            # by any known timestamp.
-            if prev is not None and recency < prev:
-                return
-            loc_map[opus_id] = value
-            rec_loc[opus_id] = recency
-            if source_meta:
-                src_prod = self.sources.setdefault(product, {})
-                src_loc = src_prod.setdefault(locale, {})
-                src_loc[opus_id] = source_meta
+            qual_loc = self._quality.setdefault(product, {}).setdefault(locale, {})
+            prev_q = qual_loc.get(opus_id)
+            # Winner update: keep the row with the higher quality key. Strict
+            # ``>`` means equal-everything ties keep the first writer; the
+            # task_id tiebreaker inside the key makes even those deterministic.
+            if prev_q is None or q > prev_q:
+                loc_map[opus_id] = value
+                qual_loc[opus_id] = q
+                if source_meta:
+                    src_prod = self.sources.setdefault(product, {})
+                    src_loc = src_prod.setdefault(locale, {})
+                    src_loc[opus_id] = source_meta
+            # Full provenance: remember EVERY task that translated this cell so
+            # the merged JSON can list all sources and flag stale winners.
+            if self.track_all_sources and source_meta is not None:
+                tkey = (source_meta.get("source"), tid)
+                cand_loc = self._cands.setdefault(opus_id, {}).setdefault(locale, {})
+                existing = cand_loc.get(tkey)
+                if existing is None or q > existing["q"]:
+                    cand_loc[tkey] = {
+                        "value": value,
+                        "recency": recency or "",
+                        "q": q,
+                        "meta": source_meta,
+                        "human_edited": bool(human_edited),
+                        "score": score,
+                    }
 
     def ingest_entries(
         self,
@@ -283,6 +346,9 @@ class FullTranslationInventory:
         source_value_key: str = "source_text",
         source_meta: Optional[dict] = None,
         recency: str = "",
+        score_key: Optional[str] = None,
+        type_key: Optional[str] = None,
+        fixed_key: Optional[str] = None,
     ) -> int:
         """批量写入。返回实际写入的目标语条目数（未计入空值或源语言副本）。
 
@@ -293,19 +359,30 @@ class FullTranslationInventory:
         source_meta: 可选的 provenance 字典（如 {"source": "MR",
         "task_id": "...", "task_name": "..."}）。会跟随每条写入的译文记录，
         用于合并 JSON 导出时标注每条翻译的源头任务。
+
+        score_key / type_key / fixed_key: 可选的 entry 字段名，用来从每行抽取
+        质量信号驱动 winner 策略 —— final_score、translation_type、
+        fixed_by_lead。en-US 源文副本不参与质量比较（按 recency 取最新拼写）。
         """
         n = 0
         for entry in entries:
             oid = entry.get(opus_key) or ""
             loc = entry.get(locale_key) or ""
             val = entry.get(value_key)
+            score = entry.get(score_key) if score_key else None
+            human = _is_human_edited(
+                entry.get(type_key) if type_key else None,
+                entry.get(fixed_key) if fixed_key else None,
+            )
             if oid and loc and val not in (None, ""):
                 self.ingest(oid, loc, val, source_meta=source_meta,
-                            recency=recency)
+                            recency=recency, score=score, human_edited=human)
                 n += 1
             if source_locale and oid:
                 src = entry.get(source_value_key)
                 if src not in (None, ""):
+                    # en-US source copy: newest spelling wins; the per-target
+                    # quality signals don't apply to the English source string.
                     self.ingest(oid, source_locale, src,
                                 source_meta=source_meta, recency=recency)
         return n
@@ -709,8 +786,13 @@ def _collect_from_legacy(
                 "source": "Legacy",
                 "task_id": str(tid),
                 "task_name": tname or f"Legacy Task {tid}",
+                "created_at": str(task.get("created_at") or ""),
             },
             recency=str(task.get("created_at") or ""),
+            # Legacy /translations exposes per-row quality signals.
+            score_key="final_score",
+            type_key="translation_type",
+            fixed_key="fixed_by_lead",
         )
         _log(progress_cb, f"  [Legacy {idx}/{total}] '{tname}' +{n}")
         return n
@@ -841,8 +923,13 @@ def _collect_from_mr(
                 "project_id": pid,
                 "merge_request_iid": iid,
                 "release": rel,
+                "created_at": str(task.get("created_at") or ""),
             },
             recency=str(task.get("created_at") or ""),
+            # MR /results exposes final_score but NOT translation_type /
+            # fixed_by_lead (read-only backend), so MR human-edits can't be
+            # detected here — winner falls back to score, then recency.
+            score_key="final_score",
         )
         if n > 0:
             _log(progress_cb, f"  [MR {idx}/{total_tasks}] +{n}")
@@ -958,8 +1045,11 @@ def _collect_from_scan(
                 "project_id": pid,
                 "base_ref": base_ref,
                 "head_ref": head_ref,
+                "created_at": str(task.get("created_at") or ""),
             },
             recency=str(task.get("created_at") or ""),
+            # Scan /results exposes final_score; no human-edit flag.
+            score_key="final_score",
         )
         if n > 0:
             _log(progress_cb,
@@ -994,6 +1084,7 @@ def collect_full_translations(
     scan_project_filter: Optional[Iterable[str]] = None,
     count_cb: ProgressCountCb = None,
     strict_complete: bool = False,
+    track_all_sources: bool = False,
 ) -> FullTranslationInventory:
     """从指定数据源聚合全量翻译。
 
@@ -1013,10 +1104,16 @@ def collect_full_translations(
         默认 False，以保持其它调用方（如 Term Watchtower）的既有行为；只把
         失败清单记录在 ``inv.fetch_failures`` 上供调用方自行决定。
 
+    track_all_sources: 当为 True 时，保留每个 key 的「全部贡献任务」（而非只留
+        winner），供 build_merged_json 输出 ``_all_sources`` 与
+        ``inconsistencies_in_new``。代价是内存占用更高，故仅 Merge-to-JSON 路径
+        开启；zip / Watchtower 默认 False，行为与内存占用不变。
+
     返回 FullTranslationInventory（其 ``fetch_failures`` 字段列出所有抓取失败的
     任务；非 strict 模式下也会填充）。
     """
     inv = FullTranslationInventory()
+    inv.track_all_sources = bool(track_all_sources)
     sources = [s.lower() for s in sources]
     legacy_set = set(legacy_project_filter) if legacy_project_filter else None
     mr_set = set(mr_project_filter) if mr_project_filter else None
@@ -1228,6 +1325,11 @@ def build_merged_json(
                     if meta:
                         merged_sources.setdefault(opus_id, {})[locale] = meta
 
+    # Candidate store is finalized by now (collection completed before this
+    # call), so a shallow reference is enough for the read-only provenance
+    # pass. Empty unless track_all_sources was set during collection.
+    cands_snapshot = inv._cands if inv.track_all_sources else {}  # noqa: SLF001
+
     def _ordered_locales(locs: Iterable[str]) -> List[str]:
         # Source language first, then alphabetic — matches the example file.
         rest = sorted(loc for loc in locs if loc != SOURCE_LOCALE)
@@ -1251,6 +1353,70 @@ def build_merged_json(
             return {"_source": next(iter(unique.values()))}
         return {"_sources": dict(src_by_loc)}
 
+    def _provenance(opus_id: str) -> Tuple[str, List[dict]]:
+        """Build (inconsistencies_in_new, _all_sources) for one opus_id from
+        the per-task candidate store, honouring the active locale filter.
+
+        ``_all_sources`` lists EVERY task that translated this key (MR / Scan /
+        Legacy), newest first, with the per-locale text it contributed and
+        which locales it won. Nothing is collapsed away — this is the "show me
+        all contributors" view the snapshot value can't express.
+
+        ``inconsistencies_in_new`` = "yes" when, for ANY exported locale, the
+        chosen authoritative translation is NOT the newest candidate AND its
+        text differs from the newest one (i.e. a newer, divergent translation
+        exists that the winner policy deliberately did not pick — worth a human
+        look). Otherwise "no".
+        """
+        cand_by_loc = cands_snapshot.get(opus_id) or {}
+        by_task: Dict[tuple, dict] = {}
+        flag = "no"
+        for locale in sorted(cand_by_loc.keys()):
+            if locale_filter is not None and locale not in locale_filter:
+                continue
+            task_map = cand_by_loc[locale]
+            if not task_map:
+                continue
+            winner = max(task_map.values(), key=lambda c: c["q"])
+            newest = max(task_map.values(), key=lambda c: c["recency"])
+            if winner is not newest and winner["value"] != newest["value"]:
+                flag = "yes"
+            for tkey, c in task_map.items():
+                meta = c.get("meta") or {}
+                ent = by_task.get(tkey)
+                if ent is None:
+                    ent = {
+                        "source": meta.get("source"),
+                        "task_id": meta.get("task_id"),
+                        "task_name": meta.get("task_name"),
+                        "merge_request_iid": meta.get("merge_request_iid"),
+                        "release": meta.get("release"),
+                        "created_at": (c.get("recency")
+                                       or meta.get("created_at") or ""),
+                        "human_edited": False,
+                        "won_locales": [],
+                        "translations": {},
+                    }
+                    by_task[tkey] = ent
+                ent["translations"][locale] = c["value"]
+                if c.get("human_edited"):
+                    ent["human_edited"] = True
+                if c is winner:
+                    ent["won_locales"].append(locale)
+        all_sources: List[dict] = []
+        for ent in sorted(by_task.values(),
+                          key=lambda e: e.get("created_at") or "",
+                          reverse=True):
+            ent["won_locales"] = sorted(ent["won_locales"])
+            # Drop empty optional fields (e.g. merge_request_iid on Legacy)
+            # but always keep the translations map.
+            slim = {
+                k: v for k, v in ent.items()
+                if k == "translations" or v not in (None, "", [], False)
+            }
+            all_sources.append(slim)
+        return flag, all_sources
+
     records: List[dict] = []
     per_locale: Counter = Counter()
     exported_products: Set[str] = set()
@@ -1263,6 +1429,10 @@ def build_merged_json(
         # existing human-readable layout (key + en-US + de-DE + ...) is
         # preserved verbatim.
         rec.update(_collapse_sources(merged_sources.get(opus_id, {})))
+        if inv.track_all_sources:
+            flag, all_src = _provenance(opus_id)
+            rec["inconsistencies_in_new"] = flag
+            rec["_all_sources"] = all_src
         records.append(rec)
         exported_products.add(parse_product(opus_id))
         for loc in loc_values.keys():
