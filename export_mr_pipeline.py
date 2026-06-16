@@ -423,11 +423,17 @@ def enrich_translations_with_scan_task(translations, scan_task_id,
 MAX_WORKERS = 4
 
 
-def collect_all_mr_results(progress_callback=None):
-    """遍历所有 completed 状态的 MR Pipeline 任务，聚合翻译结果。
+def collect_all_mr_results(progress_callback=None, project_id=None,
+                           release=None, status="completed"):
+    """遍历 MR Pipeline 任务，聚合翻译结果。
 
     Args:
         progress_callback: 可选回调 (msg: str) 用于输出进度日志
+        project_id / release / status: 透传给 :func:`fetch_mr_tasks`，让
+            「导出全部」**继承 MR Pipeline 面板的基础筛选**（Project / Release /
+            Status）。``None`` 表示不限该维度（旧的全项目行为）。``status``
+            默认 ``"completed"`` —— 只有 completed 任务才有翻译结果；GUI 仅在
+            用户显式选了其它状态时才覆盖。
 
     Returns:
         与 fetch_mr_results 相同的结构: { "translations": [...], "summary": {} }
@@ -436,19 +442,23 @@ def collect_all_mr_results(progress_callback=None):
 
     log = progress_callback or print
 
-    # Step 1: 分页获取所有 completed 任务
-    log("  正在获取 MR Pipeline 任务列表...")
+    # Step 1: 分页获取匹配筛选的任务（默认 completed）
+    _scope = ", ".join(
+        f"{k}={v}" for k, v in (("project", project_id), ("release", release),
+                                ("status", status)) if v)
+    log(f"  正在获取 MR Pipeline 任务列表（{_scope or '全部'}）...")
     all_tasks = []
     offset = 0
     batch_size = 100
     while True:
-        total, batch = fetch_mr_tasks(status="completed",
+        total, batch = fetch_mr_tasks(project_id=project_id, release=release,
+                                      status=status,
                                       limit=batch_size, offset=offset)
         all_tasks.extend(batch)
         if not batch or offset + batch_size >= total:
             break
         offset += batch_size
-    log(f"  找到 {len(all_tasks)} 个已完成的 MR 任务")
+    log(f"  找到 {len(all_tasks)} 个匹配的 MR 任务")
 
     if not all_tasks:
         return {"translations": [], "summary": {}}

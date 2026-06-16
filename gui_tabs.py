@@ -1193,17 +1193,28 @@ class MRPipelineTab:
         # Read the Advanced Filters state on the main thread (Tk widgets are
         # not thread-safe) and hand it to the worker.
         adv_state = self.adv_filter.get_state() if self.adv_filter else None
+        # When nothing is selected ("export all"), inherit the panel's basic
+        # filters so the export — and thus the Advanced-Filters content search
+        # — is scoped to the same Project / Release / Status the list shows
+        # (read here on the main thread). Date is not a list filter, so it is
+        # intentionally not inherited.
+        basic_filters = {
+            "project_id": self.mr_project_var.get() or None,
+            "release": self.mr_release_var.get() or None,
+            "status": self.mr_status_var.get() or None,
+        }
         if IS_MAC:
             self.btn_mr_export.state(["disabled"])
         else:
             self.btn_mr_export.configure(state="disabled")
         self.lbl_mr_status_bar.configure(text=self._t("status_exporting"))
         threading.Thread(target=self._run_export,
-                         args=(task_id, fmt, export_type, mr_iid, adv_state),
+                         args=(task_id, fmt, export_type, mr_iid, adv_state,
+                               basic_filters),
                          daemon=True).start()
 
     def _run_export(self, task_id, fmt, export_type="changes", mr_iid="",
-                    adv_state=None):
+                    adv_state=None, basic_filters=None):
         try:
             if export_type == "changes":
                 if not task_id:
@@ -1232,8 +1243,18 @@ class MRPipelineTab:
                         pass
                     id_tag = task_id[:8]
                 else:
-                    results = mr_api.collect_all_mr_results()
-                    id_tag = "all_tasks"
+                    # "Export all" inherits the panel's basic filters so the
+                    # exported set (and the Advanced-Filters content search over
+                    # it) matches what the list shows. status defaults to
+                    # "completed" (only completed tasks have results) unless the
+                    # user explicitly picked another status.
+                    bf = basic_filters or {}
+                    results = mr_api.collect_all_mr_results(
+                        project_id=bf.get("project_id"),
+                        release=bf.get("release"),
+                        status=bf.get("status") or "completed")
+                    proj_tag = sanitize_for_filename(bf.get("project_id") or "")
+                    id_tag = f"all_{proj_tag}" if proj_tag else "all_tasks"
                 type_tag = "all"
 
             ext = {"xlsx": ".xlsx", "json": ".json"}.get(fmt, ".html")
