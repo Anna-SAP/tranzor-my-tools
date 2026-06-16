@@ -32,6 +32,7 @@ import json
 import os
 import sys
 import threading
+import time
 import zipfile
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -74,6 +75,49 @@ ProgressCountCb = Optional[Callable[[str, int, int], None]]
 # overwhelming the backend; tune via env if a deployment needs differently.
 _FETCH_WORKERS = int(os.getenv("TRANZOR_FETCH_WORKERS", "8") or "8")
 
+# Per-task fetch retry/backoff for the heavy /results + /translations calls.
+# Rationale (see the "filmstrip missing" RCA): export_mr_pipeline._api_get
+# retries connection blips but deliberately does NOT retry ReadTimeout (the
+# slow-endpoint case). Before this change a single transient failure on one
+# task's fetch was swallowed (the worker returned 0 rows silently), so a
+# whole MR/Legacy/Scan run could vanish from the "full" export with no trace —
+# and any key that lived ONLY in that run disappeared entirely. We now retry
+# each task fetch with exponential backoff, and (in strict mode) fail loud
+# rather than emit a deceptively complete file. Tunable via env.
+_TASK_FETCH_RETRIES = max(
+    1, int(os.getenv("TRANZOR_TASK_FETCH_RETRIES", "4") or "4"))
+_TASK_FETCH_BACKOFF = max(
+    0.0, float(os.getenv("TRANZOR_TASK_FETCH_BACKOFF", "1.5") or "1.5"))
+
+# Escape hatch: when a deployment knowingly tolerates a partial export (e.g.
+# one permanently-broken task should not block everything), set this to keep
+# the old behaviour — collect what we can and only WARN about failures instead
+# of raising. Off by default so "complete or fail loud" is the contract.
+_ALLOW_PARTIAL = os.getenv(
+    "TRANZOR_ALLOW_PARTIAL_EXPORT", "").strip().lower() in ("1", "true", "yes")
+
+
+class IncompleteExportError(RuntimeError):
+    """Raised when one or more source tasks could not be fetched after
+    retries, so the aggregated inventory is provably incomplete.
+
+    Carries ``failures`` (a list of ``{"source", "task_id", "error"}`` dicts)
+    so the GUI can show exactly which tasks were missed instead of writing a
+    silently truncated export the user would mistake for the whole truth.
+    """
+
+    def __init__(self, failures):
+        self.failures = list(failures or [])
+        n = len(self.failures)
+        head = "; ".join(
+            f"[{f.get('source')}] {str(f.get('task_id'))[:8]}… {f.get('error')}"
+            for f in self.failures[:5]
+        )
+        more = "" if n <= 5 else f"（另有 {n - 5} 个）"
+        super().__init__(
+            f"导出不完整：{n} 个任务在重试后仍抓取失败，已中止以避免产出"
+            f"缺失数据的文件。失败任务：{head}{more}")
+
 
 # ---------------------------------------------------------------------------
 # 工具函数
@@ -106,6 +150,56 @@ def _log(cb: ProgressCb, msg: str) -> None:
             pass
 
 
+def _fetch_task_with_retry(fetch_fn, task_id, *, progress_cb=None, what=""):
+    """Call a single-arg per-task fetch with bounded retry + backoff.
+
+    Returns the fetch result on success. Re-raises the last exception after
+    exhausting ``_TASK_FETCH_RETRIES`` attempts so the caller can record the
+    task as a hard failure (rather than silently treating it as "0 rows").
+
+    An *empty* successful result (e.g. ``{"translations": []}``) is NOT a
+    failure — only a raised exception is. The caller decides what an empty
+    payload means; a task can legitimately have zero rows.
+    """
+    last_exc = None
+    for attempt in range(1, _TASK_FETCH_RETRIES + 1):
+        try:
+            return fetch_fn(task_id)
+        except Exception as e:  # noqa: BLE001 — every class is worth retrying once
+            last_exc = e
+            if attempt < _TASK_FETCH_RETRIES:
+                wait = _TASK_FETCH_BACKOFF * (2 ** (attempt - 1))
+                _log(progress_cb,
+                     f"  ⚠ {what} {str(task_id)[:8]}… 第 {attempt}/"
+                     f"{_TASK_FETCH_RETRIES} 次抓取失败，{wait:.0f}s 后重试: {e}")
+                if wait > 0:
+                    time.sleep(wait)
+    raise last_exc
+
+
+def _dedupe_tasks(tasks: List[dict], id_key: str) -> List[dict]:
+    """Drop duplicate task rows by ``id_key``, preserving first-seen order.
+
+    Offset/limit pagination over the backend's ``ORDER BY created_at DESC``
+    task list (no unique tiebreaker) can return the same task twice when new
+    tasks are inserted at the head mid-pagination. De-duplicating by id keeps
+    the heavy per-task fetch idempotent and the failure accounting honest.
+    Rows without an id are kept as-is (the per-task fetch skips them anyway).
+    """
+    seen: Set = set()
+    out: List[dict] = []
+    for t in tasks:
+        tid = t.get(id_key)
+        if tid is None:
+            out.append(t)
+            continue
+        if tid in seen:
+            continue
+        seen.add(tid)
+        out.append(t)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # 核心聚合
 # ---------------------------------------------------------------------------
@@ -131,19 +225,48 @@ class FullTranslationInventory:
         # so AP.zip / any existing consumer that iterates ``data`` stays
         # byte-identical.
         self.sources: Dict[str, Dict[str, Dict[str, dict]]] = {}
+        # Parallel to ``data``: the recency key (task created_at, lexically
+        # comparable ISO string) of the row currently stored for each
+        # (product, locale, opus_id). Drives deterministic "newest wins" so
+        # the final value never depends on thread-completion order and a stale
+        # older run can't clobber a newer translation.
+        self._recency: Dict[str, Dict[str, Dict[str, str]]] = {}
+        # Tasks that could not be fetched after retries. A non-empty list means
+        # the inventory is provably incomplete; collect_full_translations turns
+        # this into an IncompleteExportError in strict mode.
+        self.fetch_failures: List[dict] = []
         self._lock = threading.Lock()
 
     # ---- 写入 --------------------------------------------------------
+    def record_failure(self, source: str, task_id, error) -> None:
+        """Thread-safe: record a task whose fetch failed after all retries."""
+        with self._lock:
+            self.fetch_failures.append({
+                "source": source,
+                "task_id": task_id,
+                "error": str(error),
+            })
+
     def ingest(self, opus_id: str, locale: str, value: str,
-               source_meta: Optional[dict] = None) -> None:
+               source_meta: Optional[dict] = None,
+               recency: str = "") -> None:
         if not opus_id or not locale or value is None:
             return
         product = parse_product(opus_id)
         with self._lock:
             prod_map = self.data.setdefault(product, {})
             loc_map = prod_map.setdefault(locale, {})
-            # 后写覆盖前写，用于"取最新一条"去重策略
+            rec_loc = self._recency.setdefault(product, {}).setdefault(locale, {})
+            prev = rec_loc.get(opus_id)
+            # Deterministic "newest wins": skip when the incoming row is
+            # strictly older than what we already stored. Ties (==) still let
+            # the last writer win, which is harmless. An unknown recency ("")
+            # never overrides a known-timestamp value, and is itself overridden
+            # by any known timestamp.
+            if prev is not None and recency < prev:
+                return
             loc_map[opus_id] = value
+            rec_loc[opus_id] = recency
             if source_meta:
                 src_prod = self.sources.setdefault(product, {})
                 src_loc = src_prod.setdefault(locale, {})
@@ -159,6 +282,7 @@ class FullTranslationInventory:
         source_locale: Optional[str] = None,
         source_value_key: str = "source_text",
         source_meta: Optional[dict] = None,
+        recency: str = "",
     ) -> int:
         """批量写入。返回实际写入的目标语条目数（未计入空值或源语言副本）。
 
@@ -176,12 +300,14 @@ class FullTranslationInventory:
             loc = entry.get(locale_key) or ""
             val = entry.get(value_key)
             if oid and loc and val not in (None, ""):
-                self.ingest(oid, loc, val, source_meta=source_meta)
+                self.ingest(oid, loc, val, source_meta=source_meta,
+                            recency=recency)
                 n += 1
             if source_locale and oid:
                 src = entry.get(source_value_key)
                 if src not in (None, ""):
-                    self.ingest(oid, source_locale, src, source_meta=source_meta)
+                    self.ingest(oid, source_locale, src,
+                                source_meta=source_meta, recency=recency)
         return n
 
     # ---- 查询 --------------------------------------------------------
@@ -542,6 +668,7 @@ def _collect_from_legacy(
             t for t in tasks
             if (t.get("project_name") or "(unknown)") in project_filter
         ]
+    tasks = _dedupe_tasks(tasks, "id")
     total = len(tasks)
     _log(progress_cb, f"  [Legacy] 命中 {total} 个 Completed task")
     if count_cb:
@@ -560,9 +687,15 @@ def _collect_from_legacy(
         if tid is None:
             return 0
         try:
-            entries = _legacy.fetch_all_translations(tid)
+            entries = _fetch_task_with_retry(
+                _legacy.fetch_all_translations, tid,
+                progress_cb=progress_cb, what=f"[Legacy {idx}/{total}]")
         except Exception as e:
-            _log(progress_cb, f"  ⚠ [Legacy {idx}/{total}] task {tid} 失败: {e}")
+            # Retries exhausted — record as a hard failure so strict mode
+            # refuses to emit a silently incomplete export. Never swallow.
+            inv.record_failure("Legacy", tid, e)
+            _log(progress_cb,
+                 f"  ⛔ [Legacy {idx}/{total}] task {tid} 重试耗尽，已记为失败: {e}")
             return 0
         if not entries:
             return 0
@@ -577,6 +710,7 @@ def _collect_from_legacy(
                 "task_id": str(tid),
                 "task_name": tname or f"Legacy Task {tid}",
             },
+            recency=str(task.get("created_at") or ""),
         )
         _log(progress_cb, f"  [Legacy {idx}/{total}] '{tname}' +{n}")
         return n
@@ -632,9 +766,14 @@ def _collect_from_mr(
                     offset=offset,
                 )
                 out.extend(batch)
-                if not batch or offset + batch_size >= total:
+                # Step by the actual returned count (not the requested limit):
+                # the backend orders by created_at DESC with no unique
+                # tiebreaker, so stepping by ``limit`` past a short page can
+                # skip rows. _dedupe_tasks below absorbs the duplicates that
+                # head-insertion drift can otherwise introduce.
+                offset += len(batch)
+                if not batch or offset >= total:
                     break
-                offset += batch_size
         except Exception as e:
             _log(progress_cb, f"  ⚠ [MR] 获取 task 列表失败 ({project_id}): {e}")
         return out
@@ -645,6 +784,7 @@ def _collect_from_mr(
     else:
         all_tasks.extend(_paginate(None))
 
+    all_tasks = _dedupe_tasks(all_tasks, "task_id")
     total_tasks = len(all_tasks)
     _log(progress_cb, f"  [MR] 命中 {total_tasks} 个 Completed task")
     if count_cb:
@@ -662,10 +802,17 @@ def _collect_from_mr(
         if not tid:
             return 0
         try:
-            results = _mr.fetch_mr_results(tid)
+            results = _fetch_task_with_retry(
+                _mr.fetch_mr_results, tid,
+                progress_cb=progress_cb, what=f"[MR {idx}/{total_tasks}]")
         except Exception as e:
+            # Retries exhausted — record as a hard failure. This is the exact
+            # spot where a single transient miss used to make a whole MR run
+            # (and any key unique to it) silently disappear from the export.
+            inv.record_failure("MR", tid, e)
             _log(progress_cb,
-                 f"  ⚠ [MR {idx}/{total_tasks}] task {tid[:8]}… 失败: {e}")
+                 f"  ⛔ [MR {idx}/{total_tasks}] task {str(tid)[:8]}… "
+                 f"重试耗尽，已记为失败: {e}")
             return 0
         trs = (results or {}).get("translations", [])
         if not trs:
@@ -695,6 +842,7 @@ def _collect_from_mr(
                 "merge_request_iid": iid,
                 "release": rel,
             },
+            recency=str(task.get("created_at") or ""),
         )
         if n > 0:
             _log(progress_cb, f"  [MR {idx}/{total_tasks}] +{n}")
@@ -749,9 +897,10 @@ def _collect_from_scan(
                     offset=offset,
                 )
                 out.extend(batch)
-                if not batch or offset + batch_size >= total:
+                # Step by actual returned count; dedupe below absorbs drift.
+                offset += len(batch)
+                if not batch or offset >= total:
                     break
-                offset += batch_size
         except Exception as e:
             _log(progress_cb, f"  ⚠ [Scan] 获取 task 列表失败 ({project_id}): {e}")
         return out
@@ -762,6 +911,7 @@ def _collect_from_scan(
     else:
         all_tasks.extend(_paginate(None))
 
+    all_tasks = _dedupe_tasks(all_tasks, "task_id")
     total_tasks = len(all_tasks)
     _log(progress_cb, f"  [Scan] 命中 {total_tasks} 个 Completed task")
     if count_cb:
@@ -779,10 +929,14 @@ def _collect_from_scan(
         if not tid:
             return 0
         try:
-            results = _mr.fetch_scan_results(tid)
+            results = _fetch_task_with_retry(
+                _mr.fetch_scan_results, tid,
+                progress_cb=progress_cb, what=f"[Scan {idx}/{total_tasks}]")
         except Exception as e:
+            inv.record_failure("Scan", tid, e)
             _log(progress_cb,
-                 f"  ⚠ [Scan {idx}/{total_tasks}] task {tid[:8]}… 失败: {e}")
+                 f"  ⛔ [Scan {idx}/{total_tasks}] task {str(tid)[:8]}… "
+                 f"重试耗尽，已记为失败: {e}")
             return 0
         trs = (results or {}).get("translations", [])
         if not trs:
@@ -805,6 +959,7 @@ def _collect_from_scan(
                 "base_ref": base_ref,
                 "head_ref": head_ref,
             },
+            recency=str(task.get("created_at") or ""),
         )
         if n > 0:
             _log(progress_cb,
@@ -838,6 +993,7 @@ def collect_full_translations(
     mr_project_filter: Optional[Iterable[str]] = None,
     scan_project_filter: Optional[Iterable[str]] = None,
     count_cb: ProgressCountCb = None,
+    strict_complete: bool = False,
 ) -> FullTranslationInventory:
     """从指定数据源聚合全量翻译。
 
@@ -851,7 +1007,14 @@ def collect_full_translations(
     fetch 完成时触发一次，供 GUI 渲染进度条/ETA。``progress_cb`` 仍负责
     日志文字。
 
-    返回 FullTranslationInventory。
+    strict_complete: 当为 True 时，只要有任何任务在重试后仍抓取失败，就抛出
+        :class:`IncompleteExportError`（除非环境变量
+        ``TRANZOR_ALLOW_PARTIAL_EXPORT`` 打开），以保证"全量导出"绝不静默漏数据。
+        默认 False，以保持其它调用方（如 Term Watchtower）的既有行为；只把
+        失败清单记录在 ``inv.fetch_failures`` 上供调用方自行决定。
+
+    返回 FullTranslationInventory（其 ``fetch_failures`` 字段列出所有抓取失败的
+    任务；非 strict 模式下也会填充）。
     """
     inv = FullTranslationInventory()
     sources = [s.lower() for s in sources]
@@ -877,6 +1040,23 @@ def collect_full_translations(
     _log(progress_cb, f"\n  ✓ 聚合完成：{len(inv.data)} 个产品 / "
                       f"{len(inv.all_locales())} 种语言 / "
                       f"{inv.total_entries()} 条翻译")
+
+    if inv.fetch_failures:
+        # Loud, never silent. Even in non-strict mode this line tells the user
+        # the file is short by N tasks; strict mode turns it into a hard stop.
+        _log(progress_cb,
+             f"\n  ⛔ 有 {len(inv.fetch_failures)} 个任务抓取失败（重试已耗尽）"
+             f"——本次聚合并不完整。")
+        for f in inv.fetch_failures[:20]:
+            _log(progress_cb,
+                 f"     · [{f.get('source')}] {f.get('task_id')} :: "
+                 f"{f.get('error')}")
+        if strict_complete and not _ALLOW_PARTIAL:
+            raise IncompleteExportError(inv.fetch_failures)
+        _log(progress_cb,
+             "     （TRANZOR_ALLOW_PARTIAL_EXPORT 已开启或非严格模式：仅告警，"
+             "继续输出已抓取部分。）")
+
     return inv
 
 
