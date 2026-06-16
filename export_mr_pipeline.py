@@ -1244,13 +1244,21 @@ def _word_diff_text(before, after):
     return "".join(parts)
 
 
-def write_mr_html(results_data, filename, label, bridge_info=None):
+def write_mr_html(results_data, filename, label, bridge_info=None,
+                  advanced_filter_state=None):
     """生成 MR 翻译结果 HTML 报告（含 Filter + TMX 导出 + 评估列 + Send to Tranzor）
 
     bridge_info: optional dict from BridgeServer.html_info(); when present, the
         report can POST selections directly to the local bridge for hand-off
         to the Tranzor Platform browser tab. Falsy values disable the bridge
         transport but keep clipboard/hash fallbacks usable.
+
+    advanced_filter_state: optional state dict from the desktop GUI's Advanced
+        Filters panel (see :mod:`advanced_filter`). When non-empty, the report's
+        Translation Filter is **pre-filled** with these conditions and
+        **auto-applied** on load (the panel auto-opens so the criteria are
+        visible); a slim read-only banner above the summary echoes them. All
+        rows stay in the report so the user can tweak / Clear to broaden again.
     """
     translations = results_data.get("translations", [])
     summary = results_data.get("summary", {})
@@ -1321,10 +1329,42 @@ def write_mr_html(results_data, filename, label, bridge_info=None):
                 row_data["jira_ticket_id"] = r.get("jira_ticket_id", "")
             js_rows.append(row_data)
             all_langs.add(r.get("target_language", ""))
-    rows_json = json.dumps(js_rows, ensure_ascii=False)
-    langs_json = json.dumps(sorted(all_langs), ensure_ascii=False)
-    bridge_json = json.dumps(bridge_info or None, ensure_ascii=False)
+    def _js_embed(s):
+        # A literal ``</script>`` inside any string value would close the
+        # inline <script> block early and break the rest of the report's JS.
+        # ``\/`` is a valid JSON string escape, so rewriting ``</`` is safe and
+        # round-trips through JSON.parse unchanged.
+        return s.replace("</", "<\\/")
+
+    rows_json = _js_embed(json.dumps(js_rows, ensure_ascii=False))
+    langs_json = _js_embed(json.dumps(sorted(all_langs), ensure_ascii=False))
+    bridge_json = _js_embed(json.dumps(bridge_info or None, ensure_ascii=False))
     report_basename = os.path.basename(filename)
+
+    # Advanced Filters carried in from the desktop GUI: serialise to the JS
+    # ``TF_INITIAL`` shape (pre-fill + auto-apply) and build a read-only banner.
+    tf_initial = None
+    filter_banner_html = ""
+    if advanced_filter_state is not None:
+        try:
+            import advanced_filter as _af
+            tf_initial = _af.to_js_initial(advanced_filter_state)
+            segments = _af.summary_segments(advanced_filter_state)
+            if segments:
+                seg_html = []
+                for field_label, logic, parts in segments:
+                    joiner = f" <b>{logic}</b> " if len(parts) > 1 else " "
+                    crit = joiner.join(html_mod.escape(p) for p in parts)
+                    seg_html.append(
+                        f'<span class="af-seg"><b>{html_mod.escape(field_label)}</b>: {crit}</span>')
+                filter_banner_html = (
+                    '<div class="af-banner"><span class="af-banner-tag">🔍 '
+                    'Pre-filtered by Advanced Filters</span>'
+                    + "".join(seg_html) + "</div>")
+        except Exception:
+            tf_initial = None
+            filter_banner_html = ""
+    tf_initial_json = _js_embed(json.dumps(tf_initial, ensure_ascii=False))
 
     # Build sections with checkboxes
     sections = []
@@ -1547,9 +1587,21 @@ def write_mr_html(results_data, filename, label, bridge_info=None):
     .tf-input:focus {{ border-color:#4472C4; }}
     .tf-input.neg-input {{ border-color:#7f1d1d; }}
     .tf-input.neg-input:focus {{ border-color:#ef4444; }}
-    .tf-opts {{ display:flex; flex-wrap:wrap; gap:6px 14px; margin-top:6px; }}
+    .tf-opts {{ display:flex; flex-wrap:wrap; align-items:center; gap:6px 14px; margin-top:6px; }}
     .tf-opt {{ display:flex; align-items:center; gap:4px; font-size:11px; color:#94a3b8; cursor:pointer; user-select:none; }}
     .tf-opt input {{ accent-color:#4472C4; cursor:pointer; }}
+    /* Multi-condition support */
+    .tf-header-right {{ display:flex; align-items:center; gap:10px; }}
+    .tf-add {{ background:transparent; border:1px solid #334155; border-radius:4px; color:#38bdf8; font-size:11px; font-weight:700; padding:2px 8px; cursor:pointer; transition:all .15s; }}
+    .tf-add:hover {{ border-color:#38bdf8; color:#7dd3fc; }}
+    .tf-cond + .tf-cond {{ margin-top:10px; padding-top:10px; border-top:1px dashed #334155; }}
+    .tf-remove {{ margin-left:auto; background:transparent; border:none; color:#f87171; font-size:12px; font-weight:700; cursor:pointer; line-height:1; padding:0 2px; }}
+    .tf-remove:hover {{ color:#fca5a5; }}
+    /* Pre-filtered banner (Advanced Filters carried from the GUI) */
+    .af-banner {{ display:flex; flex-wrap:wrap; align-items:center; gap:8px 14px; background:#0f2233; border:1px solid #155e75; border-left:4px solid #0ea5e9; border-radius:8px; padding:10px 14px; margin:0 0 16px; font-size:12px; color:#cbd5e1; }}
+    .af-banner-tag {{ font-weight:700; color:#38bdf8; white-space:nowrap; }}
+    .af-banner .af-seg {{ color:#cbd5e1; }}
+    .af-banner .af-seg b {{ color:#e2e8f0; }}
     .fp-actions {{ display:flex; gap:10px; align-items:center; margin-left:auto; }}
     .fp-actions .btn {{ border:none; border-radius:6px; padding:7px 18px; cursor:pointer; font-size:13px; font-weight:600; }}
     .btn-apply {{ background:#0ea5e9; color:#fff; }}
@@ -1615,6 +1667,7 @@ def write_mr_html(results_data, filename, label, bridge_info=None):
 
     <h1>MR Pipeline Translations <span class="count" style="background:#4472C4;">{total_items} entries</span></h1>
     <p class="meta">{html_mod.escape(label)}</p>
+    {filter_banner_html}
 
 <!-- Filter Panel -->
 <div class="filter-panel" id="filterPanel">
@@ -1677,6 +1730,9 @@ def write_mr_html(results_data, filename, label, bridge_info=None):
 const ROWS = {rows_json};
 const ALL_LANGS = {langs_json};
 const BRIDGE = {bridge_json};
+// Advanced Filters injected from the desktop GUI (null when none). Shape per
+// field id: {{ logic:'AND'|'OR', conditions:[{{pos,neg,matchWhole,...}}] }}.
+const TF_INITIAL = {tf_initial_json};
 const TRANZOR_BASE = "{TRANZOR_URL}";
 const REPORT_NAME = "{report_basename}";
 let allSelected = false;
@@ -1743,43 +1799,92 @@ function closeLangMenu() {{
 // TextFilter card rendering
 // ============================================================
 const TF_FIELDS = [
-    {{ id: 'stringKey',  label: 'STRING KEY',      dataKey: 'string_key' }},
+    {{ id: 'string_key', label: 'STRING KEY',      dataKey: 'string_key' }},
     {{ id: 'source',     label: 'SOURCE (EN-US)',   dataKey: 'source_text' }},
     {{ id: 'translated', label: 'TRANSLATED TEXT',  dataKey: 'translated_text' }},
 ];
 
-(function renderTFCards() {{
-    const container = document.getElementById('tfRow');
-    TF_FIELDS.forEach(f => {{
-        container.innerHTML += `
-        <div class="tf-card" data-field="${{f.id}}">
-            <div class="tf-header">
-                <span class="tf-title">${{f.label}}</span>
-                <div class="tf-logic">
-                    <button class="active" data-val="AND" onclick="toggleLogic(this)">AND</button>
-                    <button data-val="OR" onclick="toggleLogic(this)">OR</button>
-                </div>
-            </div>
+// Build one condition row (Pos/Neg + options + remove). `c` is an optional
+// initial condition (camelCase flags) from TF_INITIAL.
+function tfConditionHTML(c) {{
+    const v  = k => (c && c[k]) ? String(c[k]).replace(/"/g, '&quot;') : '';
+    const ck = k => (c && c[k]) ? 'checked' : '';
+    return `
+        <div class="tf-cond">
             <div class="tf-input-row">
                 <span class="tf-label pos">Pos</span>
-                <input class="tf-input" data-role="pos" placeholder="Positive keyword…">
+                <input class="tf-input" data-role="pos" placeholder="Positive keyword…" value="${{v('pos')}}">
             </div>
             <div class="tf-input-row">
                 <span class="tf-label neg">Neg</span>
-                <input class="tf-input neg-input" data-role="neg" placeholder="Negative keyword (Exclude)…">
+                <input class="tf-input neg-input" data-role="neg" placeholder="Negative keyword (Exclude)…" value="${{v('neg')}}">
             </div>
             <div class="tf-opts">
-                <label class="tf-opt"><input type="checkbox" data-role="matchWhole"> Match whole</label>
-                <label class="tf-opt"><input type="checkbox" data-role="posCaseSensitive"> Match case (Pos)</label>
-                <label class="tf-opt"><input type="checkbox" data-role="posRegex"> Regex (Pos)</label>
-                <label class="tf-opt"><input type="checkbox" data-role="negCaseSensitive"> Match case (Neg)</label>
-                <label class="tf-opt"><input type="checkbox" data-role="negRegex"> Regex (Neg)</label>
+                <label class="tf-opt"><input type="checkbox" data-role="matchWhole" ${{ck('matchWhole')}}> Match whole</label>
+                <label class="tf-opt"><input type="checkbox" data-role="posCaseSensitive" ${{ck('posCaseSensitive')}}> Match case (Pos)</label>
+                <label class="tf-opt"><input type="checkbox" data-role="posRegex" ${{ck('posRegex')}}> Regex (Pos)</label>
+                <label class="tf-opt"><input type="checkbox" data-role="negCaseSensitive" ${{ck('negCaseSensitive')}}> Match case (Neg)</label>
+                <label class="tf-opt"><input type="checkbox" data-role="negRegex" ${{ck('negRegex')}}> Regex (Neg)</label>
+                <button class="tf-remove" title="Remove condition" onclick="removeCondition(this)">✕</button>
             </div>
         </div>`;
+}}
+
+function addCondition(fieldId, c) {{
+    const holder = document.querySelector(`.tf-conds[data-conds="${{fieldId}}"]`);
+    if (!holder) return;
+    const tmp = document.createElement('div');
+    tmp.innerHTML = tfConditionHTML(c).trim();
+    holder.appendChild(tmp.firstChild);
+    updateRemoveButtons(holder);
+}}
+
+function removeCondition(btn) {{
+    const cond = btn.closest('.tf-cond');
+    const holder = cond.parentElement;
+    if (holder.querySelectorAll('.tf-cond').length <= 1) return;
+    cond.remove();
+    updateRemoveButtons(holder);
+}}
+
+function updateRemoveButtons(holder) {{
+    const conds = holder.querySelectorAll('.tf-cond');
+    conds.forEach(c => {{
+        const rm = c.querySelector('.tf-remove');
+        if (rm) rm.style.visibility = (conds.length > 1) ? 'visible' : 'hidden';
+    }});
+}}
+
+(function renderTFCards() {{
+    const container = document.getElementById('tfRow');
+    TF_FIELDS.forEach(f => {{
+        const init = TF_INITIAL && TF_INITIAL[f.id];
+        const logic = (init && init.logic) || 'AND';
+        const card = document.createElement('div');
+        card.className = 'tf-card';
+        card.dataset.field = f.id;
+        card.innerHTML = `
+            <div class="tf-header">
+                <span class="tf-title">${{f.label}}</span>
+                <div class="tf-header-right">
+                    <div class="tf-logic">
+                        <button data-val="AND" onclick="setLogic(this)">AND</button>
+                        <button data-val="OR" onclick="setLogic(this)">OR</button>
+                    </div>
+                    <button class="tf-add" onclick="addCondition('${{f.id}}')">+ Add</button>
+                </div>
+            </div>
+            <div class="tf-conds" data-conds="${{f.id}}"></div>`;
+        container.appendChild(card);
+        card.querySelectorAll('.tf-logic button').forEach(b =>
+            b.classList.toggle('active', b.dataset.val === logic));
+        const conds = (init && init.conditions && init.conditions.length)
+            ? init.conditions : [null];
+        conds.forEach(c => addCondition(f.id, c));
     }});
 }})();
 
-function toggleLogic(btn) {{
+function setLogic(btn) {{
     const group = btn.parentElement;
     group.querySelectorAll('button').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
@@ -1795,18 +1900,21 @@ function toggleFilterPanel() {{
 // ============================================================
 // Filter engine
 // ============================================================
-function getTextFilterState(cardEl) {{
+function getFieldState(cardEl) {{
     const logicBtn = cardEl.querySelector('.tf-logic button.active');
-    return {{
-        logic: logicBtn ? logicBtn.dataset.val : 'AND',
-        pos: cardEl.querySelector('[data-role="pos"]').value,
-        neg: cardEl.querySelector('[data-role="neg"]').value,
-        posCaseSensitive: cardEl.querySelector('[data-role="posCaseSensitive"]').checked,
-        posRegex: cardEl.querySelector('[data-role="posRegex"]').checked,
-        negCaseSensitive: cardEl.querySelector('[data-role="negCaseSensitive"]').checked,
-        negRegex: cardEl.querySelector('[data-role="negRegex"]').checked,
-        matchWhole: cardEl.querySelector('[data-role="matchWhole"]').checked,
-    }};
+    const conditions = [];
+    cardEl.querySelectorAll('.tf-cond').forEach(cond => {{
+        conditions.push({{
+            pos: cond.querySelector('[data-role="pos"]').value,
+            neg: cond.querySelector('[data-role="neg"]').value,
+            posCaseSensitive: cond.querySelector('[data-role="posCaseSensitive"]').checked,
+            posRegex: cond.querySelector('[data-role="posRegex"]').checked,
+            negCaseSensitive: cond.querySelector('[data-role="negCaseSensitive"]').checked,
+            negRegex: cond.querySelector('[data-role="negRegex"]').checked,
+            matchWhole: cond.querySelector('[data-role="matchWhole"]').checked,
+        }});
+    }});
+    return {{ logic: logicBtn ? logicBtn.dataset.val : 'AND', conditions }};
 }}
 
 function testMatch(text, keyword, caseSensitive, isRegex, matchWhole) {{
@@ -1826,19 +1934,26 @@ function testMatch(text, keyword, caseSensitive, isRegex, matchWhole) {{
     }}
 }}
 
-function evaluateTextFilter(text, tf) {{
-    const posResult = testMatch(text, tf.pos, tf.posCaseSensitive, tf.posRegex, tf.matchWhole);
-    const negResult = testMatch(text, tf.neg, tf.negCaseSensitive, tf.negRegex, tf.matchWhole);
-    if (tf.logic === 'AND') {{
-        const posPass = (posResult === null) ? true : posResult;
-        const negPass = (negResult === null) ? true : !negResult;
-        return posPass && negPass;
-    }} else {{
-        if (posResult === null && negResult === null) return true;
-        const posPass = posResult === true;
-        const negPass = (negResult !== null) && !negResult;
-        return posPass || negPass;
-    }}
+// pos = required include, neg = required exclude (per condition).
+function condActive(c) {{ return !!(c.pos || c.neg); }}
+
+function evaluateCondition(text, c) {{
+    const posResult = testMatch(text, c.pos, c.posCaseSensitive, c.posRegex, c.matchWhole);
+    const negResult = testMatch(text, c.neg, c.negCaseSensitive, c.negRegex, c.matchWhole);
+    const posPass = (posResult === null) ? true : posResult;
+    const negPass = (negResult === null) ? true : !negResult;
+    return posPass && negPass;
+}}
+
+// Combine a field's active conditions by its AND/OR logic. Logic is
+// upper-cased before comparison to stay symmetric with the Python evaluator
+// (advanced_filter.evaluate_field), which normalises the same way.
+function evaluateField(text, fs) {{
+    const conds = (fs.conditions || []).filter(condActive);
+    if (conds.length === 0) return true;
+    const logic = (fs.logic || 'AND').toUpperCase();
+    if (logic === 'OR') return conds.some(c => evaluateCondition(text, c));
+    return conds.every(c => evaluateCondition(text, c));
 }}
 
 function applyFilters() {{
@@ -1849,7 +1964,7 @@ function applyFilters() {{
     const tfStates = {{}};
     tfCards.forEach(card => {{
         const field = card.dataset.field;
-        tfStates[field] = getTextFilterState(card);
+        tfStates[field] = getFieldState(card);
     }});
 
     const allRows = document.querySelectorAll('input.row-cb');
@@ -1876,10 +1991,10 @@ function applyFilters() {{
         if (pass) {{
             TF_FIELDS.forEach(f => {{
                 if (!pass) return;
-                const tf = tfStates[f.id];
-                if (!tf || (!tf.pos && !tf.neg)) return;
+                const fs = tfStates[f.id];
+                if (!fs) return;
                 const text = row[f.dataKey] || '';
-                if (!evaluateTextFilter(text, tf)) pass = false;
+                if (!evaluateField(text, fs)) pass = false;
             }});
         }}
 
@@ -1924,9 +2039,9 @@ function clearFilters() {{
     document.getElementById('fScore').value = '';
 
     document.querySelectorAll('.tf-card').forEach(card => {{
-        card.querySelector('[data-role="pos"]').value = '';
-        card.querySelector('[data-role="neg"]').value = '';
-        card.querySelectorAll('.tf-opts input[type="checkbox"]').forEach(cb => cb.checked = false);
+        const holder = card.querySelector('.tf-conds');
+        holder.innerHTML = '';
+        addCondition(card.dataset.field, null);
         const btns = card.querySelectorAll('.tf-logic button');
         btns.forEach(b => b.classList.remove('active'));
         btns[0].classList.add('active');
@@ -2242,6 +2357,13 @@ async function sendToTranzor() {{
     }}
     status.textContent = toast;
     window.open(openUrl, 'tranzor_bridge_target', 'noopener,noreferrer');
+}}
+
+// Advanced Filters carried in from the desktop GUI: open the panel so the
+// pre-filled criteria are visible, then apply once on load (all rows stay in
+// the report — the user can tweak or Clear to broaden again).
+if (TF_INITIAL) {{
+    try {{ toggleFilterPanel(); applyFilters(); }} catch (e) {{}}
 }}
 </script>
 </body>
@@ -2659,8 +2781,13 @@ def collect_human_revisions(start_time=None, end_time=None,
 
 
 def save_mr_file(results_data, filename, label, fmt, bridge_info=None,
-                 open_after=True, fill_missing=False):
+                 open_after=True, fill_missing=False, advanced_filter_state=None):
     """保存 MR 翻译结果，文件被占用时自动加序号。
+
+    advanced_filter_state: optional Advanced Filters state from the GUI panel
+        (see :mod:`advanced_filter`). HTML keeps every row and lets the report
+        pre-fill + auto-apply the filter; Excel/JSON have no interactive layer,
+        so matching rows are pre-filtered here before writing.
 
     bridge_info: optional dict from BridgeServer.html_info(); threaded into
         the HTML report so its Send-to-Tranzor button can reach the bridge.
@@ -2678,12 +2805,30 @@ def save_mr_file(results_data, filename, label, fmt, bridge_info=None,
     输出的 schema 与翻译 QA Skill（如 /rc-core-products-trans-checker）期望的
     {key, en-US, de-DE, ...} 透视格式一致。
     """
+    # Excel/JSON have no interactive filter layer — honour the Advanced Filters
+    # by pre-filtering matching rows before writing. HTML keeps all rows and
+    # pre-fills + auto-applies the filter inside the report instead.
+    if fmt != "html" and advanced_filter_state is not None:
+        try:
+            import advanced_filter as _af
+            if not _af.is_empty(advanced_filter_state):
+                _rows = results_data.get("translations") or []
+                results_data = {
+                    **results_data,
+                    "translations": _af.filter_translations(
+                        _rows, advanced_filter_state),
+                }
+        except Exception:
+            pass
+
     base, ext = os.path.splitext(filename)
     save_path = filename
     for attempt in range(100):
         try:
             if fmt == "html":
-                write_mr_html(results_data, save_path, label, bridge_info=bridge_info)
+                write_mr_html(results_data, save_path, label,
+                              bridge_info=bridge_info,
+                              advanced_filter_state=advanced_filter_state)
                 print(f"已导出: {save_path}")
             elif fmt == "json":
                 # 延迟导入避免循环依赖（GUI 启动时 export_json 尚未加载）

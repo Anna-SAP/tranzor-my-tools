@@ -23,6 +23,7 @@ from export_gui import (
     sanitize_for_filename,
 )
 import task_post_edit as _tpe
+import advanced_filter
 
 
 STRINGS = {
@@ -167,6 +168,14 @@ class ScanTasksTab:
             font=(FONT_FAMILY, 10),
             bg="#0f3460", fg="#ccc", padx=14, pady=3)
         self.btn_scan_reset.pack(side="left")
+
+        # ── Advanced Filters (collapsible) — content-level filter carried into
+        #    the export (HTML pre-fills + auto-applies; Excel/JSON keep only
+        #    matching rows). Shared widget with the MR Pipeline tab. ──
+        self.adv_filter = None
+        if advanced_filter.AdvancedFilterPanel is not None:
+            self.adv_filter = advanced_filter.AdvancedFilterPanel(left, self.app)
+            self.adv_filter.pack(fill="x", pady=(0, 8))
 
         # ── Action bar ──
         action = ttk.Frame(left, style="App.TFrame")
@@ -331,6 +340,8 @@ class ScanTasksTab:
         self.lbl_scan_post_edit_legend.configure(
             text=t("scan_post_edit_legend"),
         )
+        if self.adv_filter is not None:
+            self.adv_filter.refresh_text()
 
         self.lbl_scan_sidebar_title.configure(text=t("scan_sidebar_title"))
         for key in ("total", "completed", "running", "failed"):
@@ -652,16 +663,20 @@ class ScanTasksTab:
         task_name = str(values[1] or "") if values and len(values) > 1 else ""
         fmt = self.scan_fmt_var.get()
         export_type = self.scan_export_type_var.get()
+        # Read Advanced Filters on the main thread (Tk widgets aren't
+        # thread-safe) and hand the snapshot to the worker.
+        adv_state = self.adv_filter.get_state() if self.adv_filter else None
         if IS_MAC:
             self.btn_scan_export.state(["disabled"])
         else:
             self.btn_scan_export.configure(state="disabled")
         self.lbl_scan_status_bar.configure(text=self._t("status_exporting"))
         threading.Thread(target=self._run_export,
-                         args=(task_id, fmt, export_type, task_name),
+                         args=(task_id, fmt, export_type, task_name, adv_state),
                          daemon=True).start()
 
-    def _run_export(self, task_id, fmt, export_type="changes", task_name=""):
+    def _run_export(self, task_id, fmt, export_type="changes", task_name="",
+                    adv_state=None):
         try:
             if export_type == "changes":
                 changes = mr_api.detect_scan_changes(task_id)
@@ -706,9 +721,11 @@ class ScanTasksTab:
             # reveal that exact file in the OS file manager below.
             # 全量翻译 JSON 导出（非 changes）需要每个 key 100% 覆盖目标语言，
             # 启用 fill_missing 做缺失语言补齐；Changes 导出保持稀疏。
+            # adv_state was read on the main thread in _on_export.
             saved = mr_api.save_mr_file(
                 results, filepath, label, fmt, bridge_info=bridge_info,
-                fill_missing=(export_type != "changes")) or filepath
+                fill_missing=(export_type != "changes"),
+                advanced_filter_state=adv_state) or filepath
             basename = os.path.basename(saved)
             self.parent.after(0, lambda b=basename: self.lbl_scan_status_bar.configure(
                 text=self._t("status_saved").format(filename=b)))

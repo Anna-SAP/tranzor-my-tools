@@ -822,6 +822,15 @@ if _ptc_tab_mod is not None:
     except Exception:
         pass
 
+# Merge in strings for the shared Advanced Filters panel (MR Pipeline + Scan
+# Tasks tabs). Best-effort: a missing module just leaves the panel English.
+try:
+    import advanced_filter as _af_mod
+    for _lang_code, _extra in _af_mod.STRINGS.items():
+        STRINGS.setdefault(_lang_code, {}).update(_extra)
+except Exception:
+    pass
+
 
 # ============================================================
 # TextRedirector — forward print() to tkinter Text widget

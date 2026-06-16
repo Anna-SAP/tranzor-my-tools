@@ -21,6 +21,7 @@ a = Analysis(
         'gui_tab_full_translations',
         'gui_tab_human_revisions',
         'gui_tab_scan_tasks',
+        'advanced_filter',  # 共享高级筛选面板（MR Pipeline + Scan Tasks）
         'gui_tab_term_watchtower',
         'gui_tab_tm_context_insight',
         'gui_tab_opus_id_monitor',

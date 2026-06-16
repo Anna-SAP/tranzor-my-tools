@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import export_mr_pipeline as mr_api
 import quality_overview as qa
 import task_post_edit as _tpe
+import advanced_filter
 from export_gui import FONT_FAMILY, IS_MAC, reveal_in_folder, sanitize_for_filename
 from date_picker import attach_calendar
 
@@ -192,6 +193,14 @@ class MRPipelineTab:
             r2, text="", variable=self.mr_post_edit_only_var,
             style="Card.TCheckbutton", command=self._on_post_edit_only_toggle)
         self.chk_mr_post_edit_only.pack(side="left", padx=(12, 0))
+
+        # ── Advanced Filters (collapsible) — content-level filter carried into
+        #    the export (HTML pre-fills + auto-applies; Excel/JSON keep only
+        #    matching rows). See advanced_filter.AdvancedFilterPanel. ──
+        self.adv_filter = None
+        if advanced_filter.AdvancedFilterPanel is not None:
+            self.adv_filter = advanced_filter.AdvancedFilterPanel(left, self.app)
+            self.adv_filter.pack(fill="x", pady=(0, 8))
 
         # ── Action bar (Export + Pagination) — above table for visibility on macOS ──
         action = ttk.Frame(left, style="App.TFrame")
@@ -419,6 +428,8 @@ class MRPipelineTab:
             self.mr_tree.heading(col, text=self._sort_heading_text(col))
         self.lbl_mr_post_edit_legend.configure(text=t("mr_post_edit_legend"))
         self.chk_mr_post_edit_only.configure(text=t("mr_post_edit_only"))
+        if self.adv_filter is not None:
+            self.adv_filter.refresh_text()
 
         self.lbl_mr_sidebar_title.configure(text=t("mr_sidebar_title"))
         for key in ("total", "completed", "failed", "avg_score"):
@@ -1179,16 +1190,20 @@ class MRPipelineTab:
             task_id = None  # Export all tasks
         fmt = self.mr_fmt_var.get()
         export_type = self.mr_export_type_var.get()
+        # Read the Advanced Filters state on the main thread (Tk widgets are
+        # not thread-safe) and hand it to the worker.
+        adv_state = self.adv_filter.get_state() if self.adv_filter else None
         if IS_MAC:
             self.btn_mr_export.state(["disabled"])
         else:
             self.btn_mr_export.configure(state="disabled")
         self.lbl_mr_status_bar.configure(text=self._t("status_exporting"))
         threading.Thread(target=self._run_export,
-                         args=(task_id, fmt, export_type, mr_iid),
+                         args=(task_id, fmt, export_type, mr_iid, adv_state),
                          daemon=True).start()
 
-    def _run_export(self, task_id, fmt, export_type="changes", mr_iid=""):
+    def _run_export(self, task_id, fmt, export_type="changes", mr_iid="",
+                    adv_state=None):
         try:
             if export_type == "changes":
                 if not task_id:
@@ -1238,6 +1253,9 @@ class MRPipelineTab:
             # Route the local bridge port + token into the report so its
             # Send-to-Tranzor button can reach the desktop GUI's HTTP bridge.
             bridge_info = self.app._bridge_info_for_export() if hasattr(self.app, "_bridge_info_for_export") else None
+            # Advanced Filters (content-level) carried into the export: HTML
+            # pre-fills + auto-applies; Excel/JSON pre-filter matching rows.
+            # (adv_state was read on the main thread in _on_export.)
             # Capture the actual saved path so we can both display its basename
             # and reveal it in the OS file manager — otherwise the user sees
             # only "Export complete" with no clue where the JSON / Excel went.
@@ -1245,7 +1263,8 @@ class MRPipelineTab:
             # 启用 fill_missing 做缺失语言补齐；Changes 导出保持稀疏。
             saved = mr_api.save_mr_file(
                 results, filepath, label, fmt, bridge_info=bridge_info,
-                fill_missing=(export_type != "changes")) or filepath
+                fill_missing=(export_type != "changes"),
+                advanced_filter_state=adv_state) or filepath
             basename = os.path.basename(saved)
             self.parent.after(0, lambda b=basename: self.lbl_mr_status_bar.configure(
                 text=self._t("status_saved").format(filename=b)))
