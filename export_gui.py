@@ -426,6 +426,17 @@ except Exception as _ptc_e:  # pragma: no cover
 else:
     _ptc_import_error = None
 
+# 🧬 Same Origin —— 同一 MR 多次触发翻译任务的聚合 + 跨任务一致性差异分析。
+# 仅核心产品；继承 MR Pipeline 的 ✏️ 后期修订标记。纯加法、本地逻辑层
+# (same_origin) 可单测。
+try:
+    import gui_tab_same_origin as _so_tab_mod
+except Exception as _so_e:  # pragma: no cover
+    _so_tab_mod = None
+    _so_import_error = _so_e
+else:
+    _so_import_error = None
+
 _boot_mark("optional_tabs_imported")
 
 # ---------------------------------------------------------------------------
@@ -818,6 +829,14 @@ if _rw_tab_mod is not None:
 if _ptc_tab_mod is not None:
     try:
         for _lang_code, _extra in _ptc_tab_mod.STRINGS.items():
+            STRINGS.setdefault(_lang_code, {}).update(_extra)
+    except Exception:
+        pass
+
+# Merge in strings from the optional Same Origin tab.
+if _so_tab_mod is not None:
+    try:
+        for _lang_code, _extra in _so_tab_mod.STRINGS.items():
             STRINGS.setdefault(_lang_code, {}).update(_extra)
     except Exception:
         pass
@@ -1501,6 +1520,24 @@ class ExportApp:
                 self.opus_search_tab = None
         _boot_mark("tab_opus_search")
 
+        # --- Tab: 🧬 Same Origin (optional, pure additive) ---
+        # 同一 MR 多次触发翻译任务的聚合 + 跨任务一致性差异分析。仅核心产品，
+        # 继承 MR Pipeline 的 ✏️ 后期修订标记。放在最后，避免位移既有 tab 的
+        # 动态索引。
+        self.so_tab = None
+        self._so_tab_index = None
+        self._so_tab_initialized = False
+        if _so_tab_mod is not None:
+            try:
+                tab_so = ttk.Frame(self.notebook, style="App.TFrame")
+                self.notebook.add(tab_so, text="")
+                self.so_tab = _so_tab_mod.SameOriginTab(tab_so, self)
+                self._so_tab_index = self.notebook.index(tab_so)
+            except Exception as _e:
+                print(f"[Same Origin tab] init failed: {_e}")
+                self.so_tab = None
+        _boot_mark("tab_same_origin")
+
         # ═══════════════════════════════════════════
         # TAB 1 CONTENTS (File Translation — preserved)
         # ═══════════════════════════════════════════
@@ -1919,6 +1956,12 @@ class ExportApp:
                 _register_tab_refresh(self.ptc_tab, self._ptc_tab_index)
             except Exception:
                 pass
+        if self.so_tab is not None and self._so_tab_index is not None:
+            try:
+                self.notebook.tab(self._so_tab_index, text=self._t("tab_same_origin"))
+                _register_tab_refresh(self.so_tab, self._so_tab_index)
+            except Exception:
+                pass
 
         # Summary panel texts
         self.lbl_summary_title.configure(text=self._t("summary_title"))
@@ -2249,6 +2292,15 @@ class ExportApp:
                 self._opus_search_tab_initialized = True
                 try:
                     self.opus_search_tab.on_first_show()
+                except Exception:
+                    pass
+            elif (self.so_tab is not None
+                  and self._so_tab_index is not None
+                  and tab_idx == self._so_tab_index
+                  and not self._so_tab_initialized):
+                self._so_tab_initialized = True
+                try:
+                    self.so_tab.on_first_show()
                 except Exception:
                     pass
 
