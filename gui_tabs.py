@@ -1174,18 +1174,54 @@ class MRPipelineTab:
             primary = s.lower()
         return (missing_rank, primary)
 
+    @staticmethod
+    def _build_export_filename(ext, *, mr_iid="", id_tag="", type_tag="",
+                               created="", export_date=""):
+        """Compose the MR Pipeline export filename (HTML / Excel / JSON).
+
+        The date segment must identify *which* translation run the file
+        holds: the same Project/MR is re-translated at different times, so
+        previously two such exports collided in name — only the export date
+        was stamped, and that is identical for every same-day export. We
+        instead stamp the task's Created time (``created``, e.g.
+        ``"2026-06-17 14:42:26"`` → ``"2026-06-17_14-42-26"``), so per-run
+        files stay distinct and human-recognizable down to the second.
+
+        The no-selection "export all" aggregate spans many tasks and has no
+        single Created time, so it falls back to ``export_date``.
+
+        ``mr_iid`` is embedded as ``MR<iid>`` before the task-uuid prefix so
+        the name reads at a glance; ``id_tag`` (uuid prefix or ``all_*``) and
+        ``type_tag`` (``changes`` / ``all``) follow, then the date segment.
+        """
+        date_tag = sanitize_for_filename(created) or sanitize_for_filename(export_date)
+        mr_tag = sanitize_for_filename(f"MR{mr_iid}") if mr_iid else ""
+        parts = ["mr_pipeline"]
+        if mr_tag:
+            parts.append(mr_tag)
+        parts.extend(seg for seg in (id_tag, type_tag, date_tag) if seg)
+        return "_".join(parts) + ext
+
     def _on_export(self):
         sel = self.mr_tree.selection()
         mr_iid = ""
+        mr_created = ""
         if sel:
             tags = self.mr_tree.item(sel[0], "tags")
             task_id = tags[0] if tags else None
-            # tree cols: (idx, project, mr, release, status, avg_score, created, duration)
-            # — pull MR# from the visible row so we can stamp it onto the
-            #   filename without an extra HTTP round-trip.
+            # Pull MR# and the task's Created time straight from the visible
+            # row (no extra HTTP round-trip) so the export filename can be
+            # stamped with both — see _build_export_filename. Indices are
+            # resolved from _MR_COLUMNS so a future column reshuffle can't
+            # silently point these reads at the wrong cell.
             values = self.mr_tree.item(sel[0], "values")
-            if values and len(values) > 2:
-                mr_iid = str(values[2] or "")
+            if values:
+                mr_col = self._MR_COLUMNS.index("mr")
+                created_col = self._MR_COLUMNS.index("created")
+                if len(values) > mr_col:
+                    mr_iid = str(values[mr_col] or "")
+                if len(values) > created_col:
+                    mr_created = str(values[created_col] or "")
         else:
             task_id = None  # Export all tasks
         fmt = self.mr_fmt_var.get()
@@ -1210,11 +1246,11 @@ class MRPipelineTab:
         self.lbl_mr_status_bar.configure(text=self._t("status_exporting"))
         threading.Thread(target=self._run_export,
                          args=(task_id, fmt, export_type, mr_iid, adv_state,
-                               basic_filters),
+                               basic_filters, mr_created),
                          daemon=True).start()
 
     def _run_export(self, task_id, fmt, export_type="changes", mr_iid="",
-                    adv_state=None, basic_filters=None):
+                    adv_state=None, basic_filters=None, mr_created=""):
         try:
             if export_type == "changes":
                 if not task_id:
@@ -1259,18 +1295,19 @@ class MRPipelineTab:
 
             ext = {"xlsx": ".xlsx", "json": ".json"}.get(fmt, ".html")
             today = date.today().isoformat()
-            # Embed MR# (e.g. "MR40273") before the task uuid prefix so the
-            # filename is human-identifiable at a glance; the uuid prefix
-            # stays as a uniqueness guarantee for repeated MR translations.
-            mr_tag = sanitize_for_filename(f"MR{mr_iid}") if mr_iid else ""
-            parts = ["mr_pipeline"]
-            if mr_tag:
-                parts.append(mr_tag)
-            parts.extend([id_tag, type_tag, today])
-            filename = "_".join(parts) + ext
+            # Stamp the selected task's Created time into the filename so
+            # re-translations of the same MR neither collide nor look
+            # identical — the export date alone is the same for every
+            # same-day export. "Export all" (no selection) has no single
+            # Created time and falls back to today's date.
+            filename = self._build_export_filename(
+                ext, mr_iid=mr_iid, id_tag=id_tag, type_tag=type_tag,
+                created=mr_created, export_date=today)
             script_dir = os.path.dirname(os.path.abspath(__file__))
             filepath = os.path.join(script_dir, filename)
-            label = f"MR Pipeline {id_tag} — {type_tag} (exported {today})"
+            created_note = f"created {mr_created}, " if mr_created else ""
+            label = (f"MR Pipeline {id_tag} — {type_tag} "
+                     f"({created_note}exported {today})")
             # Route the local bridge port + token into the report so its
             # Send-to-Tranzor button can reach the desktop GUI's HTTP bridge.
             bridge_info = self.app._bridge_info_for_export() if hasattr(self.app, "_bridge_info_for_export") else None
