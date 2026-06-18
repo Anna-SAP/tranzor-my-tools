@@ -81,6 +81,39 @@ STRINGS = {
 class ScanTasksTab:
     """Builds and manages the Scan Tasks tab content."""
 
+    # Single source of truth for the task-list table columns. ``created``
+    # (the scan task's trigger timestamp) is at index 7 and ``age`` (its
+    # human-readable "N days ago" annotation) at index 8 — kept paired on
+    # purpose. Resolve positional reads via ``.index(...)`` against this so a
+    # future column reshuffle can't silently point them at the wrong cell.
+    _SCAN_COLUMNS = ("idx", "task_name", "project", "base_ref", "head_ref",
+                     "status", "output_mode", "created", "age")
+
+    @staticmethod
+    def _build_export_filename(ext, *, task_name="", id_tag="", type_tag="",
+                               created="", export_date=""):
+        """Compose the Scan Tasks export filename (HTML / Excel / JSON).
+
+        Mirrors ``MRPipelineTab._build_export_filename``: the same scan task
+        can be re-run at different times, so the date segment stamps the
+        task's Created/trigger time (``created``, e.g. ``"2026-06-17
+        14:42:26"`` → ``"2026-06-17_14-42-26"``) rather than only the export
+        date — which is identical for every same-day export — keeping per-run
+        files distinct and human-recognizable. Falls back to ``export_date``
+        when no Created time is available.
+
+        ``task_name`` is embedded before the task-uuid prefix so the name
+        reads at a glance; ``id_tag`` (uuid prefix) and ``type_tag``
+        (``changes`` / ``all``) follow, then the date segment.
+        """
+        date_tag = sanitize_for_filename(created) or sanitize_for_filename(export_date)
+        name = sanitize_for_filename(task_name) if task_name else ""
+        parts = ["scan_task"]
+        if name:
+            parts.append(name)
+        parts.extend(seg for seg in (id_tag, type_tag, date_tag) if seg)
+        return "_".join(parts) + ext
+
     def __init__(self, parent, app):
         self.app = app
         self.parent = parent
@@ -253,8 +286,7 @@ class ScanTasksTab:
         tree_frame = ttk.Frame(left, style="App.TFrame")
         tree_frame.pack(fill="both", expand=True, pady=(0, 6))
 
-        cols = ("idx", "task_name", "project", "base_ref", "head_ref",
-                "status", "output_mode", "created", "age")
+        cols = self._SCAN_COLUMNS
         self.scan_tree = ttk.Treeview(tree_frame, columns=cols, show="headings",
                                        style="Summary.Treeview",
                                        height=14, selectmode="browse")
@@ -334,8 +366,7 @@ class ScanTasksTab:
         self.rb_scan_json.configure(text=t("output_fmt_json"))
         self.btn_scan_refresh.configure(text=t("summary_refresh"))
 
-        for col in ("idx", "task_name", "project", "base_ref", "head_ref",
-                    "status", "output_mode", "created", "age"):
+        for col in self._SCAN_COLUMNS:
             self.scan_tree.heading(col, text=t(f"scan_col_{col}"))
         self.lbl_scan_post_edit_legend.configure(
             text=t("scan_post_edit_legend"),
@@ -656,11 +687,21 @@ class ScanTasksTab:
         task_id = tags[0] if tags else None
         if not task_id:
             return
-        # tree cols: (idx, task_name, project, base_ref, head_ref, status,
-        # output_mode, created) — pull task_name straight from the visible
-        # row so the export filename matches what the user just clicked on.
+        # Pull task_name AND the scan task's Created time straight from the
+        # visible row: the name keeps the filename matching what the user
+        # clicked, the Created time stamps *which run* it is (see
+        # _build_export_filename). Indices resolve from _SCAN_COLUMNS so a
+        # column reshuffle can't silently point these reads at the wrong cell.
         values = self.scan_tree.item(sel[0], "values")
-        task_name = str(values[1] or "") if values and len(values) > 1 else ""
+        task_name = ""
+        scan_created = ""
+        if values:
+            name_col = self._SCAN_COLUMNS.index("task_name")
+            created_col = self._SCAN_COLUMNS.index("created")
+            if len(values) > name_col:
+                task_name = str(values[name_col] or "")
+            if len(values) > created_col:
+                scan_created = str(values[created_col] or "")
         fmt = self.scan_fmt_var.get()
         export_type = self.scan_export_type_var.get()
         # Read Advanced Filters on the main thread (Tk widgets aren't
@@ -672,11 +713,12 @@ class ScanTasksTab:
             self.btn_scan_export.configure(state="disabled")
         self.lbl_scan_status_bar.configure(text=self._t("status_exporting"))
         threading.Thread(target=self._run_export,
-                         args=(task_id, fmt, export_type, task_name, adv_state),
+                         args=(task_id, fmt, export_type, task_name, adv_state,
+                               scan_created),
                          daemon=True).start()
 
     def _run_export(self, task_id, fmt, export_type="changes", task_name="",
-                    adv_state=None):
+                    adv_state=None, scan_created=""):
         try:
             if export_type == "changes":
                 changes = mr_api.detect_scan_changes(task_id)
@@ -690,19 +732,18 @@ class ScanTasksTab:
             id_tag = task_id[:8]
             ext = {"xlsx": ".xlsx", "json": ".json"}.get(fmt, ".html")
             today = date.today().isoformat()
-            # Embed task_name (e.g. "iva 260520" → "iva_260520") before the
-            # uuid prefix so the filename is human-identifiable at a glance;
-            # the uuid prefix stays as a uniqueness guarantee for duplicate
-            # task names on the same day.
-            name_tag = sanitize_for_filename(task_name)
-            parts = ["scan_task"]
-            if name_tag:
-                parts.append(name_tag)
-            parts.extend([id_tag, type_tag, today])
-            filename = "_".join(parts) + ext
+            # Stamp the scan task's Created/trigger time into the filename so
+            # re-runs of the same task neither collide nor look identical —
+            # the export date alone is the same for every same-day export.
+            # Falls back to today's date when no Created time is available.
+            filename = self._build_export_filename(
+                ext, task_name=task_name, id_tag=id_tag, type_tag=type_tag,
+                created=scan_created, export_date=today)
             script_dir = os.path.dirname(os.path.abspath(__file__))
             filepath = os.path.join(script_dir, filename)
-            label = f"Scan Task {id_tag} — {type_tag} (exported {today})"
+            created_note = f"created {scan_created}, " if scan_created else ""
+            label = (f"Scan Task {id_tag} — {type_tag} "
+                     f"({created_note}exported {today})")
             # Stamp scan_task_id so write_mr_html → buildEnvelope →
             # sendToTranzor can route to /static/scans/<id> instead of
             # falling through to the File Translation legacy task URL.

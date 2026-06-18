@@ -28,7 +28,7 @@ import tkinter as tk
 import zlib
 from pathlib import Path
 from tkinter import ttk, filedialog, messagebox, simpledialog
-from datetime import date
+from datetime import date, datetime
 
 try:
     import export_full_translations as _exp
@@ -1370,8 +1370,14 @@ class FullTranslationsTab:
                 "Full Translations", self._t("ft_err_no_selection"))
             return
 
+        # Time-of-day in the default name (not just the date) so two same-day
+        # exports of different product/locale selections don't both default to
+        # the same file and silently overwrite each other. This is an
+        # aggregate over many sources, so there's no single task Created time;
+        # the export instant is the per-run identifier.
+        run_stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
         if mode == "json":
-            default_name = f"MergedTranslations_{date.today().strftime('%Y%m%d')}.json"
+            default_name = f"MergedTranslations_{run_stamp}.json"
             out_path = filedialog.asksaveasfilename(
                 title="Save Merged Translations JSON",
                 defaultextension=".json",
@@ -1379,7 +1385,7 @@ class FullTranslationsTab:
                 initialfile=default_name,
             )
         else:
-            default_name = f"FullTranslations_{date.today().strftime('%Y%m%d')}.zip"
+            default_name = f"FullTranslations_{run_stamp}.zip"
             out_path = filedialog.asksaveasfilename(
                 title="Save Full Translations ZIP",
                 defaultextension=".zip",

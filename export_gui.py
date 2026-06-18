@@ -148,7 +148,7 @@ import webbrowser
 import subprocess
 import tkinter as tk
 from tkinter import ttk, messagebox
-from datetime import date
+from datetime import date, datetime
 
 _boot_mark("stdlib_imports_done")
 
@@ -2577,19 +2577,25 @@ class ExportApp:
             fmt = self.fmt_var.get()
             ext = {"xlsx": ".xlsx", "json": ".json"}.get(fmt, ".html")
             today_str = date.today().isoformat()
+            # Stamp the export instant down to the second (not just the date)
+            # so re-exporting the same task/scope on the same day yields a
+            # distinct, non-overwriting filename. File Translation runs from a
+            # typed Task ID, so there's no per-task Created time to read here —
+            # the export time is the per-run identifier.
+            run_stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
             if export_type == "translations":
                 label = f"All translations (exported {today_str})"
                 if task_id:
-                    filename = f"tranzor_task_{task_id}_translations_{today_str}{ext}"
+                    filename = f"tranzor_task_{task_id}_translations_{run_stamp}{ext}"
                 else:
-                    filename = f"tranzor_all_translations_{today_str}{ext}"
+                    filename = f"tranzor_all_translations_{run_stamp}{ext}"
             else:
                 label = f"All changes (exported {today_str})"
                 if task_id:
-                    filename = f"tranzor_task_{task_id}_{today_str}{ext}"
+                    filename = f"tranzor_task_{task_id}_{run_stamp}{ext}"
                 else:
-                    filename = f"tranzor_all_changes_{today_str}{ext}"
+                    filename = f"tranzor_all_changes_{run_stamp}{ext}"
 
             script_dir = os.path.dirname(os.path.abspath(__file__))
             filepath = os.path.join(script_dir, filename)

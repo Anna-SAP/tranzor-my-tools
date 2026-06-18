@@ -17,8 +17,15 @@ MergedTranslations_*.json
 FullTranslations_*.zip
 scan_task_*.html
 scan_task_*.xlsx
+scan_task_*.json
 mr_pipeline_*.html
 mr_pipeline_*.xlsx
+mr_pipeline_*.json
+# File Translation tab exports (written next to the script). The *.json
+# QA-audit variant wasn't covered before; html/xlsx fall under the globs above.
+tranzor_task_*.json
+tranzor_all_translations_*.json
+tranzor_all_changes_*.json
 
 # node npm lockfile (no package.json in this repo — lockfile is accidental)
 package-lock.json
