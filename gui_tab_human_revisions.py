@@ -16,11 +16,11 @@ import platform
 import threading
 import tkinter as tk
 from tkinter import ttk, filedialog
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import export_mr_pipeline as mr_api
 import terminology_highlight as th
-from export_gui import format_age_days
+from export_gui import format_age_days, sanitize_for_filename
 from date_picker import attach_calendar
 
 # ---------------------------------------------------------------------------
@@ -532,6 +532,19 @@ class HumanRevisionsTab:
         ext_map = {"html": ".html", "markdown": ".md", "both": ".zip"}
         ext = ext_map.get(fmt, ".zip")
 
+        # Default name carries the queried date range (the report's defining
+        # scope) plus the export instant, so exports of different ranges — or
+        # re-exports of the same range — don't all default to the bare
+        # "human_revisions" name and silently overwrite each other.
+        d_from = self.date_from.get().strip()
+        d_to = self.date_to.get().strip()
+        range_tag = sanitize_for_filename(
+            f"{d_from}_to_{d_to}") if (d_from or d_to) else ""
+        run_stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        default_name = "_".join(
+            seg for seg in ("human_revisions", range_tag, run_stamp) if seg
+        ) + ext
+
         save_path = filedialog.asksaveasfilename(
             defaultextension=ext,
             filetypes=[
@@ -540,7 +553,7 @@ class HumanRevisionsTab:
                 ("ZIP files", "*.zip"),
                 ("All files", "*.*"),
             ],
-            initialfile=f"human_revisions{ext}",
+            initialfile=default_name,
         )
         if not save_path:
             return
