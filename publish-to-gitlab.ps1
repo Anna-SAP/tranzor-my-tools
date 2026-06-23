@@ -62,7 +62,7 @@ function Get-LatestArtifact {
     param([string]$Workflow, [string]$ArtifactName)
     Info "Finding latest successful '$Workflow' build on GitHub..."
     $runs = & gh run list --repo $Repo --workflow $Workflow --status success --limit 1 `
-                 --json databaseId, headSha, createdAt | ConvertFrom-Json
+                 --json databaseId,headSha,createdAt | ConvertFrom-Json
     if (-not $runs) { Die "No successful '$Workflow' run found on GitHub." }
     $run  = $runs[0]
     $sha8 = $run.headSha.Substring(0, 8)
