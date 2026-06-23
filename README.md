@@ -16,6 +16,7 @@
 ## Table of contents
 
 - [What is Tranzor Helper?](#what-is-tranzor-helper)
+- [▶ Live demo](#-live-demo)
 - [Screenshots](#screenshots)
 - [How translation work reaches the platform](#how-translation-work-reaches-the-platform)
 - [Feature tour](#feature-tour)
@@ -42,6 +43,16 @@ Tranzor is RingCentral's in-house localization platform — a browser front-end 
 Everything is **read-only** against the platform, and almost every screen paints its first frame from a **local SQLite cache**, so the app opens instantly even with no network.
 
 > **Who it's for.** A translation reviewer / localization PM — an expert in CAT tools (XTM, MemoQ, Trados) and a daily heavy Tranzor user, but with **no programming or command-line background**. The whole product is shaped around "click → select → act," never "open a terminal and remember flags."
+
+---
+
+## ▶ Live demo
+
+Don't want to install anything? A **hosted, interactive demo** of the **MR Pipeline** view runs on GitLab Pages — open it, hit **🔄 Refresh**, and **double-click any row** to inspect a task and jump to its **Tranzor** and **original GitLab MR** links. No clone, build, or run required: the page is fully self-contained and uses synthetic demo data.
+
+🔗 **Open the live demo:** https://REPLACE-AFTER-FIRST-PAGES-DEPLOY.pages.git.ringcentral.com
+
+> _Deploy note (remove once filled): after the first GitLab Pages build finishes, copy the real URL from **Deploy → Pages** in the project sidebar and replace the link above._
 
 ---
 

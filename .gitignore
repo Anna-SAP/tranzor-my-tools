@@ -6,6 +6,7 @@ dist-mac/
 *.xlsx
 *.html
 !tranzor_three_sources_infographic.html
+!public/index.html
 *.spec
 !TranzorExporter.spec
 !TranzorExporter_mac.spec
