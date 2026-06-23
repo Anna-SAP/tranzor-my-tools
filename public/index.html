@@ -1,0 +1,860 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Tranzor Translation Exporter — MR Pipeline</title>
+<style>
+  /* ============================================================
+     THEME TOKENS — dark navy desktop-app palette (from research)
+     ============================================================ */
+  :root {
+    --bg: #0a1530;
+    --panel: #122046;
+    --toolbar: #16224d;
+    --table-header: #1b2c63;
+    --row: #0f1c44;
+    --row-alt: #13204c;
+    --border: #25356b;
+    --text: #e9eefb;
+    --muted: #9fb0d8;
+    --accent-red: #e8455f;
+    --accent-green: #27c07a;
+    --accent-blue: #3b6fd6;
+    --pencil: #f2c94c;
+    --status-completed: #57d08a;
+    --status-failed: #ff6b6b;
+    --status-unknown: #9fb0d8;
+    --post-edit-bg: #3a2e1f;
+    --post-edit-fg: #fde68a;
+    --radius: 10px;
+    --shadow: 0 4px 18px rgba(0,0,0,.35);
+    --font: "Segoe UI", "Helvetica Neue", Roboto, system-ui, -apple-system, Arial, sans-serif;
+    --mono: "Consolas", "Menlo", "SFMono-Regular", monospace;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    font-family: var(--font);
+    background: var(--bg);
+    color: var(--text);
+    font-size: 13px;
+    line-height: 1.4;
+    overflow-x: hidden;
+  }
+  button { font-family: inherit; }
+
+  /* ============================================================
+     HEADER BAR
+     ============================================================ */
+  .header {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 12px 20px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+  }
+  .header .logo { font-size: 24px; }
+  .header .titles { flex: 1; min-width: 0; }
+  .header .title { font-size: 17px; font-weight: 700; letter-spacing: .2px; }
+  .header .subtitle { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .header .right { display: flex; align-items: center; gap: 10px; }
+  .user-pill {
+    display: inline-flex; align-items: center; gap: 7px;
+    background: var(--toolbar); border: 1px solid var(--border);
+    border-radius: 999px; padding: 5px 12px; font-size: 12px;
+  }
+  .user-pill .avatar {
+    width: 20px; height: 20px; border-radius: 50%;
+    background: var(--accent-blue); color: #fff; font-size: 11px;
+    display: inline-flex; align-items: center; justify-content: center; font-weight: 700;
+  }
+  .lang-toggle {
+    background: var(--toolbar); border: 1px solid var(--border);
+    color: var(--text); border-radius: 999px; padding: 5px 12px;
+    cursor: pointer; font-size: 12px;
+  }
+  .lang-toggle:hover { border-color: var(--accent-blue); }
+
+  /* ============================================================
+     TAB STRIP
+     ============================================================ */
+  .tabs {
+    display: flex; gap: 2px; padding: 0 14px;
+    background: var(--panel); border-bottom: 1px solid var(--border);
+    overflow-x: auto; white-space: nowrap;
+  }
+  .tab {
+    padding: 9px 14px; font-size: 12.5px; color: var(--muted);
+    border-bottom: 2px solid transparent; cursor: pointer; user-select: none;
+  }
+  .tab:hover { color: var(--text); }
+  .tab.active {
+    color: var(--text); font-weight: 600;
+    border-bottom-color: var(--accent-red);
+  }
+
+  /* ============================================================
+     FILTER TOOLBAR
+     ============================================================ */
+  .toolbar {
+    background: var(--toolbar);
+    border-bottom: 1px solid var(--border);
+    padding: 10px 16px;
+    display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: flex-end;
+  }
+  .field { display: flex; flex-direction: column; gap: 3px; }
+  .field label {
+    font-size: 10.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px;
+  }
+  .field select, .field input {
+    background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    border-radius: 6px; padding: 6px 9px; font-size: 12.5px; min-width: 120px; outline: none;
+  }
+  .field input { font-family: var(--mono); }
+  .field select:focus, .field input:focus { border-color: var(--accent-blue); }
+  .btn {
+    border: none; border-radius: 6px; padding: 7px 14px; cursor: pointer;
+    font-size: 12.5px; font-weight: 600; transition: filter .15s, transform .08s;
+  }
+  .btn:active { transform: scale(.97); }
+  .btn-search { background: var(--accent-red); color: #fff; }
+  .btn-search:hover { filter: brightness(1.08); }
+  .btn-reset { background: var(--bg); color: var(--text); border: 1px solid var(--border); }
+  .btn-reset:hover { border-color: var(--accent-blue); }
+  .checks { display: flex; gap: 14px; align-items: center; }
+  .checks label { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); cursor: pointer; }
+  .checks input { accent-color: var(--accent-blue); }
+  .adv {
+    background: none; border: none; color: var(--accent-blue);
+    cursor: pointer; font-size: 12px; font-weight: 600;
+  }
+  .adv:hover { text-decoration: underline; }
+
+  /* ============================================================
+     ACTION ROW
+     ============================================================ */
+  .action-row {
+    display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center;
+    padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--panel);
+  }
+  .btn-export { background: var(--accent-green); color: #07251a; }
+  .btn-export:hover { filter: brightness(1.06); }
+  .btn-refresh {
+    background: var(--accent-blue); color: #fff;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .btn-refresh:hover { filter: brightness(1.08); }
+  .radio-group { display: flex; align-items: center; gap: 12px; }
+  .radio-group .grp-label { font-size: 10.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; }
+  .radio-group label { display: inline-flex; align-items: center; gap: 5px; font-size: 12.5px; cursor: pointer; }
+  .radio-group input { accent-color: var(--accent-green); }
+  .pager { margin-left: auto; font-size: 12.5px; color: var(--muted); font-family: var(--mono); }
+
+  /* legend */
+  .legend { padding: 7px 16px; font-size: 12px; color: var(--muted); background: var(--bg); border-bottom: 1px solid var(--border); }
+  .legend .pencil { color: var(--pencil); }
+
+  /* ============================================================
+     MAIN LAYOUT — table + sidebar
+     ============================================================ */
+  .main {
+    display: grid; grid-template-columns: 1fr 300px; gap: 16px;
+    padding: 16px; align-items: start;
+  }
+  .table-wrap {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: var(--radius); overflow: hidden; box-shadow: var(--shadow);
+  }
+  table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+  thead th {
+    background: var(--table-header); color: var(--text); text-align: left;
+    padding: 9px 10px; font-weight: 600; white-space: nowrap;
+    border-bottom: 1px solid var(--border); position: sticky; top: 0;
+  }
+  tbody td { padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  tbody tr { background: var(--row); cursor: pointer; outline: none; }
+  tbody tr:nth-child(even) { background: var(--row-alt); }
+  tbody tr:hover { background: #1a2a5e; }
+  tbody tr:focus-visible { box-shadow: inset 0 0 0 2px var(--accent-blue); }
+  .col-idx { color: var(--muted); text-align: center; width: 38px; }
+  .col-mr { font-family: var(--mono); color: var(--accent-blue); }
+  .col-strings, .col-score, .col-dur { text-align: center; }
+  .col-score { font-weight: 700; }
+  .project-cell { font-weight: 500; }
+  .pencil-tag { color: var(--pencil); margin-right: 4px; }
+  .status-pill {
+    display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 11.5px; font-weight: 600;
+  }
+  .status-completed { background: rgba(87,208,138,.16); color: var(--status-completed); }
+  .status-failed { background: rgba(255,107,107,.16); color: var(--status-failed); }
+  .status-unknown { background: rgba(159,176,216,.14); color: var(--status-unknown); }
+  .score-high { color: var(--status-completed); }
+  .score-mid { color: var(--pencil); }
+  .score-low { color: var(--status-failed); }
+  .score-na { color: var(--muted); font-weight: 400; }
+
+  @keyframes fadeInRow {
+    from { background: rgba(59,111,214,.35); opacity: .2; }
+    to { opacity: 1; }
+  }
+  tr.new-row { animation: fadeInRow .9s ease; }
+
+  /* ============================================================
+     SIDEBAR
+     ============================================================ */
+  .sidebar { display: flex; flex-direction: column; gap: 16px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden;
+  }
+  .card h3 {
+    font-size: 13px; padding: 11px 14px; background: var(--toolbar);
+    border-bottom: 1px solid var(--border); font-weight: 600;
+  }
+  .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--border); }
+  .stat { background: var(--panel); padding: 14px 10px; text-align: center; }
+  .stat .val { font-size: 22px; font-weight: 700; }
+  .stat .lbl { font-size: 10.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; margin-top: 3px; }
+  .stat.completed .val { color: var(--status-completed); }
+  .stat.failed .val { color: var(--status-failed); }
+  .stat.score .val { color: var(--accent-blue); }
+  .recent-list { padding: 6px 0; }
+  .recent-item {
+    display: flex; justify-content: space-between; gap: 8px;
+    padding: 8px 14px; font-size: 12px; border-bottom: 1px solid var(--border);
+  }
+  .recent-item:last-child { border-bottom: none; }
+  .recent-item .proj { font-family: var(--mono); color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .recent-item .added { color: var(--muted); white-space: nowrap; }
+
+  .demo-badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: rgba(242,201,76,.12); color: var(--pencil);
+    border: 1px solid rgba(242,201,76,.4); border-radius: 999px;
+    padding: 4px 11px; font-size: 11px; margin: 0 16px 4px;
+  }
+
+  /* footer */
+  .footer {
+    padding: 14px 16px 22px; font-size: 11.5px; color: var(--muted);
+    text-align: center; border-top: 1px solid var(--border);
+  }
+  .footer a { color: var(--accent-blue); text-decoration: none; }
+  .footer a:hover { text-decoration: underline; }
+
+  /* ============================================================
+     LOADING OVERLAY
+     ============================================================ */
+  .loading-overlay {
+    position: fixed; inset: 0; background: rgba(10,21,48,.6);
+    display: none; align-items: center; justify-content: center; z-index: 500;
+    backdrop-filter: blur(2px);
+  }
+  .loading-overlay.show { display: flex; }
+  .spinner {
+    width: 38px; height: 38px; border: 4px solid var(--border);
+    border-top-color: var(--accent-blue); border-radius: 50%;
+    animation: spin .8s linear infinite;
+  }
+  .loading-box { display: flex; flex-direction: column; align-items: center; gap: 12px; color: var(--text); }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ============================================================
+     MODAL
+     ============================================================ */
+  .modal-overlay {
+    position: fixed; inset: 0; background: rgba(5,10,26,.7);
+    display: none; align-items: center; justify-content: center; z-index: 1000; padding: 20px;
+  }
+  .modal-overlay.show { display: flex; }
+  .modal {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; box-shadow: 0 12px 50px rgba(0,0,0,.6);
+    width: 100%; max-width: 540px; max-height: 88vh; overflow-y: auto;
+  }
+  .modal-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 16px 20px; border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; background: var(--panel);
+  }
+  .modal-head h2 { font-size: 16px; font-weight: 700; }
+  .modal-close {
+    background: none; border: none; color: var(--muted); font-size: 22px;
+    cursor: pointer; line-height: 1; padding: 0 4px;
+  }
+  .modal-close:hover { color: var(--text); }
+  .modal-body { padding: 18px 20px; }
+  .param-grid { display: grid; grid-template-columns: 130px 1fr; gap: 9px 14px; font-size: 13px; }
+  .param-grid dt { color: var(--muted); }
+  .param-grid dd { color: var(--text); font-family: var(--mono); word-break: break-word; }
+  .lang-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+  .lang-chip {
+    background: var(--toolbar); border: 1px solid var(--border);
+    border-radius: 5px; padding: 2px 8px; font-size: 11.5px; font-family: var(--mono);
+  }
+  .modal-links { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 20px; }
+  .link-btn {
+    flex: 1; min-width: 200px; text-align: center; text-decoration: none;
+    padding: 10px 14px; border-radius: 8px; font-size: 12.5px; font-weight: 600;
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  }
+  .link-tranzor { background: var(--accent-blue); color: #fff; }
+  .link-tranzor:hover { filter: brightness(1.08); }
+  .link-gitlab { background: var(--toolbar); color: var(--text); border: 1px solid var(--border); }
+  .link-gitlab:hover { border-color: var(--accent-blue); }
+
+  /* ============================================================
+     RESPONSIVE
+     ============================================================ */
+  @media (max-width: 1080px) {
+    .main { grid-template-columns: 1fr; }
+    .sidebar { flex-direction: row; flex-wrap: wrap; }
+    .card { flex: 1; min-width: 260px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    tr.new-row { animation: none; }
+    .spinner { animation: none; }
+  }
+</style>
+</head>
+<body>
+
+  <!-- ===================== HEADER ===================== -->
+  <header class="header">
+    <span class="logo" aria-hidden="true">🌐</span>
+    <div class="titles">
+      <div class="title">Tranzor Translation Exporter</div>
+      <div class="subtitle">Export translation changes or all translations — HTML / Excel / TMX</div>
+    </div>
+    <div class="right">
+      <span class="user-pill"><span class="avatar">A</span> anna.su</span>
+      <button class="lang-toggle" id="langToggle" type="button">中文 / EN</button>
+    </div>
+  </header>
+
+  <!-- ===================== TABS ===================== -->
+  <nav class="tabs" aria-label="Tranzor tabs">
+    <div class="tab">File Translation</div>
+    <div class="tab active" aria-current="page">MR Pipeline</div>
+    <div class="tab">Quality Overview</div>
+    <div class="tab">Full Translation</div>
+    <div class="tab">Human Revision</div>
+    <div class="tab">Scan Tasks</div>
+    <div class="tab">Term Watchtower</div>
+    <div class="tab">TM &amp; Context</div>
+    <div class="tab">OPUS ID Monitor</div>
+    <div class="tab">Tranzor Check</div>
+    <div class="tab">Review Worklist</div>
+    <div class="tab">Same Origin</div>
+  </nav>
+
+  <!-- ===================== FILTER TOOLBAR ===================== -->
+  <div class="toolbar">
+    <div class="field">
+      <label for="f-project">Project</label>
+      <select id="f-project">
+        <option>web/web</option>
+        <option>web/bui</option>
+        <option>Fiji/Fiji</option>
+        <option>admin-web/frontend</option>
+        <option>common/uns</option>
+        <option>platform/i18n</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="f-release">Release</label>
+      <select id="f-release">
+        <option>All</option>
+        <option>Release 26.3.2</option>
+        <option>Jupiter Web 26.3.1</option>
+        <option>BUI 26.3.1</option>
+        <option>Nova 26.3.110</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="f-status">Status</label>
+      <select id="f-status">
+        <option>All</option>
+        <option>completed</option>
+        <option>failed</option>
+        <option>running</option>
+        <option>skipped</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="f-mr">MR#</label>
+      <input id="f-mr" type="text" placeholder="40258" />
+    </div>
+    <div class="field">
+      <label for="f-task">Task ID</label>
+      <input id="f-task" type="text" placeholder="bfcd180b…" />
+    </div>
+    <div class="field">
+      <label for="f-date">Date range</label>
+      <input id="f-date" type="text" placeholder="last 24h" />
+    </div>
+    <button class="btn btn-search" id="btnSearch" type="button">🔍 Search</button>
+    <button class="btn btn-reset" type="button">Reset</button>
+    <div class="checks">
+      <label><input type="checkbox" checked /> Hide empty MRs</label>
+      <label><input type="checkbox" /> Post-edited only</label>
+    </div>
+    <button class="adv" type="button">Advanced Filters ▾</button>
+  </div>
+
+  <!-- ===================== ACTION ROW ===================== -->
+  <div class="action-row">
+    <button class="btn btn-export" type="button">⬇ Export Selected</button>
+    <div class="radio-group">
+      <span class="grp-label">Export Type</span>
+      <label><input type="radio" name="etype" /> Changes</label>
+      <label><input type="radio" name="etype" checked /> All Translations</label>
+    </div>
+    <div class="radio-group">
+      <span class="grp-label">Output Format</span>
+      <label><input type="radio" name="ofmt" checked /> HTML</label>
+      <label><input type="radio" name="ofmt" /> Excel</label>
+      <label><input type="radio" name="ofmt" /> JSON for QA Audit</label>
+    </div>
+    <button class="btn btn-refresh" id="btnRefresh" type="button">🔄 Refresh</button>
+    <span class="pager" id="pager">1 / 1 (0)</span>
+  </div>
+
+  <div class="legend">
+    <span class="pencil">✏️</span> = MR contains at least one human-edited translation (post-edit)
+  </div>
+
+  <span class="demo-badge" title="This page uses synthetic data for demonstration">● Demo · synthetic data</span>
+
+  <!-- ===================== MAIN ===================== -->
+  <div class="main">
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th class="col-idx">#</th>
+            <th>Project</th>
+            <th>MR#</th>
+            <th>Release</th>
+            <th>Status</th>
+            <th class="col-strings">en-US Strings</th>
+            <th class="col-score">Avg Score</th>
+            <th>Created</th>
+            <th class="col-dur">Duration</th>
+          </tr>
+        </thead>
+        <tbody id="tbody"><!-- rows injected on load --></tbody>
+      </table>
+    </div>
+
+    <aside class="sidebar">
+      <div class="card">
+        <h3>📊 MR Pipeline Stats</h3>
+        <div class="stats-grid">
+          <div class="stat total"><div class="val" id="stat-total">0</div><div class="lbl">Total Tasks</div></div>
+          <div class="stat completed"><div class="val" id="stat-completed">0</div><div class="lbl">Completed</div></div>
+          <div class="stat failed"><div class="val" id="stat-failed">0</div><div class="lbl">Failed</div></div>
+          <div class="stat score"><div class="val" id="stat-score">—</div><div class="lbl">Avg Score</div></div>
+        </div>
+      </div>
+      <div class="card">
+        <h3>🆕 Recently Added Projects</h3>
+        <div class="recent-list" id="recentList"></div>
+      </div>
+    </aside>
+  </div>
+
+  <!-- ===================== FOOTER ===================== -->
+  <footer class="footer">
+    Hosted demo of the <strong>Tranzor Helper</strong> toolkit · MR Pipeline view ·
+    <a href="https://git.ringcentral.com/rc-ai-learning/annasu-tranzor-helper" target="_blank" rel="noopener">view repository ↗</a>
+  </footer>
+
+  <!-- ===================== LOADING OVERLAY ===================== -->
+  <div class="loading-overlay" id="loadingOverlay" aria-hidden="true">
+    <div class="loading-box">
+      <div class="spinner"></div>
+      <div>Loading…</div>
+    </div>
+  </div>
+
+  <!-- ===================== MODAL ===================== -->
+  <div class="modal-overlay" id="modalOverlay" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <div class="modal">
+      <div class="modal-head">
+        <h2 id="modalTitle">Task Details</h2>
+        <button class="modal-close" id="modalClose" type="button" aria-label="Close dialog">✕</button>
+      </div>
+      <div class="modal-body" id="modalBody"></div>
+    </div>
+  </div>
+
+<script>
+(function () {
+  "use strict";
+
+  /* ============================================================
+     SYNTHETIC DATA GENERATION
+     ============================================================ */
+  var PROJECTS = [
+    "web/web", "web/bui", "Fiji/Fiji", "admin-web/frontend",
+    "copilot-platform/nova/nova-studio", "common/uns",
+    "engage-voice/frontend/engage-ui", "platform/i18n", "web/cic"
+  ];
+  var RELEASES = [
+    "Release 26.3.2", "Jupiter Web 26.3.1", "BUI 26.3.1",
+    "Nova 26.3.110", "unknown", "Release 26.3.2", "Jupiter Web 26.3.1"
+  ];
+  var STATUSES = ["completed", "completed", "completed", "completed",
+                  "completed", "failed", "unknown"];
+  var LANGS = ["de-DE", "fr-FR", "ja-JP", "es-ES", "zh-CN", "it-IT", "pt-BR", "ko-KR", "nl-NL"];
+
+  var GITLAB_BASE = "https://git.ringcentral.com";
+  var TRANZOR_BASE = "https://tranzor.ringcentral.com";
+
+  function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
+  function randInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
+
+  // RFC4122-ish synthetic UUID (no network, just Math.random)
+  function uuid() {
+    return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, function (c) {
+      var r = (Math.random() * 16) | 0;
+      var v = c === "x" ? r : (r & 0x3) | 0x8;
+      return v.toString(16);
+    });
+  }
+
+  function fmtDuration() {
+    var roll = Math.random();
+    if (roll < 0.3) return randInt(12, 59) + "s";
+    var m = randInt(1, 6);
+    var s = randInt(0, 59);
+    return m + "m" + (s < 10 ? "0" + s : s) + "s";
+  }
+
+  // build one task created within the last ~24h
+  function makeTask(createdAtMs) {
+    var status = pick(STATUSES);
+    var post = Math.random() < 0.3;
+    var hasScore = Math.random() < 0.4 && status === "completed";
+    var langCount = randInt(2, 5);
+    var langs = [];
+    var pool = LANGS.slice();
+    for (var i = 0; i < langCount && pool.length; i++) {
+      langs.push(pool.splice(Math.floor(Math.random() * pool.length), 1)[0]);
+    }
+    return {
+      id: uuid(),
+      project: pick(PROJECTS),
+      mr: randInt(30000, 49999),
+      release: pick(RELEASES),
+      status: status,
+      strings: randInt(1, 30),
+      score: hasScore ? (90 + Math.random() * 9.9) : null,
+      createdAt: createdAtMs || (Date.now() - randInt(0, 24 * 3600 * 1000)),
+      duration: fmtDuration(),
+      postEdit: post,
+      langs: langs,
+      jira: Math.random() < 0.5 ? "RCC-" + randInt(10000, 19999) : ""
+    };
+  }
+
+  function generateTasks(n) {
+    var out = [];
+    for (var i = 0; i < n; i++) out.push(makeTask());
+    // newest first
+    out.sort(function (a, b) { return b.createdAt - a.createdAt; });
+    return out;
+  }
+
+  /* ============================================================
+     STATE
+     ============================================================ */
+  var tasks = [];
+  var totalEverAdded = 0;        // monotonic Total Tasks counter
+  var liveTimer = null;
+  var tickCount = 0;
+  var lastFocused = null;
+
+  /* ============================================================
+     RENDER HELPERS
+     ============================================================ */
+  function relTime(ms) {
+    var diff = Date.now() - ms;
+    var s = Math.floor(diff / 1000);
+    if (s < 60) return s + "s ago";
+    var m = Math.floor(s / 60);
+    if (m < 60) return m + "m ago";
+    var h = Math.floor(m / 60);
+    if (h < 24) return h + "h ago";
+    return Math.floor(h / 24) + "d ago";
+  }
+
+  function statusPill(status) {
+    var cls = status === "completed" ? "status-completed"
+            : status === "failed" ? "status-failed" : "status-unknown";
+    return '<span class="status-pill ' + cls + '">' + status + "</span>";
+  }
+
+  function scoreCell(score) {
+    if (score == null) return '<span class="score-na">—</span>';
+    var cls = score >= 95 ? "score-high" : score >= 80 ? "score-mid" : "score-low";
+    return '<span class="' + cls + '">' + score.toFixed(1) + "</span>";
+  }
+
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+
+  function rowHtml(t, idx, isNew) {
+    var pencil = t.postEdit ? '<span class="pencil-tag" title="post-edited">✏️</span>' : "";
+    return '<tr tabindex="0" role="button" class="' + (isNew ? "new-row" : "") +
+      '" data-id="' + t.id + '" aria-label="Task ' + esc(t.project) + " MR " + t.mr + '">' +
+      '<td class="col-idx">' + idx + "</td>" +
+      '<td class="project-cell">' + pencil + esc(t.project) + "</td>" +
+      '<td class="col-mr">!' + t.mr + "</td>" +
+      "<td>" + esc(t.release) + "</td>" +
+      "<td>" + statusPill(t.status) + "</td>" +
+      '<td class="col-strings">' + t.strings + "</td>" +
+      '<td class="col-score">' + scoreCell(t.score) + "</td>" +
+      '<td class="col-created" data-created="' + t.createdAt + '">' + relTime(t.createdAt) + "</td>" +
+      '<td class="col-dur">' + esc(t.duration) + "</td>" +
+      "</tr>";
+  }
+
+  function renderTable() {
+    var tbody = document.getElementById("tbody");
+    var html = "";
+    for (var i = 0; i < tasks.length; i++) {
+      html += rowHtml(tasks[i], i + 1, false);
+    }
+    tbody.innerHTML = html;
+  }
+
+  function renderStats() {
+    var completed = 0, failed = 0, scoreSum = 0, scoreCount = 0;
+    for (var i = 0; i < tasks.length; i++) {
+      if (tasks[i].status === "completed") completed++;
+      if (tasks[i].status === "failed") failed++;
+      if (tasks[i].score != null) { scoreSum += tasks[i].score; scoreCount++; }
+    }
+    document.getElementById("stat-total").textContent = totalEverAdded;
+    document.getElementById("stat-completed").textContent = completed;
+    document.getElementById("stat-failed").textContent = failed;
+    document.getElementById("stat-score").textContent =
+      scoreCount ? (scoreSum / scoreCount).toFixed(1) : "—";
+  }
+
+  function renderPager() {
+    document.getElementById("pager").textContent = "1 / 1 (" + tasks.length + ")";
+  }
+
+  function renderRecent() {
+    var list = document.getElementById("recentList");
+    // take a few distinct projects from the freshest tasks
+    var seen = {}, items = [];
+    for (var i = 0; i < tasks.length && items.length < 6; i++) {
+      var p = tasks[i].project;
+      if (!seen[p]) { seen[p] = true; items.push(tasks[i]); }
+    }
+    var html = "";
+    for (var j = 0; j < items.length; j++) {
+      html += '<div class="recent-item"><span class="proj">' + esc(items[j].project) +
+        '</span><span class="added">Added ' + relTime(items[j].createdAt) + "</span></div>";
+    }
+    list.innerHTML = html;
+  }
+
+  function renderAll() {
+    renderTable();
+    renderStats();
+    renderPager();
+    renderRecent();
+  }
+
+  /* ============================================================
+     LIVE UPDATES — relative times + occasional new row
+     ============================================================ */
+  function updateRelativeTimes() {
+    var cells = document.querySelectorAll(".col-created");
+    for (var i = 0; i < cells.length; i++) {
+      var ms = parseInt(cells[i].getAttribute("data-created"), 10);
+      cells[i].textContent = relTime(ms);
+    }
+    var recents = document.querySelectorAll("#recentList .added");
+    // recent list re-render is cheap; just refresh it
+    renderRecent();
+  }
+
+  function prependNewTask() {
+    var t = makeTask(Date.now());
+    tasks.unshift(t);
+    if (tasks.length > 40) tasks.pop(); // keep it light
+    totalEverAdded++;
+    // rebuild table but mark the first row as new for the fade-in
+    var tbody = document.getElementById("tbody");
+    var html = "";
+    for (var i = 0; i < tasks.length; i++) {
+      html += rowHtml(tasks[i], i + 1, i === 0);
+    }
+    tbody.innerHTML = html;
+    renderStats();
+    renderPager();
+    renderRecent();
+  }
+
+  function startLive() {
+    if (liveTimer) return;
+    liveTimer = setInterval(function () {
+      tickCount++;
+      updateRelativeTimes();
+      // every 3rd tick, add a brand-new task
+      if (tickCount % 3 === 0) prependNewTask();
+    }, 4000);
+  }
+  function stopLive() {
+    if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
+  }
+
+  /* ============================================================
+     REFRESH
+     ============================================================ */
+  function doRefresh() {
+    var overlay = document.getElementById("loadingOverlay");
+    overlay.classList.add("show");
+    stopLive();
+    setTimeout(function () {
+      var n = randInt(16, 20);
+      tasks = generateTasks(n);
+      totalEverAdded = n + randInt(0, 12); // simulate historical total
+      renderAll();
+      overlay.classList.remove("show");
+      startLive();
+    }, 400);
+  }
+
+  /* ============================================================
+     MODAL
+     ============================================================ */
+  function openModal(task) {
+    lastFocused = document.activeElement;
+    var overlay = document.getElementById("modalOverlay");
+    document.getElementById("modalTitle").textContent =
+      (task.postEdit ? "✏️ " : "") + task.project + " · MR !" + task.mr;
+
+    var mrUrl = GITLAB_BASE + "/" + task.project + "/-/merge_requests/" + task.mr;
+    var tranzorUrl = TRANZOR_BASE + "/tasks/" + task.id;
+    var langChips = task.langs.map(function (l) {
+      return '<span class="lang-chip">' + esc(l) + "</span>";
+    }).join("");
+
+    document.getElementById("modalBody").innerHTML =
+      '<dl class="param-grid">' +
+        "<dt>Project</dt><dd>" + esc(task.project) + "</dd>" +
+        "<dt>MR#</dt><dd>!" + task.mr + "</dd>" +
+        "<dt>Release</dt><dd>" + esc(task.release) + "</dd>" +
+        "<dt>Status</dt><dd>" + statusPill(task.status) + "</dd>" +
+        "<dt>en-US Strings</dt><dd>" + task.strings + "</dd>" +
+        "<dt>Avg Score</dt><dd>" + (task.score == null ? "—" : task.score.toFixed(2)) + "</dd>" +
+        "<dt>Created</dt><dd>" + new Date(task.createdAt).toISOString().slice(0, 19) + "</dd>" +
+        "<dt>Duration</dt><dd>" + esc(task.duration) + "</dd>" +
+        "<dt>Post-edit</dt><dd>" + (task.postEdit ? "Yes ✏️" : "No") + "</dd>" +
+        "<dt>Task ID</dt><dd>" + esc(task.id) + "</dd>" +
+        (task.jira ? "<dt>JIRA</dt><dd>" + esc(task.jira) + "</dd>" : "") +
+        '<dt>Target Languages</dt><dd><div class="lang-chips">' + langChips + "</div></dd>" +
+      "</dl>" +
+      '<div class="modal-links">' +
+        '<a class="link-btn link-tranzor" href="' + esc(tranzorUrl) + '" target="_blank" rel="noopener">在 Tranzor 中打开翻译任务 ↗</a>' +
+        '<a class="link-btn link-gitlab" href="' + esc(mrUrl) + '" target="_blank" rel="noopener">查看原始 GitLab MR ↗</a>' +
+      "</div>";
+
+    overlay.classList.add("show");
+    overlay.setAttribute("aria-hidden", "false");
+    stopLive(); // pause live updates while modal is open
+    document.getElementById("modalClose").focus();
+  }
+
+  function closeModal() {
+    var overlay = document.getElementById("modalOverlay");
+    overlay.classList.remove("show");
+    overlay.setAttribute("aria-hidden", "true");
+    startLive();
+    if (lastFocused && typeof lastFocused.focus === "function") lastFocused.focus();
+  }
+
+  function findTaskById(id) {
+    for (var i = 0; i < tasks.length; i++) if (tasks[i].id === id) return tasks[i];
+    return null;
+  }
+
+  /* ============================================================
+     EVENT WIRING
+     ============================================================ */
+  function wireEvents() {
+    var tbody = document.getElementById("tbody");
+
+    // double-click a row → modal
+    tbody.addEventListener("dblclick", function (e) {
+      var tr = e.target.closest("tr");
+      if (!tr) return;
+      var t = findTaskById(tr.getAttribute("data-id"));
+      if (t) openModal(t);
+    });
+
+    // keyboard: Enter / Space on a focused row
+    tbody.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" || e.key === " ") {
+        var tr = e.target.closest("tr");
+        if (!tr) return;
+        e.preventDefault();
+        var t = findTaskById(tr.getAttribute("data-id"));
+        if (t) openModal(t);
+      }
+    });
+
+    document.getElementById("modalClose").addEventListener("click", closeModal);
+    document.getElementById("modalOverlay").addEventListener("click", function (e) {
+      if (e.target === this) closeModal();
+    });
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape" &&
+          document.getElementById("modalOverlay").classList.contains("show")) {
+        closeModal();
+      }
+    });
+
+    document.getElementById("btnRefresh").addEventListener("click", doRefresh);
+    document.getElementById("btnSearch").addEventListener("click", doRefresh);
+
+    document.getElementById("langToggle").addEventListener("click", function () {
+      // cosmetic toggle
+      this.textContent = this.textContent.indexOf("中文 /") === 0 ? "EN / 中文" : "中文 / EN";
+    });
+  }
+
+  /* ============================================================
+     INIT — synchronous first paint (no setTimeout gating)
+     ============================================================ */
+  function init() {
+    var n = 18;
+    tasks = generateTasks(n);
+    totalEverAdded = n + randInt(4, 14);
+    renderAll();
+    wireEvents();
+    startLive();
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", init);
+  } else {
+    init();
+  }
+})();
+</script>
+</body>
+</html>
