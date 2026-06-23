@@ -44,6 +44,9 @@ function Die($m)  { Write-Host "ERROR: $m" -ForegroundColor Red; exit 1 }
 if (-not $GitLabToken) {
     Die "No GitLab token. Run first:  `$env:GITLAB_TOKEN = 'glpat-...'   (needs the 'api' scope)"
 }
+if ($GitLabToken -match '[^\x20-\x7E]') {
+    Die "GITLAB_TOKEN contains non-ASCII characters — that looks like placeholder text, not a real token. Set it to your actual GitLab token (a long all-ASCII string with the 'api' scope), e.g.  `$env:GITLAB_TOKEN = 'glpat-AbC123...'"
+}
 if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
     Die "GitHub CLI 'gh' not found. Install it and run 'gh auth login'."
 }
