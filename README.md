@@ -50,9 +50,7 @@ Everything is **read-only** against the platform, and almost every screen paints
 
 Don't want to install anything? A **hosted, interactive demo** of the **MR Pipeline** view runs on GitLab Pages — open it, hit **🔄 Refresh**, and **double-click any row** to inspect a task and jump to its **Tranzor** and **original GitLab MR** links. No clone, build, or run required: the page is fully self-contained and uses synthetic demo data.
 
-🔗 **Open the live demo:** https://REPLACE-AFTER-FIRST-PAGES-DEPLOY.pages.git.ringcentral.com
-
-> _Deploy note (remove once filled): after the first GitLab Pages build finishes, copy the real URL from **Deploy → Pages** in the project sidebar and replace the link above._
+🔗 **Open the live demo:** http://annasu-tranzor-helper-d30d1d.pages.git.ringcentral.com
 
 ---
 
