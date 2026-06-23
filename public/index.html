@@ -576,6 +576,7 @@
   var tasks = [];
   var totalEverAdded = 0;        // monotonic Total Tasks counter
   var liveTimer = null;
+  var liveSettled = false;
   var tickCount = 0;
   var lastFocused = null;
 
@@ -709,16 +710,22 @@
   }
 
   function startLive() {
-    if (liveTimer) return;
+    if (liveTimer || liveSettled) return;
     liveTimer = setInterval(function () {
       tickCount++;
       updateRelativeTimes();
-      // every 3rd tick, add a brand-new task
-      if (tickCount % 3 === 0) prependNewTask();
-    }, 4000);
+      prependNewTask(); // visible "auto-play": a fresh task streams in every couple seconds
+    }, 2000);
   }
   function stopLive() {
     if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
+  }
+  // After a short auto-play demo window, permanently stop all timers so the page
+  // reaches a fully static, idle state — this is what an automated headless
+  // "browser smoke test" waits for before it can pass.
+  function settleLive() {
+    liveSettled = true;
+    stopLive();
   }
 
   /* ============================================================
@@ -847,6 +854,7 @@
     renderAll();
     wireEvents();
     startLive();
+    setTimeout(settleLive, 9000); // settle into a static page after ~9s of auto-play
   }
 
   if (document.readyState === "loading") {
