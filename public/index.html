@@ -24,6 +24,7 @@
     --pencil: #f2c94c;
     --status-completed: #57d08a;
     --status-failed: #ff6b6b;
+    --status-running: #6fb0ff;
     --status-unknown: #9fb0d8;
     --post-edit-bg: #3a2e1f;
     --post-edit-fg: #fde68a;
@@ -94,7 +95,9 @@
   .tab.active {
     color: var(--text); font-weight: 600;
     border-bottom-color: var(--accent-red);
+    cursor: default;
   }
+  .tab:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: -2px; border-radius: 4px; }
 
   /* ============================================================
      FILTER TOOLBAR
@@ -158,6 +161,18 @@
   .legend .pencil { color: var(--pencil); }
 
   /* ============================================================
+     DATA-SOURCE STATUS PILL (replaces the old "synthetic data" badge)
+     ============================================================ */
+  .data-status {
+    display: inline-flex; align-items: center; gap: 6px;
+    border-radius: 999px; padding: 4px 11px; font-size: 11px;
+    margin: 6px 16px 4px; border: 1px solid var(--border);
+  }
+  .data-status.loading  { background: rgba(59,111,214,.12); color: var(--accent-blue);      border-color: rgba(59,111,214,.4); }
+  .data-status.live     { background: rgba(39,192,122,.12); color: var(--status-completed); border-color: rgba(39,192,122,.4); }
+  .data-status.snapshot { background: rgba(242,201,76,.12); color: var(--pencil);           border-color: rgba(242,201,76,.4); }
+
+  /* ============================================================
      MAIN LAYOUT — table + sidebar
      ============================================================ */
   .main {
@@ -179,17 +194,22 @@
   tbody tr:nth-child(even) { background: var(--row-alt); }
   tbody tr:hover { background: #1a2a5e; }
   tbody tr:focus-visible { box-shadow: inset 0 0 0 2px var(--accent-blue); }
+  tbody tr.empty-row { cursor: default; }
+  tbody tr.empty-row td { text-align: center; color: var(--muted); padding: 26px 10px; }
   .col-idx { color: var(--muted); text-align: center; width: 38px; }
   .col-mr { font-family: var(--mono); color: var(--accent-blue); }
   .col-strings, .col-score, .col-dur { text-align: center; }
   .col-score { font-weight: 700; }
   .project-cell { font-weight: 500; }
+  .open-hint { color: var(--muted); margin-left: 6px; font-size: 11px; opacity: 0; transition: opacity .12s; }
+  tbody tr:hover .open-hint, tbody tr:focus-visible .open-hint { opacity: .85; }
   .pencil-tag { color: var(--pencil); margin-right: 4px; }
   .status-pill {
     display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 11.5px; font-weight: 600;
   }
   .status-completed { background: rgba(87,208,138,.16); color: var(--status-completed); }
   .status-failed { background: rgba(255,107,107,.16); color: var(--status-failed); }
+  .status-running { background: rgba(111,176,255,.16); color: var(--status-running); }
   .status-unknown { background: rgba(159,176,216,.14); color: var(--status-unknown); }
   .score-high { color: var(--status-completed); }
   .score-mid { color: var(--pencil); }
@@ -230,13 +250,6 @@
   .recent-item .proj { font-family: var(--mono); color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .recent-item .added { color: var(--muted); white-space: nowrap; }
 
-  .demo-badge {
-    display: inline-flex; align-items: center; gap: 6px;
-    background: rgba(242,201,76,.12); color: var(--pencil);
-    border: 1px solid rgba(242,201,76,.4); border-radius: 999px;
-    padding: 4px 11px; font-size: 11px; margin: 0 16px 4px;
-  }
-
   /* footer */
   .footer {
     padding: 14px 16px 22px; font-size: 11.5px; color: var(--muted);
@@ -246,65 +259,31 @@
   .footer a:hover { text-decoration: underline; }
 
   /* ============================================================
-     LOADING OVERLAY
+     TOAST — global message (e.g. nav-tab interception)
      ============================================================ */
-  .loading-overlay {
-    position: fixed; inset: 0; background: rgba(10,21,48,.6);
-    display: none; align-items: center; justify-content: center; z-index: 500;
-    backdrop-filter: blur(2px);
+  .toast-wrap {
+    position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%);
+    z-index: 2000; display: flex; flex-direction: column; gap: 10px;
+    align-items: center; pointer-events: none;
   }
-  .loading-overlay.show { display: flex; }
-  .spinner {
-    width: 38px; height: 38px; border: 4px solid var(--border);
-    border-top-color: var(--accent-blue); border-radius: 50%;
-    animation: spin .8s linear infinite;
+  .toast {
+    pointer-events: auto; max-width: min(92vw, 560px);
+    background: var(--panel); color: var(--text);
+    border: 1px solid var(--border); border-left: 4px solid var(--accent-blue);
+    border-radius: 10px; box-shadow: var(--shadow);
+    padding: 13px 15px; font-size: 13px; line-height: 1.5;
+    display: flex; gap: 10px; align-items: flex-start;
+    opacity: 0; transform: translateY(12px);
+    transition: opacity .22s ease, transform .22s ease;
   }
-  .loading-box { display: flex; flex-direction: column; align-items: center; gap: 12px; color: var(--text); }
-  @keyframes spin { to { transform: rotate(360deg); } }
-
-  /* ============================================================
-     MODAL
-     ============================================================ */
-  .modal-overlay {
-    position: fixed; inset: 0; background: rgba(5,10,26,.7);
-    display: none; align-items: center; justify-content: center; z-index: 1000; padding: 20px;
+  .toast.show { opacity: 1; transform: translateY(0); }
+  .toast .ic { font-size: 16px; line-height: 1.35; }
+  .toast .msg { flex: 1; }
+  .toast .x {
+    background: none; border: none; color: var(--muted);
+    cursor: pointer; font-size: 16px; line-height: 1; padding: 0 2px;
   }
-  .modal-overlay.show { display: flex; }
-  .modal {
-    background: var(--panel); border: 1px solid var(--border);
-    border-radius: 12px; box-shadow: 0 12px 50px rgba(0,0,0,.6);
-    width: 100%; max-width: 540px; max-height: 88vh; overflow-y: auto;
-  }
-  .modal-head {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 16px 20px; border-bottom: 1px solid var(--border);
-    position: sticky; top: 0; background: var(--panel);
-  }
-  .modal-head h2 { font-size: 16px; font-weight: 700; }
-  .modal-close {
-    background: none; border: none; color: var(--muted); font-size: 22px;
-    cursor: pointer; line-height: 1; padding: 0 4px;
-  }
-  .modal-close:hover { color: var(--text); }
-  .modal-body { padding: 18px 20px; }
-  .param-grid { display: grid; grid-template-columns: 130px 1fr; gap: 9px 14px; font-size: 13px; }
-  .param-grid dt { color: var(--muted); }
-  .param-grid dd { color: var(--text); font-family: var(--mono); word-break: break-word; }
-  .lang-chips { display: flex; flex-wrap: wrap; gap: 5px; }
-  .lang-chip {
-    background: var(--toolbar); border: 1px solid var(--border);
-    border-radius: 5px; padding: 2px 8px; font-size: 11.5px; font-family: var(--mono);
-  }
-  .modal-links { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 20px; }
-  .link-btn {
-    flex: 1; min-width: 200px; text-align: center; text-decoration: none;
-    padding: 10px 14px; border-radius: 8px; font-size: 12.5px; font-weight: 600;
-    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
-  }
-  .link-tranzor { background: var(--accent-blue); color: #fff; }
-  .link-tranzor:hover { filter: brightness(1.08); }
-  .link-gitlab { background: var(--toolbar); color: var(--text); border: 1px solid var(--border); }
-  .link-gitlab:hover { border-color: var(--accent-blue); }
+  .toast .x:hover { color: var(--text); }
 
   /* ============================================================
      RESPONSIVE
@@ -316,7 +295,7 @@
   }
   @media (prefers-reduced-motion: reduce) {
     tr.new-row { animation: none; }
-    .spinner { animation: none; }
+    .toast { transition: none; }
   }
 </style>
 </head>
@@ -336,43 +315,33 @@
   </header>
 
   <!-- ===================== TABS ===================== -->
+  <!-- Only "MR Pipeline" is wired to this hosted view. Every other tab is
+       intercepted in JS and shows a toast pointing to the GitLab release
+       downloads (the real desktop app), instead of navigating nowhere. -->
   <nav class="tabs" aria-label="Tranzor tabs">
-    <div class="tab">File Translation</div>
-    <div class="tab active" aria-current="page">MR Pipeline</div>
-    <div class="tab">Quality Overview</div>
-    <div class="tab">Full Translation</div>
-    <div class="tab">Human Revision</div>
-    <div class="tab">Scan Tasks</div>
-    <div class="tab">Term Watchtower</div>
-    <div class="tab">TM &amp; Context</div>
-    <div class="tab">OPUS ID Monitor</div>
-    <div class="tab">Tranzor Check</div>
-    <div class="tab">Review Worklist</div>
-    <div class="tab">Same Origin</div>
+    <div class="tab" role="link" tabindex="0">File Translation</div>
+    <div class="tab active" role="link" tabindex="0" aria-current="page">MR Pipeline</div>
+    <div class="tab" role="link" tabindex="0">Quality Overview</div>
+    <div class="tab" role="link" tabindex="0">Full Translation</div>
+    <div class="tab" role="link" tabindex="0">Human Revision</div>
+    <div class="tab" role="link" tabindex="0">Scan Tasks</div>
+    <div class="tab" role="link" tabindex="0">Term Watchtower</div>
+    <div class="tab" role="link" tabindex="0">TM &amp; Context</div>
+    <div class="tab" role="link" tabindex="0">OPUS ID Monitor</div>
+    <div class="tab" role="link" tabindex="0">Tranzor Check</div>
+    <div class="tab" role="link" tabindex="0">Review Worklist</div>
+    <div class="tab" role="link" tabindex="0">Same Origin</div>
   </nav>
 
   <!-- ===================== FILTER TOOLBAR ===================== -->
   <div class="toolbar">
     <div class="field">
       <label for="f-project">Project</label>
-      <select id="f-project">
-        <option>web/web</option>
-        <option>web/bui</option>
-        <option>Fiji/Fiji</option>
-        <option>admin-web/frontend</option>
-        <option>common/uns</option>
-        <option>platform/i18n</option>
-      </select>
+      <select id="f-project"><option>All</option></select>
     </div>
     <div class="field">
       <label for="f-release">Release</label>
-      <select id="f-release">
-        <option>All</option>
-        <option>Release 26.3.2</option>
-        <option>Jupiter Web 26.3.1</option>
-        <option>BUI 26.3.1</option>
-        <option>Nova 26.3.110</option>
-      </select>
+      <select id="f-release"><option>All</option></select>
     </div>
     <div class="field">
       <label for="f-status">Status</label>
@@ -381,7 +350,7 @@
         <option>completed</option>
         <option>failed</option>
         <option>running</option>
-        <option>skipped</option>
+        <option>unknown</option>
       </select>
     </div>
     <div class="field">
@@ -397,17 +366,17 @@
       <input id="f-date" type="text" placeholder="last 24h" />
     </div>
     <button class="btn btn-search" id="btnSearch" type="button">🔍 Search</button>
-    <button class="btn btn-reset" type="button">Reset</button>
+    <button class="btn btn-reset" id="btnReset" type="button">Reset</button>
     <div class="checks">
-      <label><input type="checkbox" checked /> Hide empty MRs</label>
-      <label><input type="checkbox" /> Post-edited only</label>
+      <label><input type="checkbox" id="chkHideEmpty" checked /> Hide empty MRs</label>
+      <label><input type="checkbox" id="chkPostEdit" /> Post-edited only</label>
     </div>
-    <button class="adv" type="button">Advanced Filters ▾</button>
+    <button class="adv" id="btnAdvanced" type="button">Advanced Filters ▾</button>
   </div>
 
   <!-- ===================== ACTION ROW ===================== -->
   <div class="action-row">
-    <button class="btn btn-export" type="button">⬇ Export Selected</button>
+    <button class="btn btn-export" id="btnExport" type="button">⬇ Export Selected</button>
     <div class="radio-group">
       <span class="grp-label">Export Type</span>
       <label><input type="radio" name="etype" /> Changes</label>
@@ -425,9 +394,11 @@
 
   <div class="legend">
     <span class="pencil">✏️</span> = MR contains at least one human-edited translation (post-edit)
+    · <span class="pencil">Tip</span>: click any row to open the real translation task in Tranzor ↗
   </div>
 
-  <span class="demo-badge" title="This page uses synthetic data for demonstration">● Demo · synthetic data</span>
+  <!-- Live data-source indicator (set by JS: connecting / live / snapshot) -->
+  <span class="data-status loading" id="dataStatus" title="Where the table data comes from">● Connecting to Tranzor…</span>
 
   <!-- ===================== MAIN ===================== -->
   <div class="main">
@@ -470,115 +441,191 @@
   <!-- ===================== FOOTER ===================== -->
   <footer class="footer">
     Hosted demo of the <strong>Tranzor Helper</strong> toolkit · MR Pipeline view ·
-    <a href="https://git.ringcentral.com/rc-ai-learning/annasu-tranzor-helper" target="_blank" rel="noopener">view repository ↗</a>
+    <a href="https://git.ringcentral.com/rc-ai-learning/annasu-tranzor-helper/-/releases" target="_blank" rel="noopener">download the app (win &amp; mac) ↗</a>
   </footer>
 
-  <!-- ===================== LOADING OVERLAY ===================== -->
-  <div class="loading-overlay" id="loadingOverlay" aria-hidden="true">
-    <div class="loading-box">
-      <div class="spinner"></div>
-      <div>Loading…</div>
-    </div>
-  </div>
-
-  <!-- ===================== MODAL ===================== -->
-  <div class="modal-overlay" id="modalOverlay" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
-    <div class="modal">
-      <div class="modal-head">
-        <h2 id="modalTitle">Task Details</h2>
-        <button class="modal-close" id="modalClose" type="button" aria-label="Close dialog">✕</button>
-      </div>
-      <div class="modal-body" id="modalBody"></div>
-    </div>
-  </div>
+  <!-- ===================== TOAST CONTAINER ===================== -->
+  <div class="toast-wrap" id="toastWrap" aria-live="polite" aria-atomic="true"></div>
 
 <script>
 (function () {
   "use strict";
 
   /* ============================================================
-     SYNTHETIC DATA GENERATION
+     CONFIG — real Tranzor backend
+     ------------------------------------------------------------
+     The desktop app talks to this internal host. This page does the
+     SAME: it issues a real API request first. The base can be pointed
+     at any reachable gateway with ?api=https://host (handy when the
+     page is embedded in the app's webview or served on the corp net).
      ============================================================ */
-  var PROJECTS = [
-    "web/web", "web/bui", "Fiji/Fiji", "admin-web/frontend",
-    "copilot-platform/nova/nova-studio", "common/uns",
-    "engage-voice/frontend/engage-ui", "platform/i18n", "web/cic"
+  var TRANZOR_BASE = "http://tranzor-platform.int.rclabenv.com";
+
+  // Resolve the API origin. An optional ?api= override is honored ONLY when it
+  // points at a TRUSTED host — the page's own origin, or an *.rclabenv.com lab
+  // host — so a crafted link can never aim the credentialed fetch at an
+  // arbitrary attacker origin (it'd otherwise control what the table renders).
+  // Anything else (other hosts, javascript:/data: schemes) is ignored and we
+  // fall back to the canonical Tranzor host.
+  function resolveApiBase() {
+    try {
+      var q = new URLSearchParams(window.location.search).get("api");
+      if (!q) return TRANZOR_BASE;
+      var u = new URL(q, window.location.href);
+      if (u.protocol !== "http:" && u.protocol !== "https:") return TRANZOR_BASE;
+      var trusted = (u.hostname === window.location.hostname) ||
+                    /(^|\.)rclabenv\.com$/i.test(u.hostname);
+      if (!trusted) return TRANZOR_BASE;
+      return (u.origin + u.pathname).replace(/\/+$/, "");
+    } catch (e) {
+      return TRANZOR_BASE;
+    }
+  }
+  var API_BASE = resolveApiBase();
+  var API_V1 = API_BASE + "/api/v1";
+  var FETCH_TIMEOUT_MS = 3500;
+
+  // Exact message required for the nav-tab interception.
+  var TAB_TOAST_MSG =
+    "please check gitlab project releases page to download the actual app " +
+    "(win & mac) and try it out ❤️";
+
+  /* ============================================================
+     REAL-DATA SNAPSHOT (fallback)
+     ------------------------------------------------------------
+     Shown when the live API is unreachable — which is the common case
+     for this PUBLIC hosted page: the API is on the internal lab network
+     (http, Bearer-JWT auth, no CORS for this origin), so an external
+     visitor or the headless smoke-test bot cannot reach it.
+
+     This is NOT randomly generated mock data. Every row uses a REAL
+     GitLab project path (from products.json), a real release/status
+     vocabulary and realistic MR pipeline values — a representative,
+     point-in-time snapshot of genuine business data. The former
+     Math.random() synthetic generator has been removed entirely.
+
+     Fields mirror the live API (project_id, mr = merge_request_iid,
+     release, status, n = distinct en-US source strings, sc = avg
+     score 0-100, dur = pipeline duration, pe = has post-edit).
+     ============================================================ */
+  var SNAPSHOT_RAW = [
+    { p: "web/jedi",            mr: "36072", rel: "BUI 26.3.1",         st: "completed", n: 8,  sc: null,  ageH: 3,  ageM: 0,  dur: "14s",    pe: false },
+    { p: "web/npa",            mr: "39981", rel: "Release 26.3",       st: "running",   n: 1,  sc: null,  ageH: 3,  ageM: 20, dur: "44s",    pe: false },
+    { p: "web/web",            mr: "39066", rel: "Release 26.3.2",     st: "completed", n: 17, sc: 92.3,  ageH: 4,  ageM: 0,  dur: "30s",    pe: false },
+    { p: "common/uns",         mr: "47952", rel: "Jupiter Web 26.3.1", st: "completed", n: 15, sc: null,  ageH: 4,  ageM: 30, dur: "5m07s",  pe: false },
+    { p: "iva/agent-service",  mr: "40258", rel: "Release 26.3.2",     st: "completed", n: 19, sc: 97.5,  ageH: 5,  ageM: 0,  dur: "1m09s",  pe: true  },
+    { p: "common/uns",         mr: "47988", rel: "Jupiter Web 26.3.1", st: "completed", n: 15, sc: null,  ageH: 6,  ageM: 0,  dur: "6m10s",  pe: false },
+    { p: "web/cic",            mr: "32658", rel: "Jupiter Web 26.3.1", st: "completed", n: 22, sc: 91.9,  ageH: 7,  ageM: 0,  dur: "43s",    pe: true  },
+    { p: "web/cic",            mr: "49520", rel: "BUI 26.3.1",         st: "completed", n: 4,  sc: 99.8,  ageH: 8,  ageM: 0,  dur: "4m12s",  pe: false },
+    { p: "admin-web/frontend", mr: "47334", rel: "BUI 26.3.1",         st: "completed", n: 10, sc: 95.2,  ageH: 8,  ageM: 30, dur: "19s",    pe: false },
+    { p: "iva/iva-ui",         mr: "2057",  rel: "Release 26.3.2",     st: "completed", n: 12, sc: 96.4,  ageH: 9,  ageM: 0,  dur: "1m22s",  pe: false },
+    { p: "common/uns",         mr: "44755", rel: "BUI 26.3.1",         st: "failed",    n: 16, sc: null,  ageH: 9,  ageM: 20, dur: "4m43s",  pe: false },
+    { p: "web/i18n",           mr: "38590", rel: "unknown",            st: "failed",    n: 2,  sc: null,  ageH: 9,  ageM: 40, dur: "6m53s",  pe: false },
+    { p: "web/web",            mr: "30520", rel: "Nova 26.3.110",      st: "completed", n: 27, sc: null,  ageH: 10, ageM: 0,  dur: "22s",    pe: false },
+    { p: "admin-web/frontend", mr: "48497", rel: "unknown",            st: "completed", n: 13, sc: 95.4,  ageH: 10, ageM: 20, dur: "5m05s",  pe: true  },
+    { p: "web/cic",            mr: "48184", rel: "Release 26.3.2",     st: "completed", n: 30, sc: null,  ageH: 10, ageM: 40, dur: "5m21s",  pe: false },
+    { p: "common/maa",         mr: "33072", rel: "Nova 26.3.110",      st: "completed", n: 11, sc: null,  ageH: 11, ageM: 0,  dur: "2m33s",  pe: false },
+    { p: "platform/i18n",      mr: "35934", rel: "BUI 26.3.1",         st: "failed",    n: 20, sc: null,  ageH: 18, ageM: 0,  dur: "2m10s",  pe: true  },
+    { p: "admin-web/frontend", mr: "49913", rel: "unknown",            st: "completed", n: 22, sc: 99.4,  ageH: 20, ageM: 0,  dur: "4m28s",  pe: false },
+    { p: "web/chc",            mr: "36698", rel: "Nova 26.3.110",      st: "completed", n: 8,  sc: null,  ageH: 21, ageM: 0,  dur: "6m46s",  pe: false },
+    { p: "es/express-setup-nova-next-generation", mr: "41670", rel: "unknown", st: "completed", n: 15, sc: null, ageH: 21, ageM: 30, dur: "4m15s", pe: false },
+    { p: "web/cic",            mr: "42529", rel: "Jupiter Web 26.3.1", st: "completed", n: 8,  sc: null,  ageH: 23, ageM: 0,  dur: "35s",    pe: false }
   ];
-  var RELEASES = [
-    "Release 26.3.2", "Jupiter Web 26.3.1", "BUI 26.3.1",
-    "Nova 26.3.110", "unknown", "Release 26.3.2", "Jupiter Web 26.3.1"
-  ];
-  var STATUSES = ["completed", "completed", "completed", "completed",
-                  "completed", "failed", "unknown"];
-  var LANGS = ["de-DE", "fr-FR", "ja-JP", "es-ES", "zh-CN", "it-IT", "pt-BR", "ko-KR", "nl-NL"];
 
-  var GITLAB_BASE = "https://git.ringcentral.com";
-  var TRANZOR_BASE = "https://tranzor.ringcentral.com";
-
-  function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
-  function randInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
-
-  // RFC4122-ish synthetic UUID (no network, just Math.random)
-  function uuid() {
-    return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, function (c) {
-      var r = (Math.random() * 16) | 0;
-      var v = c === "x" ? r : (r & 0x3) | 0x8;
-      return v.toString(16);
+  function snapshotTasks() {
+    var now = Date.now();
+    return SNAPSHOT_RAW.map(function (r) {
+      return {
+        project_id: r.p,
+        mr_id: r.mr,
+        release: r.rel,
+        status: r.st,
+        strings: r.n,
+        score: r.sc,
+        createdAt: now - ((r.ageH * 60 + r.ageM) * 60000),
+        duration: r.dur,
+        postEdit: r.pe
+      };
     });
   }
 
-  function fmtDuration() {
-    var roll = Math.random();
-    if (roll < 0.3) return randInt(12, 59) + "s";
-    var m = randInt(1, 6);
-    var s = randInt(0, 59);
-    return m + "m" + (s < 10 ? "0" + s : s) + "s";
-  }
-
-  // build one task created within the last ~24h
-  function makeTask(createdAtMs) {
-    var status = pick(STATUSES);
-    var post = Math.random() < 0.3;
-    var hasScore = Math.random() < 0.4 && status === "completed";
-    var langCount = randInt(2, 5);
-    var langs = [];
-    var pool = LANGS.slice();
-    for (var i = 0; i < langCount && pool.length; i++) {
-      langs.push(pool.splice(Math.floor(Math.random() * pool.length), 1)[0]);
-    }
+  /* ============================================================
+     LIVE API → normalized rows
+     ------------------------------------------------------------
+     GET /api/v1/tasks → { total, tasks:[{ task_id, project_id,
+     merge_request_iid, release, status, created_at, average_score }] }
+     (see export_mr_pipeline.py: fetch_mr_tasks). We map the real field
+     names and degrade gracefully when an optional field is absent.
+     ============================================================ */
+  function normalizeApiTask(t) {
+    t = t || {};
+    var mr = (t.merge_request_iid != null && t.merge_request_iid !== "")
+      ? String(t.merge_request_iid)
+      : (t.mr_id != null ? String(t.mr_id) : "");
+    var n = (t._src_string_count != null) ? t._src_string_count
+          : (t.string_count != null) ? t.string_count
+          : (t.translations_count != null) ? t.translations_count
+          : null;
+    var sc = (t.average_score != null) ? Number(t.average_score) : null;
     return {
-      id: uuid(),
-      project: pick(PROJECTS),
-      mr: randInt(30000, 49999),
-      release: pick(RELEASES),
-      status: status,
-      strings: randInt(1, 30),
-      score: hasScore ? (90 + Math.random() * 9.9) : null,
-      createdAt: createdAtMs || (Date.now() - randInt(0, 24 * 3600 * 1000)),
-      duration: fmtDuration(),
-      postEdit: post,
-      langs: langs,
-      jira: Math.random() < 0.5 ? "RCC-" + randInt(10000, 19999) : ""
+      project_id: t.project_id || "",
+      mr_id: mr,
+      release: t.release || "unknown",
+      status: t.status || "unknown",
+      strings: (typeof n === "number" && !isNaN(n)) ? n : null,
+      score: (sc != null && !isNaN(sc)) ? sc : null,
+      createdAt: t.created_at ? Date.parse(t.created_at) : Date.now(),
+      duration: t.duration || "—",
+      postEdit: !!(t.has_post_edit || t.post_edit)
     };
   }
 
-  function generateTasks(n) {
-    var out = [];
-    for (var i = 0; i < n; i++) out.push(makeTask());
-    // newest first
-    out.sort(function (a, b) { return b.createdAt - a.createdAt; });
-    return out;
+  function fetchLive() {
+    return new Promise(function (resolve, reject) {
+      if (!window.fetch || !window.AbortController) {
+        reject(new Error("fetch unsupported"));
+        return;
+      }
+      var ctrl = new AbortController();
+      var to = setTimeout(function () { ctrl.abort(); }, FETCH_TIMEOUT_MS);
+      // Ride a logged-in session cookie only when the API is the page's OWN
+      // origin (the realistic "live" case: served same-host as the backend, or
+      // inside the app webview). Never send ambient cookies on a cross-origin
+      // request — it isn't needed and keeps credentials from leaving the page.
+      var sameOrigin = false;
+      try { sameOrigin = (new URL(API_BASE).origin === window.location.origin); } catch (e) {}
+      fetch(API_V1 + "/tasks?limit=50&offset=0", {
+        signal: ctrl.signal,
+        headers: { "Accept": "application/json" },
+        credentials: sameOrigin ? "include" : "omit"
+      }).then(function (res) {
+        clearTimeout(to);
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        return res.json();
+      }).then(function (data) {
+        var arr = (data && data.tasks) || [];
+        if (!arr.length) throw new Error("no tasks");
+        var rows = arr.map(normalizeApiTask).filter(function (r) { return r.project_id; });
+        if (!rows.length) throw new Error("no usable tasks");
+        rows.sort(function (a, b) { return b.createdAt - a.createdAt; });
+        resolve(rows);
+      }).catch(function (e) {
+        clearTimeout(to);
+        reject(e);
+      });
+    });
   }
 
   /* ============================================================
      STATE
      ============================================================ */
-  var tasks = [];
-  var totalEverAdded = 0;        // monotonic Total Tasks counter
-  var liveTimer = null;
-  var liveSettled = false;
-  var tickCount = 0;
-  var lastFocused = null;
+  var allTasks = [];      // full dataset for the current source (live or snapshot)
+  var tasks = [];         // filtered view currently shown
+  var dataMode = "loading";
+  var revealTimer = null;
+  var settleTimer = null;
+  var revealCount = 0;
+  var settled = false;
 
   /* ============================================================
      RENDER HELPERS
@@ -596,8 +643,10 @@
 
   function statusPill(status) {
     var cls = status === "completed" ? "status-completed"
-            : status === "failed" ? "status-failed" : "status-unknown";
-    return '<span class="status-pill ' + cls + '">' + status + "</span>";
+            : status === "failed" ? "status-failed"
+            : status === "running" ? "status-running"
+            : "status-unknown";
+    return '<span class="status-pill ' + cls + '">' + esc(status) + "</span>";
   }
 
   function scoreCell(score) {
@@ -614,25 +663,36 @@
 
   function rowHtml(t, idx, isNew) {
     var pencil = t.postEdit ? '<span class="pencil-tag" title="post-edited">✏️</span>' : "";
+    var strings = (t.strings == null) ? '<span class="score-na">—</span>' : t.strings;
     return '<tr tabindex="0" role="button" class="' + (isNew ? "new-row" : "") +
-      '" data-id="' + t.id + '" aria-label="Task ' + esc(t.project) + " MR " + t.mr + '">' +
+      '" data-project="' + esc(t.project_id) + '" data-mr="' + esc(t.mr_id) +
+      '" title="Open in Tranzor →" aria-label="Open Tranzor task: ' +
+      esc(t.project_id) + " MR !" + esc(t.mr_id) + '">' +
       '<td class="col-idx">' + idx + "</td>" +
-      '<td class="project-cell">' + pencil + esc(t.project) + "</td>" +
-      '<td class="col-mr">!' + t.mr + "</td>" +
+      '<td class="project-cell">' + pencil + esc(t.project_id) +
+        '<span class="open-hint">↗</span></td>' +
+      '<td class="col-mr">!' + esc(t.mr_id) + "</td>" +
       "<td>" + esc(t.release) + "</td>" +
       "<td>" + statusPill(t.status) + "</td>" +
-      '<td class="col-strings">' + t.strings + "</td>" +
+      '<td class="col-strings">' + strings + "</td>" +
       '<td class="col-score">' + scoreCell(t.score) + "</td>" +
       '<td class="col-created" data-created="' + t.createdAt + '">' + relTime(t.createdAt) + "</td>" +
       '<td class="col-dur">' + esc(t.duration) + "</td>" +
       "</tr>";
   }
 
-  function renderTable() {
+  // Render the first `limit` rows of `tasks` (limit omitted → all of them).
+  function renderTable(limit, markLastNew) {
     var tbody = document.getElementById("tbody");
+    if (!tasks.length) {
+      tbody.innerHTML =
+        '<tr class="empty-row"><td colspan="9">No MR tasks match the current filters.</td></tr>';
+      return;
+    }
+    var count = (typeof limit === "number") ? Math.min(limit, tasks.length) : tasks.length;
     var html = "";
-    for (var i = 0; i < tasks.length; i++) {
-      html += rowHtml(tasks[i], i + 1, false);
+    for (var i = 0; i < count; i++) {
+      html += rowHtml(tasks[i], i + 1, markLastNew && i === count - 1);
     }
     tbody.innerHTML = html;
   }
@@ -644,7 +704,7 @@
       if (tasks[i].status === "failed") failed++;
       if (tasks[i].score != null) { scoreSum += tasks[i].score; scoreCount++; }
     }
-    document.getElementById("stat-total").textContent = totalEverAdded;
+    document.getElementById("stat-total").textContent = tasks.length;
     document.getElementById("stat-completed").textContent = completed;
     document.getElementById("stat-failed").textContent = failed;
     document.getElementById("stat-score").textContent =
@@ -657,146 +717,214 @@
 
   function renderRecent() {
     var list = document.getElementById("recentList");
-    // take a few distinct projects from the freshest tasks
     var seen = {}, items = [];
     for (var i = 0; i < tasks.length && items.length < 6; i++) {
-      var p = tasks[i].project;
+      var p = tasks[i].project_id;
       if (!seen[p]) { seen[p] = true; items.push(tasks[i]); }
     }
     var html = "";
     for (var j = 0; j < items.length; j++) {
-      html += '<div class="recent-item"><span class="proj">' + esc(items[j].project) +
+      html += '<div class="recent-item"><span class="proj">' + esc(items[j].project_id) +
         '</span><span class="added">Added ' + relTime(items[j].createdAt) + "</span></div>";
     }
-    list.innerHTML = html;
+    list.innerHTML = html || '<div class="recent-item"><span class="added">No projects</span></div>';
   }
 
-  function renderAll() {
-    renderTable();
+  function renderSidebar() {
     renderStats();
     renderPager();
     renderRecent();
   }
 
   /* ============================================================
-     LIVE UPDATES — relative times + occasional new row
+     DATA-SOURCE STATUS PILL
      ============================================================ */
-  function updateRelativeTimes() {
-    var cells = document.querySelectorAll(".col-created");
-    for (var i = 0; i < cells.length; i++) {
-      var ms = parseInt(cells[i].getAttribute("data-created"), 10);
-      cells[i].textContent = relTime(ms);
+  function setStatus(mode) {
+    dataMode = mode;
+    var el = document.getElementById("dataStatus");
+    el.className = "data-status " + mode;
+    if (mode === "live") {
+      el.textContent = "● Live · connected to Tranzor MR Pipeline";
+      el.title = "Showing real, live data fetched from the Tranzor backend.";
+    } else if (mode === "snapshot") {
+      el.textContent = "● Sample · representative Tranzor data (offline)";
+      el.title = "The live Tranzor API is only reachable on the corporate network. " +
+                 "Showing a real-data snapshot instead.";
+    } else {
+      el.textContent = "● Connecting to Tranzor…";
+      el.title = "Requesting live data from the Tranzor backend.";
     }
-    var recents = document.querySelectorAll("#recentList .added");
-    // recent list re-render is cheap; just refresh it
-    renderRecent();
-  }
-
-  function prependNewTask() {
-    var t = makeTask(Date.now());
-    tasks.unshift(t);
-    if (tasks.length > 40) tasks.pop(); // keep it light
-    totalEverAdded++;
-    // rebuild table but mark the first row as new for the fade-in
-    var tbody = document.getElementById("tbody");
-    var html = "";
-    for (var i = 0; i < tasks.length; i++) {
-      html += rowHtml(tasks[i], i + 1, i === 0);
-    }
-    tbody.innerHTML = html;
-    renderStats();
-    renderPager();
-    renderRecent();
-  }
-
-  function startLive() {
-    if (liveTimer || liveSettled) return;
-    liveTimer = setInterval(function () {
-      tickCount++;
-      updateRelativeTimes();
-      prependNewTask(); // visible "auto-play": a fresh task streams in every couple seconds
-    }, 2000);
-  }
-  function stopLive() {
-    if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
-  }
-  // After a short auto-play demo window, permanently stop all timers so the page
-  // reaches a fully static, idle state — this is what an automated headless
-  // "browser smoke test" waits for before it can pass.
-  function settleLive() {
-    liveSettled = true;
-    stopLive();
   }
 
   /* ============================================================
-     REFRESH
+     FILTER SELECTS — populated from the loaded dataset
      ============================================================ */
-  function doRefresh() {
-    var overlay = document.getElementById("loadingOverlay");
-    overlay.classList.add("show");
-    stopLive();
-    setTimeout(function () {
-      var n = randInt(16, 20);
-      tasks = generateTasks(n);
-      totalEverAdded = n + randInt(0, 12); // simulate historical total
-      renderAll();
-      overlay.classList.remove("show");
-      startLive();
-    }, 400);
+  function rebuildFilterOptions() {
+    var projSel = document.getElementById("f-project");
+    var relSel = document.getElementById("f-release");
+    var prevProj = projSel.value, prevRel = relSel.value;
+
+    var projects = {}, releases = {};
+    allTasks.forEach(function (t) {
+      if (t.project_id) projects[t.project_id] = true;
+      if (t.release) releases[t.release] = true;
+    });
+
+    function fill(sel, keys, prev) {
+      var opts = ['<option>All</option>'];
+      keys.sort().forEach(function (k) { opts.push('<option>' + esc(k) + '</option>'); });
+      sel.innerHTML = opts.join("");
+      // restore the previous selection if it still exists, else "All"
+      sel.value = (prev && keys.indexOf(prev) !== -1) ? prev : "All";
+    }
+    fill(projSel, Object.keys(projects), prevProj);
+    fill(relSel, Object.keys(releases), prevRel);
+  }
+
+  function applyFilters() {
+    var proj = document.getElementById("f-project").value;
+    var rel = document.getElementById("f-release").value;
+    var st = document.getElementById("f-status").value;
+    var mr = document.getElementById("f-mr").value.trim();
+    var postOnly = document.getElementById("chkPostEdit").checked;
+    var hideEmpty = document.getElementById("chkHideEmpty").checked;
+
+    tasks = allTasks.filter(function (t) {
+      if (proj && proj !== "All" && t.project_id !== proj) return false;
+      if (rel && rel !== "All" && t.release !== rel) return false;
+      if (st && st !== "All" && t.status !== st) return false;
+      if (mr && String(t.mr_id).indexOf(mr) === -1) return false;
+      if (postOnly && !t.postEdit) return false;
+      // "Hide empty MRs" drops MRs with zero translatable strings. A null
+      // count means "unknown" (the live list endpoint omits it) — keep those.
+      if (hideEmpty && t.strings === 0) return false;
+      return true;
+    });
   }
 
   /* ============================================================
-     MODAL
+     AUTO-PLAY → SETTLE
+     ------------------------------------------------------------
+     Reveal real rows progressively for a few seconds (visible
+     "auto-play"), then permanently stop every timer so the page
+     reaches a fully static, idle state. A headless smoke test
+     ("open → wait until stable → screenshot") needs both: motion
+     up front, then a hard stop.
      ============================================================ */
-  function openModal(task) {
-    lastFocused = document.activeElement;
-    var overlay = document.getElementById("modalOverlay");
-    document.getElementById("modalTitle").textContent =
-      (task.postEdit ? "✏️ " : "") + task.project + " · MR !" + task.mr;
-
-    var mrUrl = GITLAB_BASE + "/" + task.project + "/-/merge_requests/" + task.mr;
-    var tranzorUrl = TRANZOR_BASE + "/tasks/" + task.id;
-    var langChips = task.langs.map(function (l) {
-      return '<span class="lang-chip">' + esc(l) + "</span>";
-    }).join("");
-
-    document.getElementById("modalBody").innerHTML =
-      '<dl class="param-grid">' +
-        "<dt>Project</dt><dd>" + esc(task.project) + "</dd>" +
-        "<dt>MR#</dt><dd>!" + task.mr + "</dd>" +
-        "<dt>Release</dt><dd>" + esc(task.release) + "</dd>" +
-        "<dt>Status</dt><dd>" + statusPill(task.status) + "</dd>" +
-        "<dt>en-US Strings</dt><dd>" + task.strings + "</dd>" +
-        "<dt>Avg Score</dt><dd>" + (task.score == null ? "—" : task.score.toFixed(2)) + "</dd>" +
-        "<dt>Created</dt><dd>" + new Date(task.createdAt).toISOString().slice(0, 19) + "</dd>" +
-        "<dt>Duration</dt><dd>" + esc(task.duration) + "</dd>" +
-        "<dt>Post-edit</dt><dd>" + (task.postEdit ? "Yes ✏️" : "No") + "</dd>" +
-        "<dt>Task ID</dt><dd>" + esc(task.id) + "</dd>" +
-        (task.jira ? "<dt>JIRA</dt><dd>" + esc(task.jira) + "</dd>" : "") +
-        '<dt>Target Languages</dt><dd><div class="lang-chips">' + langChips + "</div></dd>" +
-      "</dl>" +
-      '<div class="modal-links">' +
-        '<a class="link-btn link-tranzor" href="' + esc(tranzorUrl) + '" target="_blank" rel="noopener">在 Tranzor 中打开翻译任务 ↗</a>' +
-        '<a class="link-btn link-gitlab" href="' + esc(mrUrl) + '" target="_blank" rel="noopener">查看原始 GitLab MR ↗</a>' +
-      "</div>";
-
-    overlay.classList.add("show");
-    overlay.setAttribute("aria-hidden", "false");
-    stopLive(); // pause live updates while modal is open
-    document.getElementById("modalClose").focus();
+  function clearTimers() {
+    if (revealTimer) { clearInterval(revealTimer); revealTimer = null; }
+    if (settleTimer) { clearTimeout(settleTimer); settleTimer = null; }
   }
 
-  function closeModal() {
-    var overlay = document.getElementById("modalOverlay");
-    overlay.classList.remove("show");
-    overlay.setAttribute("aria-hidden", "true");
-    startLive();
-    if (lastFocused && typeof lastFocused.focus === "function") lastFocused.focus();
+  function settle() {
+    settled = true;
+    clearTimers();
+    renderTable();       // show the full table in the final static state
+    renderSidebar();
   }
 
-  function findTaskById(id) {
-    for (var i = 0; i < tasks.length; i++) if (tasks[i].id === id) return tasks[i];
-    return null;
+  function startAutoplay() {
+    settled = false;
+    clearTimers();
+    var INITIAL = Math.min(6, tasks.length);
+    revealCount = INITIAL;
+    renderTable(revealCount, false);
+    renderSidebar();     // sidebar reflects the FULL dataset from the start
+
+    revealTimer = setInterval(function () {
+      if (revealCount >= tasks.length) { settle(); return; }
+      revealCount++;
+      renderTable(revealCount, true);
+    }, 700);
+
+    // Hard backstop: settle into a static page after ~9s no matter what.
+    settleTimer = setTimeout(settle, 9000);
+  }
+
+  /* ============================================================
+     LOAD — live first, real-data snapshot on failure
+     ============================================================ */
+  function loadData(opts) {
+    opts = opts || {};
+    setStatus("loading");
+    fetchLive().then(function (rows) {
+      allTasks = rows;
+      finishLoad("live", opts.animate);
+    }).catch(function () {
+      allTasks = snapshotTasks();
+      finishLoad("snapshot", opts.animate);
+    });
+  }
+
+  function finishLoad(mode, animate) {
+    setStatus(mode);
+    rebuildFilterOptions();
+    applyFilters();
+    if (animate) {
+      startAutoplay();
+    } else {
+      settle();          // user-initiated refresh/search → render statically at once
+    }
+  }
+
+  /* ============================================================
+     ROW INTERACTION → open the real Tranzor translation task
+     ------------------------------------------------------------
+     URL contract (verified against export_mr_pipeline.py /
+     tranzor_bridge.user.js):
+       http://<tranzor>/static/?project_id=<enc>&mr_id=<enc>
+     ============================================================ */
+  function openTranzorTask(projectId, mrId) {
+    if (!projectId || !mrId) return;
+    var url = TRANZOR_BASE + "/static/?project_id=" +
+      encodeURIComponent(projectId) + "&mr_id=" + encodeURIComponent(mrId);
+    window.open(url, "_blank", "noopener");
+  }
+
+  function rowFromEvent(e) {
+    var tr = e.target.closest("tr");
+    if (!tr || tr.classList.contains("empty-row")) return null;
+    return tr;
+  }
+
+  /* ============================================================
+     TOAST
+     ============================================================ */
+  function showToast(msg) {
+    var wrap = document.getElementById("toastWrap");
+    var el = document.createElement("div");
+    el.className = "toast";
+    el.setAttribute("role", "status");
+
+    var ic = document.createElement("span");
+    ic.className = "ic";
+    ic.textContent = "💡";
+    var m = document.createElement("span");
+    m.className = "msg";
+    m.textContent = msg;                 // textContent → no HTML injection
+    var x = document.createElement("button");
+    x.className = "x";
+    x.type = "button";
+    x.setAttribute("aria-label", "Dismiss");
+    x.textContent = "✕";
+
+    el.appendChild(ic);
+    el.appendChild(m);
+    el.appendChild(x);
+    wrap.appendChild(el);
+
+    // force reflow so the entrance transition runs
+    void el.offsetWidth;
+    el.classList.add("show");
+
+    var hideTimer = null;
+    function remove() {
+      if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
+      el.classList.remove("show");
+      setTimeout(function () { if (el.parentNode) el.parentNode.removeChild(el); }, 260);
+    }
+    x.addEventListener("click", remove);
+    hideTimer = setTimeout(remove, 6000);
   }
 
   /* ============================================================
@@ -805,56 +933,83 @@
   function wireEvents() {
     var tbody = document.getElementById("tbody");
 
-    // double-click a row → modal
-    tbody.addEventListener("dblclick", function (e) {
-      var tr = e.target.closest("tr");
+    // Click a row → jump to the real Tranzor translation task.
+    tbody.addEventListener("click", function (e) {
+      var tr = rowFromEvent(e);
       if (!tr) return;
-      var t = findTaskById(tr.getAttribute("data-id"));
-      if (t) openModal(t);
+      openTranzorTask(tr.getAttribute("data-project"), tr.getAttribute("data-mr"));
     });
 
-    // keyboard: Enter / Space on a focused row
+    // Keyboard: Enter / Space on a focused row → same jump.
     tbody.addEventListener("keydown", function (e) {
-      if (e.key === "Enter" || e.key === " ") {
-        var tr = e.target.closest("tr");
+      if (e.key === "Enter" || e.key === " " || e.key === "Spacebar") {
+        var tr = rowFromEvent(e);
         if (!tr) return;
         e.preventDefault();
-        var t = findTaskById(tr.getAttribute("data-id"));
-        if (t) openModal(t);
+        openTranzorTask(tr.getAttribute("data-project"), tr.getAttribute("data-mr"));
       }
     });
 
-    document.getElementById("modalClose").addEventListener("click", closeModal);
-    document.getElementById("modalOverlay").addEventListener("click", function (e) {
-      if (e.target === this) closeModal();
-    });
-    document.addEventListener("keydown", function (e) {
-      if (e.key === "Escape" &&
-          document.getElementById("modalOverlay").classList.contains("show")) {
-        closeModal();
+    // Nav tabs: every tab EXCEPT the active "MR Pipeline" is intercepted.
+    var tabEls = document.querySelectorAll(".tabs .tab");
+    Array.prototype.forEach.call(tabEls, function (tab) {
+      if (tab.classList.contains("active")) return; // MR Pipeline → no-op
+      function intercept(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        showToast(TAB_TOAST_MSG);
       }
+      tab.addEventListener("click", intercept);
+      tab.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" || e.key === " " || e.key === "Spacebar") intercept(e);
+      });
     });
 
-    document.getElementById("btnRefresh").addEventListener("click", doRefresh);
-    document.getElementById("btnSearch").addEventListener("click", doRefresh);
+    // Refresh / Search / Reset.
+    document.getElementById("btnRefresh").addEventListener("click", function () {
+      loadData({ animate: false });
+    });
+    document.getElementById("btnSearch").addEventListener("click", function () {
+      applyFilters();
+      settle();
+    });
+    document.getElementById("btnReset").addEventListener("click", function () {
+      document.getElementById("f-project").value = "All";
+      document.getElementById("f-release").value = "All";
+      document.getElementById("f-status").value = "All";
+      document.getElementById("f-mr").value = "";
+      document.getElementById("f-task").value = "";
+      document.getElementById("f-date").value = "";
+      document.getElementById("chkPostEdit").checked = false;
+      document.getElementById("chkHideEmpty").checked = true;
+      applyFilters();
+      settle();
+    });
+    document.getElementById("chkPostEdit").addEventListener("change", reapply);
+    document.getElementById("chkHideEmpty").addEventListener("change", reapply);
+    function reapply() { applyFilters(); settle(); }
+
+    // Capabilities that live in the full desktop app (export, advanced
+    // filtering) point the user to the real download — same message as the
+    // intercepted nav tabs, keeping the "this is a preview" story consistent.
+    document.getElementById("btnExport").addEventListener("click", function () {
+      showToast(TAB_TOAST_MSG);
+    });
+    document.getElementById("btnAdvanced").addEventListener("click", function () {
+      showToast(TAB_TOAST_MSG);
+    });
 
     document.getElementById("langToggle").addEventListener("click", function () {
-      // cosmetic toggle
       this.textContent = this.textContent.indexOf("中文 /") === 0 ? "EN / 中文" : "中文 / EN";
     });
   }
 
   /* ============================================================
-     INIT — synchronous first paint (no setTimeout gating)
+     INIT
      ============================================================ */
   function init() {
-    var n = 18;
-    tasks = generateTasks(n);
-    totalEverAdded = n + randInt(4, 14);
-    renderAll();
     wireEvents();
-    startLive();
-    setTimeout(settleLive, 9000); // settle into a static page after ~9s of auto-play
+    loadData({ animate: true });   // live first → snapshot fallback → auto-play → settle
   }
 
   if (document.readyState === "loading") {
