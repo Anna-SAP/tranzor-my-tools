@@ -1,9 +1,31 @@
 {
   "source": "Tranzor MR Pipeline API (/api/v1/tasks) — real captured snapshot",
-  "captured_utc": "2026-06-24T05:46:00Z",
+  "captured_utc": "2026-06-24T06:10:07Z",
   "tranzor_base": "http://tranzor-platform.int.rclabenv.com",
   "row_count": 20,
   "rows": [
+    {
+      "project_id": "Fiji/Fiji",
+      "mr_id": "44038",
+      "release": "Jupiter Web 26.3.10",
+      "status": "completed",
+      "strings": 12,
+      "score": 99.4,
+      "duration": "1m21s",
+      "post_edit": false,
+      "age_seconds": 0
+    },
+    {
+      "project_id": "Fiji/Fiji",
+      "mr_id": "44154",
+      "release": "Jupiter Web 26.3.10",
+      "status": "completed",
+      "strings": 2,
+      "score": 100.0,
+      "duration": "2m57s",
+      "post_edit": false,
+      "age_seconds": 390
+    },
     {
       "project_id": "web/web",
       "mr_id": "40598",
@@ -12,8 +34,8 @@
       "strings": 2,
       "score": 94.1,
       "duration": "44s",
-      "post_edit": true,
-      "age_seconds": 0
+      "post_edit": false,
+      "age_seconds": 1234
     },
     {
       "project_id": "web/web",
@@ -23,8 +45,8 @@
       "strings": 4,
       "score": 99.9,
       "duration": "1m01s",
-      "post_edit": true,
-      "age_seconds": 404
+      "post_edit": false,
+      "age_seconds": 1639
     },
     {
       "project_id": "Fiji/Fiji",
@@ -35,7 +57,7 @@
       "score": 100.0,
       "duration": "1m01s",
       "post_edit": false,
-      "age_seconds": 3576
+      "age_seconds": 4810
     },
     {
       "project_id": "copilot-platform/nova/nova-studio-app",
@@ -45,8 +67,8 @@
       "strings": 2,
       "score": 100.0,
       "duration": "1m47s",
-      "post_edit": false,
-      "age_seconds": 10473
+      "post_edit": true,
+      "age_seconds": 11708
     },
     {
       "project_id": "dpw-xmn/apw-in-jupiter",
@@ -56,8 +78,8 @@
       "strings": 1,
       "score": 100.0,
       "duration": "1m50s",
-      "post_edit": false,
-      "age_seconds": 10687
+      "post_edit": true,
+      "age_seconds": 11921
     },
     {
       "project_id": "Fiji/Fiji",
@@ -67,8 +89,8 @@
       "strings": 1,
       "score": 99.9,
       "duration": "1m31s",
-      "post_edit": true,
-      "age_seconds": 10828
+      "post_edit": false,
+      "age_seconds": 12063
     },
     {
       "project_id": "Fiji/video",
@@ -78,8 +100,8 @@
       "strings": 6,
       "score": 100.0,
       "duration": "41s",
-      "post_edit": true,
-      "age_seconds": 11034
+      "post_edit": false,
+      "age_seconds": 12268
     },
     {
       "project_id": "CoreLib/rcvrooms",
@@ -89,8 +111,8 @@
       "strings": 6,
       "score": 100.0,
       "duration": "51s",
-      "post_edit": true,
-      "age_seconds": 11066
+      "post_edit": false,
+      "age_seconds": 12301
     },
     {
       "project_id": "copilot-platform/nova/nova-studio-app",
@@ -100,8 +122,8 @@
       "strings": 1,
       "score": 88.9,
       "duration": "1m43s",
-      "post_edit": true,
-      "age_seconds": 11629
+      "post_edit": false,
+      "age_seconds": 12864
     },
     {
       "project_id": "web/stc",
@@ -112,7 +134,7 @@
       "score": 100.0,
       "duration": "1m47s",
       "post_edit": true,
-      "age_seconds": 13129
+      "age_seconds": 14364
     },
     {
       "project_id": "iva/iva-ui",
@@ -123,7 +145,7 @@
       "score": null,
       "duration": "32s",
       "post_edit": false,
-      "age_seconds": 13882
+      "age_seconds": 15116
     },
     {
       "project_id": "integration/integration-apps",
@@ -134,7 +156,7 @@
       "score": 96.2,
       "duration": "2m42s",
       "post_edit": true,
-      "age_seconds": 17279
+      "age_seconds": 18513
     },
     {
       "project_id": "admin-web/frontend",
@@ -144,8 +166,8 @@
       "strings": 16,
       "score": 100.0,
       "duration": "55s",
-      "post_edit": true,
-      "age_seconds": 17761
+      "post_edit": false,
+      "age_seconds": 18996
     },
     {
       "project_id": "copilot-platform/nova/nova-studio-app",
@@ -155,8 +177,8 @@
       "strings": 2,
       "score": 99.9,
       "duration": "8m27s",
-      "post_edit": true,
-      "age_seconds": 18734
+      "post_edit": false,
+      "age_seconds": 19968
     },
     {
       "project_id": "Fiji/Fiji",
@@ -166,8 +188,8 @@
       "strings": 6,
       "score": 84.1,
       "duration": "1m56s",
-      "post_edit": true,
-      "age_seconds": 51707
+      "post_edit": false,
+      "age_seconds": 52941
     },
     {
       "project_id": "web/chc",
@@ -177,8 +199,8 @@
       "strings": 4,
       "score": 98.4,
       "duration": "59s",
-      "post_edit": true,
-      "age_seconds": 57672
+      "post_edit": false,
+      "age_seconds": 58907
     },
     {
       "project_id": "iva/iva-ui",
@@ -188,8 +210,8 @@
       "strings": 17,
       "score": 95.3,
       "duration": "7m43s",
-      "post_edit": true,
-      "age_seconds": 61356
+      "post_edit": false,
+      "age_seconds": 62591
     },
     {
       "project_id": "common/uns",
@@ -199,30 +221,8 @@
       "strings": 6,
       "score": 100.0,
       "duration": "3m41s",
-      "post_edit": true,
-      "age_seconds": 62404
-    },
-    {
-      "project_id": "web/bui",
-      "mr_id": "3003",
-      "release": "BUI 26.3.1",
-      "status": "completed",
-      "strings": 4,
-      "score": 83.8,
-      "duration": "30s",
-      "post_edit": true,
-      "age_seconds": 64595
-    },
-    {
-      "project_id": "engage-voice/frontend/engage-unified-analytics",
-      "mr_id": "153",
-      "release": "unknown",
-      "status": "completed",
-      "strings": 5,
-      "score": 100.0,
-      "duration": "2m57s",
       "post_edit": false,
-      "age_seconds": 66065
+      "age_seconds": 63639
     }
   ]
 }
