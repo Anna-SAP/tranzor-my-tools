@@ -154,6 +154,60 @@ def collect(target_rows):
     return rows
 
 
+def collect_meta():
+    """Real sidebar data: MR Pipeline Stats + Recently Added Projects.
+
+    These are GLOBAL, not derived from the captured page rows — the same
+    truth the desktop app's sidebar shows:
+      - Stats come straight from /dashboard/overview.
+      - Recently Added Projects reuses the app's own
+        fetch_recently_added_projects (each project's first-seen task time).
+    """
+    stats = {}
+    try:
+        ov = mr.fetch_dashboard_overview()
+        stats = {
+            "total_tasks": ov.get("total_tasks"),
+            "completed_tasks": ov.get("completed_tasks"),
+            "failed_tasks": ov.get("failed_tasks"),
+            "running_tasks": ov.get("running_tasks"),
+            "average_score": ov.get("average_score"),
+            "total_mrs": ov.get("total_mrs"),
+        }
+        print(f"  stats: total={stats['total_tasks']} completed={stats['completed_tasks']} "
+              f"failed={stats['failed_tasks']} avg={stats['average_score']}")
+    except Exception as e:
+        print(f"  warn: overview failed: {e!r}")
+
+    # A server-side "now" (newest task's created_at) keeps the project ages
+    # timezone-consistent with the server timestamps we diff against.
+    server_now = None
+    try:
+        _, newest = mr.fetch_mr_tasks(limit=1)
+        if newest:
+            server_now = _parse_iso(newest[0].get("created_at"))
+    except Exception:
+        pass
+    if server_now is None:
+        server_now = dt.datetime.now()
+
+    recent = []
+    try:
+        ra = mr.fetch_recently_added_projects()  # newest-first [{project_id, first_seen}]
+        for item in ra[:12]:
+            fs = _parse_iso(item.get("first_seen"))
+            age = int((server_now - fs).total_seconds()) if fs else None
+            if age is not None and age < 0:
+                age = 0
+            recent.append({"project_id": item.get("project_id"), "age_seconds": age})
+        print(f"  recent projects: {len(recent)}"
+              f" (newest: {recent[0]['project_id'] if recent else '-'})")
+    except Exception as e:
+        print(f"  warn: recent projects failed: {e!r}")
+
+    return stats, recent
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=20, help="number of rows to capture")
@@ -162,10 +216,14 @@ def main():
 
     print(f"Capturing real Tranzor MR Pipeline data ({mr.MR_API}) ...")
     rows = collect(args.limit)
+    print("Capturing global stats + recently-added projects ...")
+    stats, recent = collect_meta()
     payload = {
         "source": "Tranzor MR Pipeline API (/api/v1/tasks) — real captured snapshot",
         "captured_utc": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "tranzor_base": mr.TRANZOR_URL,
+        "stats": stats,
+        "recent_projects": recent,
         "row_count": len(rows),
         "rows": rows,
     }

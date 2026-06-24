@@ -627,7 +627,11 @@
     if (m < 60) return m + "m ago";
     var h = Math.floor(m / 60);
     if (h < 24) return h + "h ago";
-    return Math.floor(h / 24) + "d ago";
+    var d = Math.floor(h / 24);
+    if (d < 60) return d + "d ago";   // show days up to ~2mo, like the desktop app
+    var mo = Math.floor(d / 30);
+    if (mo < 12) return mo + "mo ago";
+    return Math.floor(d / 365) + "y ago";
   }
 
   function statusPill(status) {
@@ -687,6 +691,20 @@
   }
 
   function renderStats() {
+    var s = snapshotMeta && snapshotMeta.stats;
+    if (s && s.total_tasks != null) {
+      // Real GLOBAL stats from /dashboard/overview — the same numbers the
+      // desktop app's sidebar shows (not derived from this page's rows).
+      document.getElementById("stat-total").textContent = s.total_tasks;
+      document.getElementById("stat-completed").textContent =
+        (s.completed_tasks != null) ? s.completed_tasks : "—";
+      document.getElementById("stat-failed").textContent =
+        (s.failed_tasks != null) ? s.failed_tasks : "—";
+      document.getElementById("stat-score").textContent =
+        (s.average_score != null) ? Number(s.average_score).toFixed(2) : "—";
+      return;
+    }
+    // Fallback (live mode / no meta): derive from the currently loaded rows.
     var completed = 0, failed = 0, scoreSum = 0, scoreCount = 0;
     for (var i = 0; i < tasks.length; i++) {
       if (tasks[i].status === "completed") completed++;
@@ -706,12 +724,26 @@
 
   function renderRecent() {
     var list = document.getElementById("recentList");
+    var html = "";
+    var rp = snapshotMeta && snapshotMeta.recent_projects;
+    if (rp && rp.length) {
+      // Real "Recently Added Projects" — each project's first-seen task time
+      // (export_mr_pipeline.fetch_recently_added_projects), newest first.
+      var now = Date.now();
+      for (var k = 0; k < rp.length; k++) {
+        var age = (rp[k].age_seconds != null) ? rp[k].age_seconds : 0;
+        html += '<div class="recent-item"><span class="proj">' + esc(rp[k].project_id) +
+          '</span><span class="added">Added ' + relTime(now - age * 1000) + "</span></div>";
+      }
+      list.innerHTML = html;
+      return;
+    }
+    // Fallback: distinct projects from the loaded rows.
     var seen = {}, items = [];
     for (var i = 0; i < tasks.length && items.length < 6; i++) {
       var p = tasks[i].project_id;
       if (!seen[p]) { seen[p] = true; items.push(tasks[i]); }
     }
-    var html = "";
     for (var j = 0; j < items.length; j++) {
       html += '<div class="recent-item"><span class="proj">' + esc(items[j].project_id) +
         '</span><span class="added">Added ' + relTime(items[j].createdAt) + "</span></div>";

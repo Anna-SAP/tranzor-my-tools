@@ -1,7 +1,65 @@
 {
   "source": "Tranzor MR Pipeline API (/api/v1/tasks) — real captured snapshot",
-  "captured_utc": "2026-06-24T06:10:07Z",
+  "captured_utc": "2026-06-24T06:25:45Z",
   "tranzor_base": "http://tranzor-platform.int.rclabenv.com",
+  "stats": {
+    "total_tasks": 27007,
+    "completed_tasks": 9102,
+    "failed_tasks": 563,
+    "running_tasks": 0,
+    "average_score": 96.21,
+    "total_mrs": 7633
+  },
+  "recent_projects": [
+    {
+      "project_id": "web/bui",
+      "age_seconds": 1020789
+    },
+    {
+      "project_id": "platform/i18n",
+      "age_seconds": 1111557
+    },
+    {
+      "project_id": "common/awp",
+      "age_seconds": 1204602
+    },
+    {
+      "project_id": "RND/rwc-visual-assist",
+      "age_seconds": 1376348
+    },
+    {
+      "project_id": "common/uns",
+      "age_seconds": 1804712
+    },
+    {
+      "project_id": "web/push-to-talk",
+      "age_seconds": 1812707
+    },
+    {
+      "project_id": "web/cic",
+      "age_seconds": 1833035
+    },
+    {
+      "project_id": "admin-web/backend",
+      "age_seconds": 1875461
+    },
+    {
+      "project_id": "engage-voice/frontend/agent/agent-service",
+      "age_seconds": 1959974
+    },
+    {
+      "project_id": "web/i18n",
+      "age_seconds": 3128354
+    },
+    {
+      "project_id": "web-modules/web-modules-core",
+      "age_seconds": 3128499
+    },
+    {
+      "project_id": "web/web",
+      "age_seconds": 3128618
+    }
+  ],
   "row_count": 20,
   "rows": [
     {
