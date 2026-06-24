@@ -32,6 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import tranzor_auth as auth
 import export_mr_pipeline as mr
+import task_post_edit as pe
 
 
 def _parse_iso(s):
@@ -112,15 +113,22 @@ def collect(target_rows):
         except Exception:
             det = {}
         strings = None
-        post_edit = False
         try:
             res = mr.fetch_mr_results(tid)
             trs = res.get("translations", [])
             strings = mr.distinct_source_string_count(trs) or None
-            # iteration > 1 on any row is a reliable, cheap proxy for "was re-worked"
-            post_edit = any((x.get("iteration") or 0) and x.get("iteration") > 1 for x in trs)
         except Exception:
             pass
+        # Post-edit (✏️): use the EXACT detection the desktop app uses so the
+        # demo's pencils match it — a GitLab "[Tranzor] Language Lead fix"
+        # commit OR a dashboard ``fixed_by_lead`` case. NOTE: ``iteration > 1``
+        # is machine auto-refine, NOT a human edit, so it must not be used
+        # (that was the old bug — see task_post_edit module docstring).
+        try:
+            post_edit = bool(pe._fetch_mr(
+                (t.get("project_id"), int(t.get("merge_request_iid")))))
+        except Exception:
+            post_edit = False
         rows.append({
             "project_id": t.get("project_id"),
             "mr_id": str(t.get("merge_request_iid")),
