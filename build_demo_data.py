@@ -154,14 +154,19 @@ def collect(target_rows):
     return rows
 
 
-def collect_meta():
+def collect_meta(fast=False, reuse_recent=None):
     """Real sidebar data: MR Pipeline Stats + Recently Added Projects.
 
     These are GLOBAL, not derived from the captured page rows — the same
     truth the desktop app's sidebar shows:
-      - Stats come straight from /dashboard/overview.
+      - Stats come straight from /dashboard/overview (one cheap call).
       - Recently Added Projects reuses the app's own
         fetch_recently_added_projects (each project's first-seen task time).
+
+    ``fast=True`` (used by the auto-refresh loop) skips the recently-added
+    rescan — which probes every project (~200+ calls) and barely changes
+    between refreshes — and reuses ``reuse_recent`` instead, so a frequent
+    refresh stays light on the Tranzor API. Stats and rows still refresh.
     """
     stats = {}
     try:
@@ -178,6 +183,10 @@ def collect_meta():
               f"failed={stats['failed_tasks']} avg={stats['average_score']}")
     except Exception as e:
         print(f"  warn: overview failed: {e!r}")
+
+    if fast and reuse_recent:
+        print(f"  recent projects: reusing {len(reuse_recent)} (fast mode - skipped rescan)")
+        return stats, reuse_recent
 
     # A server-side "now" (newest task's created_at) keeps the project ages
     # timezone-consistent with the server timestamps we diff against.
@@ -212,12 +221,24 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=20, help="number of rows to capture")
     ap.add_argument("--out", default=os.path.join("public", "demo_data.json"))
+    ap.add_argument("--fast", action="store_true",
+                    help="frequent-refresh mode: refresh rows + stats but reuse the "
+                         "existing Recently Added Projects (skips the ~200-call rescan)")
     args = ap.parse_args()
+    out = os.path.abspath(args.out)
+
+    reuse_recent = None
+    if args.fast:
+        try:
+            with open(out, encoding="utf-8") as f:
+                reuse_recent = (json.load(f) or {}).get("recent_projects")
+        except Exception:
+            reuse_recent = None
 
     print(f"Capturing real Tranzor MR Pipeline data ({mr.MR_API}) ...")
     rows = collect(args.limit)
     print("Capturing global stats + recently-added projects ...")
-    stats, recent = collect_meta()
+    stats, recent = collect_meta(fast=args.fast, reuse_recent=reuse_recent)
     payload = {
         "source": "Tranzor MR Pipeline API (/api/v1/tasks) — real captured snapshot",
         "captured_utc": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -227,7 +248,6 @@ def main():
         "row_count": len(rows),
         "rows": rows,
     }
-    out = os.path.abspath(args.out)
     os.makedirs(os.path.dirname(out), exist_ok=True)
     with open(out, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
