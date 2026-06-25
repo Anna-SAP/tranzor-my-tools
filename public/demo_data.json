@@ -1,14 +1,14 @@
 {
   "source": "Tranzor MR Pipeline API (/api/v1/tasks) — real captured snapshot",
-  "captured_utc": "2026-06-24T09:18:45Z",
+  "captured_utc": "2026-06-25T01:54:57Z",
   "tranzor_base": "http://tranzor-platform.int.rclabenv.com",
   "stats": {
-    "total_tasks": 27145,
-    "completed_tasks": 9140,
-    "failed_tasks": 565,
-    "running_tasks": 1,
+    "total_tasks": 27434,
+    "completed_tasks": 9169,
+    "failed_tasks": 567,
+    "running_tasks": 0,
     "average_score": 96.22,
-    "total_mrs": 7685
+    "total_mrs": 7850
   },
   "recent_projects": [
     {
@@ -63,6 +63,149 @@
   "row_count": 20,
   "rows": [
     {
+      "project_id": "admin-web/frontend",
+      "mr_id": "5648",
+      "release": "Release 26.3.2",
+      "status": "completed",
+      "strings": 16,
+      "score": 100.0,
+      "duration": "39s",
+      "post_edit": false,
+      "age_seconds": 0
+    },
+    {
+      "project_id": "copilot-platform/nova/nova-studio-app",
+      "mr_id": "1152",
+      "release": "Nova 26.3.110",
+      "status": "completed",
+      "strings": 2,
+      "score": 100.0,
+      "duration": "1m54s",
+      "post_edit": false,
+      "age_seconds": 1392
+    },
+    {
+      "project_id": "copilot-platform/nova/nova-studio-app",
+      "mr_id": "1147",
+      "release": "Nova 26.3.110",
+      "status": "completed",
+      "strings": 1,
+      "score": 100.0,
+      "duration": "33s",
+      "post_edit": true,
+      "age_seconds": 2464
+    },
+    {
+      "project_id": "Fiji/Fiji",
+      "mr_id": "43699",
+      "release": "Jupiter Web 26.3.20",
+      "status": "completed",
+      "strings": 2,
+      "score": 100.0,
+      "duration": "1m57s",
+      "post_edit": false,
+      "age_seconds": 2995
+    },
+    {
+      "project_id": "admin-web/frontend",
+      "mr_id": "5657",
+      "release": "Release 26.3.2",
+      "status": "completed",
+      "strings": 25,
+      "score": 100.0,
+      "duration": "4m21s",
+      "post_edit": false,
+      "age_seconds": 3612
+    },
+    {
+      "project_id": "RND/rcvnc",
+      "mr_id": "5724",
+      "release": "NC_26.3.10",
+      "status": "completed",
+      "strings": 37,
+      "score": 99.2,
+      "duration": "7m22s",
+      "post_edit": false,
+      "age_seconds": 4013
+    },
+    {
+      "project_id": "Fiji/Fiji",
+      "mr_id": "44154",
+      "release": "Jupiter Web 26.3.10",
+      "status": "completed",
+      "strings": 2,
+      "score": 100.0,
+      "duration": "1m13s",
+      "post_edit": false,
+      "age_seconds": 33743
+    },
+    {
+      "project_id": "web/jedi",
+      "mr_id": "21756",
+      "release": "Release 26.3.2",
+      "status": "completed",
+      "strings": 1,
+      "score": 100.0,
+      "duration": "39s",
+      "post_edit": false,
+      "age_seconds": 34140
+    },
+    {
+      "project_id": "web/web",
+      "mr_id": "40597",
+      "release": "unknown",
+      "status": "completed",
+      "strings": 4,
+      "score": 92.2,
+      "duration": "50s",
+      "post_edit": true,
+      "age_seconds": 35256
+    },
+    {
+      "project_id": "web/web",
+      "mr_id": "40640",
+      "release": "unknown",
+      "status": "completed",
+      "strings": 1,
+      "score": 100.0,
+      "duration": "2m17s",
+      "post_edit": false,
+      "age_seconds": 37774
+    },
+    {
+      "project_id": "Fiji/Fiji",
+      "mr_id": "44015",
+      "release": "Jupiter Web 26.3.10",
+      "status": "completed",
+      "strings": 1,
+      "score": 100.0,
+      "duration": "1m21s",
+      "post_edit": false,
+      "age_seconds": 48766
+    },
+    {
+      "project_id": "web/web",
+      "mr_id": "40577",
+      "release": "Release 26.3.2",
+      "status": "completed",
+      "strings": 2,
+      "score": 94.1,
+      "duration": "39s",
+      "post_edit": false,
+      "age_seconds": 50061
+    },
+    {
+      "project_id": "Fiji/Fiji",
+      "mr_id": "44038",
+      "release": "Jupiter Web 26.3.10",
+      "status": "completed",
+      "strings": 12,
+      "score": 99.4,
+      "duration": "1m13s",
+      "post_edit": false,
+      "age_seconds": 57987
+    },
+    {
       "project_id": "web/web",
       "mr_id": "40598",
       "release": "Release 26.3.2",
@@ -71,18 +214,18 @@
       "score": 94.1,
       "duration": "1m03s",
       "post_edit": false,
-      "age_seconds": 0
+      "age_seconds": 60187
     },
     {
       "project_id": "CoreLib/mthor",
       "mr_id": "10708",
       "release": "mThor 26.3.10",
-      "status": "running",
+      "status": "completed",
       "strings": 87,
       "score": 99.1,
-      "duration": "9m16s",
+      "duration": "11m04s",
       "post_edit": false,
-      "age_seconds": 121
+      "age_seconds": 60308
     },
     {
       "project_id": "web/web",
@@ -93,29 +236,7 @@
       "score": 100.0,
       "duration": "2m44s",
       "post_edit": false,
-      "age_seconds": 461
-    },
-    {
-      "project_id": "admin-web/frontend",
-      "mr_id": "5648",
-      "release": "Release 26.3.2",
-      "status": "completed",
-      "strings": 16,
-      "score": 100.0,
-      "duration": "29s",
-      "post_edit": false,
-      "age_seconds": 667
-    },
-    {
-      "project_id": "Fiji/Fiji",
-      "mr_id": "44154",
-      "release": "Jupiter Web 26.3.10",
-      "status": "completed",
-      "strings": 2,
-      "score": 100.0,
-      "duration": "1m16s",
-      "post_edit": false,
-      "age_seconds": 742
+      "age_seconds": 60649
     },
     {
       "project_id": "copilot-platform/nova/nova-studio-app",
@@ -126,7 +247,7 @@
       "score": 99.9,
       "duration": "3m49s",
       "post_edit": false,
-      "age_seconds": 2496
+      "age_seconds": 62683
     },
     {
       "project_id": "web/web",
@@ -137,7 +258,7 @@
       "score": 100.0,
       "duration": "1m07s",
       "post_edit": true,
-      "age_seconds": 2804
+      "age_seconds": 62991
     },
     {
       "project_id": "common/uns",
@@ -148,7 +269,7 @@
       "score": 100.0,
       "duration": "57s",
       "post_edit": false,
-      "age_seconds": 2991
+      "age_seconds": 63178
     },
     {
       "project_id": "copilot-platform/nova/nova-studio-app",
@@ -159,128 +280,7 @@
       "score": 100.0,
       "duration": "12m32s",
       "post_edit": false,
-      "age_seconds": 3058
-    },
-    {
-      "project_id": "Fiji/Fiji",
-      "mr_id": "44162",
-      "release": "Jupiter Web 26.3.10",
-      "status": "completed",
-      "strings": 4,
-      "score": 100.0,
-      "duration": "3m06s",
-      "post_edit": false,
-      "age_seconds": 3661
-    },
-    {
-      "project_id": "copilot-platform/nova/nova-studio-app",
-      "mr_id": "1147",
-      "release": "Nova 26.3.110",
-      "status": "completed",
-      "strings": 1,
-      "score": 99.9,
-      "duration": "21m34s",
-      "post_edit": true,
-      "age_seconds": 3709
-    },
-    {
-      "project_id": "web/web",
-      "mr_id": "40577",
-      "release": "Release 26.3.2",
-      "status": "completed",
-      "strings": 2,
-      "score": 94.1,
-      "duration": "1m37s",
-      "post_edit": false,
-      "age_seconds": 4000
-    },
-    {
-      "project_id": "integration/integration-apps",
-      "mr_id": "28884",
-      "release": "Release 26.3.20",
-      "status": "completed",
-      "strings": 3,
-      "score": 98.0,
-      "duration": "48s",
-      "post_edit": false,
-      "age_seconds": 4913
-    },
-    {
-      "project_id": "dpw-xmn/apw-in-jupiter",
-      "mr_id": "2630",
-      "release": "NWB 26.3.110",
-      "status": "completed",
-      "strings": 2,
-      "score": 100.0,
-      "duration": "1m12s",
-      "post_edit": false,
-      "age_seconds": 6863
-    },
-    {
-      "project_id": "web/web",
-      "mr_id": "40626",
-      "release": "Release 26.3.2",
-      "status": "completed",
-      "strings": 1,
-      "score": 94.4,
-      "duration": "2m58s",
-      "post_edit": true,
-      "age_seconds": 7312
-    },
-    {
-      "project_id": "engage-voice/frontend/engage-unified-analytics",
-      "mr_id": "153",
-      "release": "unknown",
-      "status": "completed",
-      "strings": 5,
-      "score": 100.0,
-      "duration": "26s",
-      "post_edit": false,
-      "age_seconds": 8560
-    },
-    {
-      "project_id": "web/web",
-      "mr_id": "40597",
-      "release": "unknown",
-      "status": "completed",
-      "strings": 3,
-      "score": 89.4,
-      "duration": "47s",
-      "post_edit": true,
-      "age_seconds": 9066
-    },
-    {
-      "project_id": "CoreLib/rcvrooms",
-      "mr_id": "344",
-      "release": "Rooms 26.3.10",
-      "status": "completed",
-      "strings": 6,
-      "score": 100.0,
-      "duration": "49s",
-      "post_edit": false,
-      "age_seconds": 9903
-    },
-    {
-      "project_id": "Fiji/Fiji",
-      "mr_id": "44038",
-      "release": "Jupiter Web 26.3.10",
-      "status": "completed",
-      "strings": 12,
-      "score": 99.4,
-      "duration": "1m21s",
-      "post_edit": false,
-      "age_seconds": 11099
-    },
-    {
-      "project_id": "web/web",
-      "mr_id": "40618",
-      "release": "Release 26.3.2",
-      "status": "completed",
-      "strings": 4,
-      "score": 99.9,
-      "duration": "1m01s",
-      "post_edit": false,
-      "age_seconds": 12738
+      "age_seconds": 63245
     }
   ]
 }

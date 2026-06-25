@@ -510,7 +510,10 @@
   function fetchSnapshot() {
     return new Promise(function (resolve, reject) {
       if (!window.fetch) { reject(new Error("fetch unsupported")); return; }
-      fetch("./demo_data.json", { headers: { "Accept": "application/json" } })
+      // Cache-bust so Refresh (and the auto-refresh loop's output) always pulls
+      // the freshest deployed snapshot, past any proxy/CDN cache.
+      fetch("./demo_data.json?t=" + Date.now(),
+            { cache: "no-store", headers: { "Accept": "application/json" } })
         .then(function (res) {
           if (!res.ok) throw new Error("HTTP " + res.status);
           return res.json();
@@ -769,7 +772,7 @@
       el.title = "Showing real, live data fetched directly from the Tranzor backend.";
     } else if (mode === "snapshot") {
       var when = (snapshotMeta && snapshotMeta.captured_utc)
-        ? " · captured " + snapshotMeta.captured_utc.slice(0, 10) : "";
+        ? " · captured " + snapshotMeta.captured_utc.slice(0, 16).replace("T", " ") + " UTC" : "";
       el.textContent = "● Real Tranzor data" + when;
       el.title = "Real MR Pipeline data captured from the Tranzor API. The live API " +
                  "is an internal http host with no CORS, so this static page can't call " +
