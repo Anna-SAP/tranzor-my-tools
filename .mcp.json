@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "opus-search": {
+      "command": "python",
+      "args": ["mcp_servers/opus_search_mcp.py"]
+    }
+  }
+}
