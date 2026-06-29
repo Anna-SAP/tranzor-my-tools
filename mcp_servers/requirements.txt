@@ -1,0 +1,5 @@
+# MCP servers 以独立进程运行 —— 不进 PyInstaller 打的 GUI 单文件 exe，
+# 所以这里钉版本不影响主程序"仅 requests + openpyxl"的体质。
+# 为供应链卫生钉死版本（AppSec ASCON-1781）。升级需经审阅。
+# 安装：pip install --require-hashes -r mcp_servers/requirements.txt （或普通 pip install -r）
+mcp==1.28.1
