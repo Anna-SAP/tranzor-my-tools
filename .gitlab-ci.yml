@@ -1,3 +1,10 @@
+variables:
+  # Work around the Windows PowerShell shell runner failing while exporting
+  # merge-commit metadata before checkout. The Pages job does not use these.
+  CI_COMMIT_TITLE: "pages deploy"
+  CI_COMMIT_MESSAGE: "pages deploy"
+  CI_COMMIT_DESCRIPTION: "pages deploy"
+
 pages:
   stage: deploy
   image: alpine:latest
