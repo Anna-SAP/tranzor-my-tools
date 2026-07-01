@@ -14,8 +14,10 @@
         desktop app in ~/.tranzor_exporter_auth.json).
     2. Commit & push to GitHub (origin) and GitLab (gitlab) master — only if
        the snapshot actually changed.
-    3. Start your local gitlab-runner so GitLab Pages rebuilds. Watch the
-       "pages" job go GREEN, then press Ctrl+C to stop the runner.
+    3. Deploy to GitLab Pages. If the gitlab-runner Windows service is
+       installed and running, it picks up the "pages" job automatically — just
+       wait for GREEN. Otherwise a foreground runner is started for you (press
+       Ctrl+C once the job is GREEN).
 
   NOTE: this is a data-only refresh, pushed straight to master on purpose
   (no PR) so it's a single quick step. Code changes still go through PRs.
@@ -54,12 +56,30 @@ Write-Host ''
 Write-Host '== 3/3  Deploying via your local runner ==' -ForegroundColor Cyan
 Write-Host '  Watch the "pages" job here:'
 Write-Host '  https://git.ringcentral.com/rc-ai-learning/annasu-tranzor-helper/-/pipelines'
-Write-Host '  When it turns GREEN (passed), press Ctrl+C to stop the runner — deploy is done.'
 Write-Host ''
-$runner = Join-Path $HOME 'GitLab-Runner\gitlab-runner.exe'
-if (Test-Path $runner) {
-  Set-Location (Split-Path $runner)
-  & $runner run
-} else {
-  Write-Host "gitlab-runner.exe not found at $runner — start your runner manually to deploy." -ForegroundColor Yellow
+
+# Prefer the installed gitlab-runner Windows service (auto-starts on boot, always
+# listening). Only fall back to a foreground runner when no service is present,
+# so we never have two runners racing for the same job.
+$svc = Get-Service -Name 'gitlab-runner' -ErrorAction SilentlyContinue
+if ($svc -and $svc.Status -eq 'Running') {
+  Write-Host '  gitlab-runner service is Running — it will pick up the "pages" job automatically.' -ForegroundColor Green
+  Write-Host '  Just wait for the pipeline to turn GREEN. Nothing else to do.' -ForegroundColor Green
+}
+elseif ($svc) {
+  Write-Host "  gitlab-runner service is installed but $($svc.Status) — starting it..." -ForegroundColor Yellow
+  Start-Service gitlab-runner
+  Write-Host '  Service started; it will deploy the "pages" job. Wait for GREEN.' -ForegroundColor Green
+}
+else {
+  Write-Host '  No gitlab-runner service found — starting a foreground runner instead.' -ForegroundColor Yellow
+  Write-Host '  When the job turns GREEN (passed), press Ctrl+C to stop the runner — deploy is done.' -ForegroundColor Yellow
+  Write-Host ''
+  $runner = Join-Path $HOME 'GitLab-Runner\gitlab-runner.exe'
+  if (Test-Path $runner) {
+    Set-Location (Split-Path $runner)
+    & $runner run
+  } else {
+    Write-Host "gitlab-runner.exe not found at $runner — start your runner manually to deploy." -ForegroundColor Yellow
+  }
 }
