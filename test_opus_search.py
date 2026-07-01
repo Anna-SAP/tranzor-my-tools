@@ -81,6 +81,51 @@ def test_product_filter():
     assert res["results"][0]["opus_id"] == _SCP
 
 
+def _mkdb_with(rows):
+    """建一个只含指定行的临时库（不掺入共享 _ROWS，避免影响其它用例计数）。"""
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    os.remove(path)
+    om.init_db(path)
+    placeholders = ",".join("?" * len(_COLS))
+    with om._connect(path) as c:
+        c.executemany(
+            f"INSERT OR REPLACE INTO opus_index ({','.join(_COLS)}) "
+            f"VALUES ({placeholders})",
+            rows,
+        )
+    return path
+
+
+def test_product_alias_group_expansion():
+    """copilot 别名分裂（copilot-web-widgets → copilotWidgets）：产品搜索必须
+    并集两个别名，而不是只返回其中一个时代的行。依赖 products.json 里登记的
+    COPILOT 别名组（这条测试同时守护该注册项不被删）。"""
+    rows = [
+        ("RingCentral.copilotWidgets.h1.chat.error.timeout", "de-DE", "tk",
+         "copilotWidgets", "h1", "chat.error.timeout",
+         "copilot-platform/business-components/copilot-web-widgets", None,
+         "Timed out", "Zeitüberschreitung",
+         "src/locales/en-US/index.json", "gitlab", None,
+         "2026-06-20", "2026-06-20T00:00:00Z"),
+        ("RingCentral.copilot-web-widgets.h0.chat.error.timeout", "de-DE", "tk",
+         "copilot-web-widgets", "h0", "chat.error.timeout",
+         "copilot-platform/business-components/copilot-web-widgets", None,
+         "Timed out", "Zeitüberschreitung (old)",
+         "src/locales/en-US/index.json", "gitlab", None,
+         "2026-05-10", "2026-05-10T00:00:00Z"),
+    ]
+    db = _mkdb_with(rows)
+    # group 名、当前别名、旧别名 三种入口都应命中两个 opus_id
+    assert osr.search_index(product="copilot", db_path=db)["count"] == 2
+    assert osr.search_index(product="copilotWidgets", db_path=db)["count"] == 2
+    assert osr.search_index(product="copilot-web-widgets", db_path=db)["count"] == 2
+    # 未登记的产品 token → 回退精确匹配（不误并）
+    assert osr.search_index(product="copilotWidgets",
+                            target_language="de-DE", db_path=db)["count"] == 2
+    assert osr.search_index(product="nonexistent-xyz", db_path=db)["count"] == 0
+
+
 def test_prefix_match():
     db = _mkdb()
     res = osr.search_index(opus_id="RingCentral.uns.", opus_match="prefix", db_path=db)

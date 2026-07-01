@@ -23,6 +23,27 @@ session = requests.Session()
 MAX_RETRIES = 3
 
 
+def _ensure_auth():
+    """安装平台 Bearer-JWT 注入器。
+
+    平台自 2026-06（commit f960a467）对每个 ``/api/v1/*`` 请求强制鉴权，未带
+    token 一律 401。本脚本用的是自建裸 ``requests.Session()``，不装注入器就会
+    在第一个请求即抛 401。这里复用 GUI 同款 ``tranzor_auth``（对平台 host 透明
+    注入 ``~/.tranzor_exporter_auth.json`` 里的 token）。无有效 token 时给出明确
+    指引并退出，而非甩一个裸 401 traceback。"""
+    try:
+        import tranzor_auth
+    except Exception as e:  # noqa: BLE001
+        print(f"⚠ 无法导入 tranzor_auth（{e}）；请求将不带鉴权，可能全部 401。")
+        return
+    tranzor_auth.load()
+    tranzor_auth.install()
+    if not tranzor_auth.has_valid_token():
+        print("⚠ 未找到有效的 Tranzor token（~/.tranzor_exporter_auth.json）。")
+        print("  请先在 Exporter GUI 里登录一次生成 token，再重跑本脚本。")
+        sys.exit(1)
+
+
 def api_get(url, **kwargs):
     kwargs.setdefault("timeout", 30)
     for attempt in range(MAX_RETRIES):
@@ -99,6 +120,8 @@ def main():
     print("=" * 70)
     print(f"Finding ALL human edits on {TARGET_DATE} for MR Pipeline tasks")
     print("=" * 70)
+
+    _ensure_auth()  # 平台 /api/v1/* 现需 Bearer token，否则全 401
 
     # Step 1: Get all MR summaries
     print(f"\n📋 Step 1: Fetching MR summaries from dashboard...")

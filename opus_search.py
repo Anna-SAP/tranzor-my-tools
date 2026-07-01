@@ -74,11 +74,46 @@ def _clean(v: str | None) -> str | None:
     return v or None
 
 
+def _product_aliases(product: str) -> list[str]:
+    """把一个产品 token 展开成它在 ``products.json`` 里登记的**全部别名**。
+
+    背景：平台会就地改别名（如 ``copilot-web-widgets`` → ``copilotWidgets``），
+    旧 opus_id 仍保留旧别名，同一产品的串因此跨多个 alias 值并存。产品搜索若
+    只按单个 alias 精确匹配，会静默漏掉另一别名下的历史（实测 copilot 两别名
+    各 345 / 527 行）。这里按别名组展开，配合 ``alias IN (...)`` 一并检索。
+
+    匹配优先级：① 精确命中某产品的 alias 或 name → 该产品的全部别名；
+    ② 命中某 group → 该 group 下所有产品别名的并集；③ 都不中（products.json
+    缺失 / 未登记）→ 回退 ``[product]``，等价旧的精确匹配，绝不因此让搜索失败。
+    """
+    pl = product.lower()
+    try:
+        from repo_corpus import load_products
+        products = load_products().get("products", [])
+    except Exception:
+        return [product]
+    # ① 精确 alias / name
+    for p in products:
+        aliases = [a for a in (p.get("aliases") or []) if a]
+        if pl in {a.lower() for a in aliases} or pl == (p.get("name") or "").lower():
+            return aliases or [product]
+    # ② group 并集（去重保序）
+    seen: set[str] = set()
+    group_aliases: list[str] = []
+    for p in products:
+        if pl == (p.get("group") or "").lower():
+            for a in (p.get("aliases") or []):
+                if a and a.lower() not in seen:
+                    seen.add(a.lower())
+                    group_aliases.append(a)
+    return group_aliases or [product]
+
+
 def search_index(
     *,
     opus_id: str | None = None,
     opus_match: str = "exact",          # "exact" | "prefix" | "contains"
-    product: str | None = None,          # alias，精确匹配（如 'uns' / 'scp'）
+    product: str | None = None,          # 产品别名/名/group，自动展开为全部别名（见 _product_aliases）
     target_language: str | None = None,  # 精确（如 'de-DE'）
     source_contains: str | None = None,  # 英文源子串
     translation_contains: str | None = None,  # 任一语言译文子串
@@ -147,8 +182,15 @@ def search_index(
             where.append("opus_id LIKE ? ESCAPE '\\'")
             params.append("%" + _esc(opus_id) + "%")
     if product:
-        where.append("alias = ?")
-        params.append(product)
+        # 展开为该产品的全部别名，抵御平台就地改别名导致的历史分裂。
+        aliases = _product_aliases(product)
+        if len(aliases) == 1:
+            where.append("alias = ?")
+            params.append(aliases[0])
+        else:
+            ph = ",".join("?" * len(aliases))
+            where.append(f"alias IN ({ph})")
+            params.extend(aliases)
     if target_language:
         where.append("target_language = ?")
         params.append(target_language)
@@ -274,7 +316,7 @@ def main(argv=None) -> int:
     ap.add_argument("--opus", help="OPUS ID（配合 --match）")
     ap.add_argument("--match", choices=["exact", "prefix", "contains"],
                     default="exact", help="OPUS ID 匹配方式，默认 exact")
-    ap.add_argument("--product", help="产品别名（如 uns / scp / chc）")
+    ap.add_argument("--product", help="产品别名/名/group（如 uns / scp / copilot）；自动展开为该产品全部别名")
     ap.add_argument("--lang", help="目标语言（如 de-DE）")
     ap.add_argument("--source", help="英文源子串")
     ap.add_argument("--translation", help="任一语言译文子串")
