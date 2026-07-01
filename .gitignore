@@ -38,3 +38,8 @@ gitlab_token_embed.py
 
 # Claude Code local session / settings
 .claude/
+
+# Stray gitlab-runner artifacts if the runner is ever launched from the repo dir
+# (its real working dir is C:\Users\<you>\GitLab-Runner). Never commit these.
+.runner_system_id
+builds/

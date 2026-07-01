@@ -5,19 +5,21 @@
 
 .DESCRIPTION
   Runs a loop that every few minutes captures the latest REAL Tranzor data and
-  pushes it; your local gitlab-runner (running in a SEPARATE window) then
-  redeploys GitLab Pages. Colleagues opening the demo — or clicking Refresh —
-  see data that's at most one interval old. No tokens are exposed anywhere.
+  pushes it; your local gitlab-runner then redeploys GitLab Pages. Colleagues
+  opening the demo — or clicking Refresh — see data that's at most one interval
+  old. No tokens are exposed anywhere.
 
-  TWO windows are needed:
-    Window 1 (the runner — deploys):
-        cd "$HOME\GitLab-Runner"; .\gitlab-runner.exe run
-    Window 2 (this loop — refreshes):
+  The deploying half (the runner) is handled by the gitlab-runner WINDOWS
+  SERVICE, installed once — it auto-starts on boot and picks up every "pages"
+  job, so you only need to run THIS loop:
         cd C:\Users\susu82\Tranzor-Platform\my-tools; .\auto_refresh_demo.ps1
 
-  Press Ctrl+C in either window to stop. When you log off, stop both — the demo
-  then freezes at the last snapshot (still real data, just not updating) until
-  you start them again.
+  (No service? Start a runner in a separate window instead:
+        cd "$HOME\GitLab-Runner"; .\gitlab-runner.exe run )
+
+  Press Ctrl+C to stop this loop. When you log off, the demo freezes at the last
+  snapshot (still real data, just not updating) until you start the loop again.
+  The service keeps running regardless; it only deploys when something is pushed.
 
 .PARAMETER IntervalMinutes
   Minutes between refreshes (default 10). Each refresh is a light "--fast"
@@ -34,7 +36,12 @@ $repo = if ($PSScriptRoot) { $PSScriptRoot } else { 'C:\Users\susu82\Tranzor-Pla
 Set-Location $repo
 
 Write-Host "Auto-refresh loop started (every $IntervalMinutes min)." -ForegroundColor Cyan
-Write-Host "Make sure the runner is running in another window, or nothing will deploy." -ForegroundColor Yellow
+$svc = Get-Service -Name 'gitlab-runner' -ErrorAction SilentlyContinue
+if ($svc -and $svc.Status -eq 'Running') {
+  Write-Host "gitlab-runner service is Running — pushes deploy automatically." -ForegroundColor Green
+} else {
+  Write-Host "gitlab-runner service NOT running — start a runner in another window, or nothing will deploy." -ForegroundColor Yellow
+}
 Write-Host "Press Ctrl+C to stop.`n"
 
 while ($true) {
