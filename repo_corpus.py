@@ -165,11 +165,16 @@ def find_product(name: str, products: dict | None = None) -> dict:
 # ---------------------------------------------------------------------------
 # path_hash 选择：优先借用索引里同 (alias, key) 的真实 path_hash
 # ---------------------------------------------------------------------------
-def _resolve_path_hash(conn, alias: str, key: str, source_rel_path: str) -> tuple[str, bool]:
+def _resolve_path_hash(conn, alias: str, key: str, source_rel_path: str,
+                       strip: str = "") -> tuple[str, bool]:
     """返回 (path_hash, borrowed)。
 
     借用条件：索引里该 (alias, logical_key) 只对应唯一 path_hash（说明同一
     平台文件），直接复用 → 与平台一致。否则用 md5(源相对路径) 作派生值。
+
+    ``strip``：产品在平台 ``HASH_PATH_RULES`` 里的 locale-token 剥除值（见
+    ``om.md5_path``）。派生（非借用）时透传给 md5_path，使派生 hash 与平台一致。
+    UNS 等无 strip 规则的产品传空串＝旧行为。
     """
     rows = conn.execute(
         "SELECT DISTINCT path_hash FROM opus_index "
@@ -178,7 +183,7 @@ def _resolve_path_hash(conn, alias: str, key: str, source_rel_path: str) -> tupl
         (alias, key)).fetchall()
     if len(rows) == 1 and rows[0]["path_hash"]:
         return rows[0]["path_hash"], True
-    return om.md5_path(source_rel_path), False
+    return om.md5_path(source_rel_path, strip), False
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +215,7 @@ def ingest_properties_product(
     if not globs:
         raise ValueError(f"产品 {product.get('name')} 无 .properties locale_glob")
     src_token = product.get("source_locale_token", "en_US")
+    strip = product.get("strip", "") or ""  # HASH_PATH_RULES 剥除 token（UNS 无＝""）
     tokens = locale_tokens or _DEFAULT_LOCALE_TOKENS
     if client is None:
         import gitlab_client as gc
@@ -253,7 +259,7 @@ def ingest_properties_product(
         rows = []
         borrowed = 0
         for key, lang_map in by_key.items():
-            ph, was_borrowed = _resolve_path_hash(conn, alias, key, source_rel_path)
+            ph, was_borrowed = _resolve_path_hash(conn, alias, key, source_rel_path, strip)
             if was_borrowed:
                 borrowed += 1
             opus_id = f"RingCentral.{alias}.{ph}.{key}"

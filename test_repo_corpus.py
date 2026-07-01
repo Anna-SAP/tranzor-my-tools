@@ -137,6 +137,49 @@ def test_dry_run_writes_nothing():
         assert c.execute("SELECT COUNT(*) FROM opus_index").fetchone()[0] == 0
 
 
+# ----------------------------- strip-aware path hashing ---------------------
+def test_md5_path_strip_matches_platform_replace():
+    import hashlib
+    p = "src/locales/en/translation.json"
+    # 无 strip：等价旧行为（原始路径 md5）
+    assert om.md5_path(p) == hashlib.md5(p.encode("utf-8")).hexdigest()
+    # strip='en'：平台朴素 replace（去掉所有 'en' 出现）后再 md5
+    stripped = p.replace("en", "")
+    assert om.md5_path(p, strip="en") == hashlib.md5(stripped.encode("utf-8")).hexdigest()
+    # 剥后与原始 hash 不同（否则说明没生效）
+    assert om.md5_path(p, strip="en") != om.md5_path(p)
+    # 空 strip 与缺省一致
+    assert om.md5_path(p, strip="") == om.md5_path(p)
+
+
+def test_resolve_path_hash_uses_strip_when_deriving():
+    db = _mkdb()
+    with om._connect(db) as conn:  # 空库 → 无可借用 → 走派生
+        ph, borrowed = rc._resolve_path_hash(
+            conn, "novaStudio", "some.key",
+            "src/locales/en/translation.json", strip="en")
+    assert borrowed is False
+    assert ph == om.md5_path("src/locales/en/translation.json", strip="en")
+    assert ph != om.md5_path("src/locales/en/translation.json")
+
+
+def test_ingest_threads_strip_into_derived_hash():
+    db = _mkdb()
+    prod = dict(_PROD, aliases=["stripped"], strip="en_US")
+    rc.ingest_properties_product(
+        prod, client=FakeClient(_files()), db_path=db,
+        locale_tokens=["en_US", "de_DE"])
+    # 源相对路径 = glob 用 en_US 展开；派生 hash 应剥掉 'en_US'
+    src_rel = "x/Translations_en_US.properties"
+    h = om.md5_path(src_rel, strip="en_US")
+    assert osr.search_index(
+        opus_id=f"RingCentral.stripped.{h}.GREETING", db_path=db)["count"] == 1
+    # 反证：不剥的 hash 不应命中
+    h_raw = om.md5_path(src_rel)
+    assert osr.search_index(
+        opus_id=f"RingCentral.stripped.{h_raw}.GREETING", db_path=db)["count"] == 0
+
+
 def _run_standalone():
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]

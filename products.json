@@ -2,7 +2,7 @@
   "_meta": {
     "purpose": "本地化经理负责的产品 → GitLab 仓库 / 本地化文件格式 注册表。供「GitLab 产品仓库全量基线摄取」(Phase 1b) 使用：按产品拉取已合并的全套 locale 文件，解析出 (opus_id, en-US 源, 各语言译文) 灌入本地索引 opus_index.db，使 OPUS 搜索从「最新但不全」升级为「最新 + 最全」。",
     "background": "Tranzor 上线后翻译只回写 GitLab 产品仓库，不再回写旧 OPUS/loc-central，故 l10n-tool HTTP 目录的全量包 (UNS.zip 等) 严重滞后。GitLab 产品仓库才是唯一「最新 + 最全」的数据源。详见项目记忆 project-loc-full-export-pivot。",
-    "opus_id_algorithm": "RingCentral.{alias}.{md5(sourceRelativePath)}.{logicalKey} —— 已用真实 opus_index.db 交叉验证：path_hash == md5(源相对路径)（无归一化，UTF-8）。每个产品最大的正确性工作量是复刻其 sourceRelativePath 字符串约定（与 l10n-cli 一致），否则重建出的 opus_id 对不上。",
+    "opus_id_algorithm": "RingCentral.{alias}.{md5(sourceRelativePath)}.{logicalKey} —— 已用真实 opus_index.db 交叉验证：path_hash == md5(源相对路径)（UTF-8）。⚠️ 2026-07 校正：仅对**无 strip 规则**的产品（如 UNS）成立；对注册在平台 context-service HASH_PATH_RULES 的产品（如 nova-studio strip='en'、webinarHost* strip='en'、rcvWeb/ringcx-salesforce-byot/ringsense-ui/workflow-studio/apTwilight strip='en-US'、engage-unified-analytics strip='en_US'），path_hash = md5(路径朴素 replace 掉 strip token 后)，非原始路径 md5。给这类产品条目加可选字段 \"strip\": \"<token>\"，repo_corpus 摄取时会透传给 md5_path。每个产品最大的正确性工作量是复刻其 sourceRelativePath 字符串约定（与 l10n-cli 一致），否则重建出的 opus_id 对不上。",
     "alias_source": "aliases 与 gitlab 路径来自真实 opus_index.db 的 alias / project_id 字段交叉比对（截至 2026-06-09，库内约 127 万行）。verified=false 的条目需在 Phase 1b 实接仓库时确认 group、default_branch、locale_globs、format。",
     "gitlab_base": "https://git.ringcentral.com",
     "source_locale": "en-US",
@@ -128,6 +128,13 @@
       "formats": ["ts"], "locale_globs": ["src/app/lang/**/index-*.ts"],
       "source_locale_token": "en_US", "verified": false,
       "notes": "库内数据少 (18 行)，路径沿用 web/* 约定待确认。"
+    },
+    {
+      "group": "COPILOT", "name": "Copilot Web Widgets", "aliases": ["copilotWidgets", "copilot-web-widgets"],
+      "gitlab": "copilot-platform/business-components/copilot-web-widgets", "repo_hint": "copilot-web-widgets.git", "default_branch": "master",
+      "formats": [], "locale_globs": [],
+      "source_locale_token": "en-US", "verified": false,
+      "notes": "平台 2026-06-09 (14de130a) 把 alias copilot-web-widgets→copilotWidgets，同产品 opus_id 跨两个 alias 分裂（索引实测 copilot-web-widgets≈345 行 / copilotWidgets≈527 行，共享 logical_key）。此处登记为别名组，opus_search 产品过滤用 IN(所有别名) 合并检索，避免搜 --product 只拿到一半历史。formats/locale_globs 待实接确认。"
     },
     {
       "group": "BUI", "name": "BUI", "aliases": ["bui"],

@@ -1013,13 +1013,21 @@ def backfill_missing_paths(db_path: str | None = None) -> dict:
         }
 
 
-def md5_path(relative_path: str) -> str:
+def md5_path(relative_path: str, strip: str = "") -> str:
     """计算 ``RingCentral.{alias}.{md5}.{logical}`` 中段 md5，跟 Tranzor 的
     LegacyTranslationKey.ts ``createHash('md5').update(sourceRelativePath)``
-    完全等价。供反查工具用。"""
+    完全等价。供反查工具用。
+
+    ``strip``：对注册在平台 context-service ``HASH_PATH_RULES`` 的项目，平台在
+    md5 前会先把该 locale token 从路径里剥掉（``rel.replace(strip, '')``，如
+    strip='en' / 'en-US' / 'en_US'）。默认空串＝不剥，等价旧行为（UNS 等无
+    strip 规则的项目照旧）。务必用与平台一致的**朴素 replace**（去掉所有出现、
+    不做分段判断，故可能留下 ``//`` 双斜杠），否则反推出的 opus_id 对不上。"""
     import hashlib
     if not relative_path:
         return ""
+    if strip:
+        relative_path = relative_path.replace(strip, "")
     return hashlib.md5(relative_path.encode("utf-8")).hexdigest()
 
 
