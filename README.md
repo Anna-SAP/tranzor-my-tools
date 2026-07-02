@@ -104,12 +104,12 @@ The window is a `ttk.Notebook`. The first three tabs are core; the remaining ele
 
 | Tab | What it does | Why it matters |
 |---|---|---|
-| 📁 **File Translation** | Export a legacy/manual job (by Task ID or all) to HTML/Excel; the HTML report has live filtering, search, in-browser **TMX export**, and `↗ Send to Tranzor`. | One-click export to XTM-compatible TMX — no terminal. |
-| 🔀 **MR Pipeline** | Lists GitLab-MR-triggered translation tasks (project, MR#, release, status, source-string count, avg score…) with paging/sorting/filtering and the ✏️ post-edit marker. | The daily view of what the incremental pipeline produced. |
+| 📁 **File Translation** | Export a legacy/manual job (by Task ID or all) to HTML/Excel; the HTML report has live filtering, search, in-browser **TMX export**, and `↗ Send to Tranzor`. The platform-task list is a wide MR-Pipeline-style table (Task ID, Task Name, Creator, Status, **en-US Strings**, Created) — click a row to fill the Task ID. | One-click export to XTM-compatible TMX — no terminal. |
+| 🔀 **MR Pipeline** | Lists GitLab-MR-triggered translation tasks (project, MR#, release, status, **en-US Strings** count, avg score…) with paging/sorting/filtering and the ✏️ post-edit marker. | The daily view of what the incremental pipeline produced. |
 | 📊 **Quality Overview** | Aggregated quality stats with MR & File sub-tabs; flags human-touched items. | At-a-glance quality posture across both channels. |
 | 🌍 **Full Translations** | Bulk export by **product × language**; lazy inventory load so startup stays fast, heavy fetch only on export. | Whole-product / whole-locale exports without slow startup. |
 | **Human Revisions** | Aggregates every human-edit record across both channels (default last 30 days). | One place to audit and learn from human corrections. |
-| 🔎 **Scan Tasks** | Lists "Missing Translation Scan" jobs; filter and export coverage results. | Track coverage sweeps separately from the MR pipeline. |
+| 🔎 **Scan Tasks** | Lists "Missing Translation Scan" jobs (with the same **en-US Strings** count as MR Pipeline); filter and export coverage results. | Track coverage sweeps separately from the MR pipeline. |
 | 🛡️ **Term Watchtower** | Import an approved glossary, run a **deterministic** (non-LLM) terminology scan, flag every violation with expected-vs-actual + full context, export evidence. | Catch approved-term violations and hand the dev team proof. |
 | 🔬 **TM & Context Insight** | Visualizes *where* a translation came from (TM / ICE / cache / LLM / human) and whether Context Service attached context. | Lets non-engineers diagnose bad MT output. |
 | 🧬 **OPUS ID Monitor** | Local SQLite cache of every OPUS ID; summary cards, per-project buckets, 30-day new-ID chart. | "Anytime, anywhere" pulse of translation volume. |

@@ -13,6 +13,7 @@ import os
 import sys
 import threading
 import tkinter as tk
+from concurrent.futures import ThreadPoolExecutor
 from tkinter import ttk
 from datetime import date, datetime
 
@@ -49,6 +50,7 @@ STRINGS = {
         "scan_col_base_ref":     "Base Ref",
         "scan_col_head_ref":     "Head Ref",
         "scan_col_status":       "Status",
+        "scan_col_src_strings":  "en-US Strings",
         "scan_col_output_mode":  "Output Mode",
         "scan_col_created":      "Created",
         "scan_col_age":          "Age",
@@ -73,6 +75,7 @@ STRINGS = {
         "scan_col_base_ref":     "Base Ref",
         "scan_col_head_ref":     "Head Ref",
         "scan_col_status":       "状态",
+        "scan_col_src_strings":  "en-US 字符串数",
         "scan_col_output_mode":  "输出模式",
         "scan_col_created":      "创建时间",
         "scan_col_age":          "距今",
@@ -90,7 +93,7 @@ class ScanTasksTab:
     # purpose. Resolve positional reads via ``.index(...)`` against this so a
     # future column reshuffle can't silently point them at the wrong cell.
     _SCAN_COLUMNS = ("idx", "task_name", "project", "base_ref", "head_ref",
-                     "status", "output_mode", "created", "age")
+                     "status", "src_strings", "output_mode", "created", "age")
 
     @staticmethod
     def _build_export_filename(ext, *, task_name="", id_tag="", type_tag="",
@@ -130,6 +133,12 @@ class ScanTasksTab:
         # task_id → Treeview iid; populated by _on_tasks_loaded so the
         # async post-edit prefetch callback can find the row to mark.
         self._scan_row_iid_by_task: dict[str, str] = {}
+        # task_id → distinct en-US source-string count. Cached so paging
+        # back/forth and re-search don't re-hit the results API — a completed
+        # scan's source-string count is immutable. Filled from worker threads,
+        # so guard it with a lock. Mirrors MR Pipeline's src-count cache.
+        self._scan_src_cache: dict[str, int] = {}
+        self._scan_src_lock = threading.Lock()
         self._build(parent)
 
     def _t(self, key):
@@ -311,7 +320,8 @@ class ScanTasksTab:
         # 是常态，必须给出"几年前的"瞬时信号。
         col_widths = {"idx": 35, "task_name": 150, "project": 130,
                       "base_ref": 120, "head_ref": 120, "status": 80,
-                      "output_mode": 100, "created": 140, "age": 55}
+                      "src_strings": 90, "output_mode": 100,
+                      "created": 140, "age": 55}
         for c in cols:
             anchor = "w" if c in ("task_name", "project", "base_ref", "head_ref") else "center"
             self.scan_tree.column(c, width=col_widths.get(c, 80), anchor=anchor)
@@ -582,6 +592,7 @@ class ScanTasksTab:
         # (see _on_export) keeps working.
         self._scan_row_iid_by_task = {}
         prefetch_items: list[tuple[str, str]] = []
+        src_prefetch_ids: list[str] = []
         for i, t in enumerate(tasks):
             idx = self.scan_page * self.scan_page_size + i + 1
             created_raw = t.get("created_at") or ""
@@ -600,6 +611,11 @@ class ScanTasksTab:
             # — when paging back to a previously-fetched page, the synchronous
             # render must produce an identical-looking row, not a plain one.
             row_tags = (task_id, "post_edit") if cached else (task_id,)
+            # en-US source-string count: render from cache when known, else a
+            # "…" placeholder + queue an async fetch (mirrors MR Pipeline).
+            with self._scan_src_lock:
+                src_count = self._scan_src_cache.get(task_id)
+            src_display = src_count if src_count is not None else "…"
             iid = self.scan_tree.insert(
                 "", "end",
                 iid=task_id or None,
@@ -609,6 +625,7 @@ class ScanTasksTab:
                     t.get("base_ref", ""),
                     t.get("head_ref", ""),
                     t.get("status", ""),
+                    src_display,
                     t.get("output_mode", ""),
                     created,
                     age,
@@ -619,6 +636,8 @@ class ScanTasksTab:
                 self._scan_row_iid_by_task[task_id] = iid
                 if cached is None:
                     prefetch_items.append(("scan", task_id))
+                if src_count is None:
+                    src_prefetch_ids.append(task_id)
 
         # Fire-and-forget: ✏️ markers appear incrementally as per-task
         # detail fetches return. The legend below the table tells users
@@ -628,6 +647,11 @@ class ScanTasksTab:
                 prefetch_items,
                 on_result=self._on_post_edit_result,
             )
+
+        # Fill the en-US source-string counts asynchronously so the page stays
+        # responsive; cells flip from "…" to the number as each fetch returns.
+        if src_prefetch_ids:
+            self._prefetch_src_counts(src_prefetch_ids)
 
         effective_total = filtered_total
         total_pages = max(1, (effective_total + self.scan_page_size - 1) // self.scan_page_size)
@@ -686,6 +710,46 @@ class ScanTasksTab:
             current_tags.append("post_edit")
         try:
             self.scan_tree.item(iid, values=vals, tags=tuple(current_tags))
+        except tk.TclError:
+            pass
+
+    # ------------------------------------------------------------------
+    # en-US source-string counts — filled asynchronously so the page paints
+    # immediately (mirrors MRPipelineTab._prefetch_src_counts).
+    # ------------------------------------------------------------------
+    def _prefetch_src_counts(self, task_ids):
+        ids = [tid for tid in task_ids if tid]
+        if not ids:
+            return
+
+        def _run():
+            def _work(tid):
+                with self._scan_src_lock:
+                    count = self._scan_src_cache.get(tid)
+                if count is None:
+                    count = mr_api.count_scan_source_strings(tid)
+                    with self._scan_src_lock:
+                        self._scan_src_cache[tid] = count
+                try:
+                    self.parent.after(0, self._apply_src_count, tid, count)
+                except Exception:
+                    pass
+
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                list(pool.map(_work, ids))
+
+        threading.Thread(target=_run, name="scan-src-count-prefetch",
+                         daemon=True).start()
+
+    def _apply_src_count(self, task_id, count):
+        """Replace one row's "…" placeholder with its real count. Runs on the
+        Tk thread. The row may be gone (user paged / re-searched mid-fetch); a
+        stale write is harmless because iid == task_id, so guard regardless."""
+        iid = self._scan_row_iid_by_task.get(task_id)
+        if not iid:
+            return
+        try:
+            self.scan_tree.set(iid, "src_strings", count)
         except tk.TclError:
             pass
 

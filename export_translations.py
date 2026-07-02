@@ -228,6 +228,50 @@ def _fetch_all_translations_flat(task_id):
     return out
 
 
+def count_legacy_source_strings(task_id):
+    """Distinct en-US source-string count for one legacy File Translation task.
+
+    Counts distinct ``opus_id`` across the task's translation rows — the same
+    workload signal MR Pipeline / Scan Tasks show (see
+    ``export_mr_pipeline.distinct_source_string_count``). Legacy rows carry the
+    Tranzor string key as ``opus_id`` (the same field File Translation exports
+    map to ``string_key``), so distinct ``opus_id`` == distinct en-US strings.
+
+    Pages through ``/tasks/{id}/translations`` and unions the ids without the
+    ``translated_text`` filter, so fully-untranslated source strings still
+    count (parity with MR, which counts every opus_id). Distinct opus_id is
+    robust to the flat-pagination row-drop quirk: an id survives as long as any
+    one of its per-language rows is seen. Returns 0 on any error / empty task
+    so callers can render a number without special-casing failures.
+    """
+    try:
+        ids = set()
+        limit = 200
+        offset = 0
+        while True:
+            resp = _api_get(
+                f"{API}/tasks/{task_id}/translations",
+                params={"limit": limit, "offset": offset},
+            )
+            resp.raise_for_status()
+            data = resp.json() or {}
+            entries = data.get("entries", []) or []
+            for entry in entries:
+                oid = entry.get("opus_id")
+                if oid:
+                    ids.add(oid)
+            total = int(data.get("total") or 0)
+            offset += len(entries)
+            if not entries or offset >= total:
+                break
+            # 防御性兜底：服务端 total 不准、永不读空时避免无限循环
+            if offset > 1_000_000:
+                break
+        return len(ids)
+    except Exception:
+        return 0
+
+
 def _discover_languages(task_id):
     """探测该 task 数据里实际出现的目标语言集合（用于逐语言抓取）。
 

@@ -2925,6 +2925,21 @@ def fetch_scan_results(task_id):
     return first_resp
 
 
+def count_scan_source_strings(task_id):
+    """Distinct en-US source-string count for one Missing-Translation-Scan task.
+
+    Mirrors :func:`count_mr_source_strings` but reads the scan results endpoint
+    (the scan translation schema is identical to MR's, so distinct ``opus_id``
+    is the same en-US workload signal). Returns 0 on any error / empty task so
+    callers can render a number without special-casing failures.
+    """
+    try:
+        results = fetch_scan_results(task_id)
+    except Exception:
+        return 0
+    return distinct_source_string_count(results.get("translations", []))
+
+
 def detect_scan_changes(task_id, progress_callback=None):
     """收集某个 Scan 任务的翻译变更记录。
 
