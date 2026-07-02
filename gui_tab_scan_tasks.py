@@ -24,6 +24,9 @@ from export_gui import (
 )
 import task_post_edit as _tpe
 import advanced_filter
+# Aliased so the ``llm_qa`` boolean flag threaded through the export handlers
+# doesn't shadow the module inside those methods.
+import llm_qa as llm_qa_module
 
 
 STRINGS = {
@@ -221,6 +224,18 @@ class ScanTasksTab:
             bg="#2ecc71", fg="#fff", padx=14, pady=4, state="disabled")
         self.btn_scan_export.pack(side="left")
 
+        # One-click "export full-translation JSON + copy the LQA prompt" for the
+        # /rc-core-products-trans-checker workflow. Forces JSON + All
+        # Translations (see _on_export) then copies the prompt + pops a how-to
+        # dialog. Enable/disable tracks btn_scan_export.
+        self.btn_scan_llm_qa = self.app._create_button(
+            action, text=llm_qa_module.button_label(self.app.lang),
+            command=lambda: self._on_export(llm_qa=True),
+            style_name="SuccessSmall",
+            font=(FONT_FAMILY, 10, "bold"),
+            bg="#7c5cff", fg="#fff", padx=14, pady=4, state="disabled")
+        self.btn_scan_llm_qa.pack(side="left", padx=(8, 0))
+
         # Export Type selector — mirrors File Translation / MR Pipeline
         self.lbl_scan_export_type = ttk.Label(action, text="", style="Card.TLabel")
         self.lbl_scan_export_type.pack(side="left", padx=(16, 4))
@@ -359,6 +374,7 @@ class ScanTasksTab:
         self.btn_scan_search.configure(text=t("scan_search"))
         self.btn_scan_reset.configure(text=t("scan_reset"))
         self.btn_scan_export.configure(text=t("scan_export"))
+        self.btn_scan_llm_qa.configure(text=llm_qa_module.button_label(self.app.lang))
         self.lbl_scan_export_type.configure(text=t("export_type_label"))
         self.rb_scan_changes.configure(text=t("export_type_changes"))
         self.rb_scan_translations.configure(text=t("export_type_all"))
@@ -478,10 +494,12 @@ class ScanTasksTab:
         if IS_MAC:
             flag = ["!disabled"] if enabled else ["disabled"]
             self.btn_scan_export.state(flag)
+            self.btn_scan_llm_qa.state(flag)
             self.btn_scan_prev.state(flag)
             self.btn_scan_next.state(flag)
         else:
             self.btn_scan_export.configure(state=state)
+            self.btn_scan_llm_qa.configure(state=state)
             self.btn_scan_prev.configure(state=state)
             self.btn_scan_next.configure(state=state)
 
@@ -619,10 +637,12 @@ class ScanTasksTab:
             self.btn_scan_prev.state(["!disabled"] if self.scan_page > 0 else ["disabled"])
             self.btn_scan_next.state(["!disabled"] if has_next else ["disabled"])
             self.btn_scan_export.state(["!disabled"] if tasks else ["disabled"])
+            self.btn_scan_llm_qa.state(["!disabled"] if tasks else ["disabled"])
         else:
             self.btn_scan_prev.configure(state="normal" if self.scan_page > 0 else "disabled")
             self.btn_scan_next.configure(state="normal" if has_next else "disabled")
             self.btn_scan_export.configure(state="normal" if tasks else "disabled")
+            self.btn_scan_llm_qa.configure(state="normal" if tasks else "disabled")
         self.lbl_scan_status_bar.configure(text=self._t("status_ready"))
 
     # ------------------------------------------------------------------
@@ -678,7 +698,13 @@ class ScanTasksTab:
     # ------------------------------------------------------------------
     # Export
     # ------------------------------------------------------------------
-    def _on_export(self):
+    def _on_export(self, llm_qa=False):
+        """Export the selected scan task.
+
+        ``llm_qa=True`` is the "Send to LLM QA" path: it forces JSON + All
+        Translations regardless of the radios and, on success, copies the LQA
+        prompt to the clipboard and pops a how-to dialog (see _run_export).
+        """
         sel = self.scan_tree.selection()
         if not sel:
             self.lbl_scan_status_bar.configure(text="⚠ 请先选择一条任务")
@@ -702,23 +728,27 @@ class ScanTasksTab:
                 task_name = str(values[name_col] or "")
             if len(values) > created_col:
                 scan_created = str(values[created_col] or "")
-        fmt = self.scan_fmt_var.get()
-        export_type = self.scan_export_type_var.get()
+        # Send to LLM QA always writes the full-translation JSON audit shape.
+        fmt = "json" if llm_qa else self.scan_fmt_var.get()
+        export_type = "translations" if llm_qa else self.scan_export_type_var.get()
         # Read Advanced Filters on the main thread (Tk widgets aren't
         # thread-safe) and hand the snapshot to the worker.
         adv_state = self.adv_filter.get_state() if self.adv_filter else None
         if IS_MAC:
             self.btn_scan_export.state(["disabled"])
+            self.btn_scan_llm_qa.state(["disabled"])
         else:
             self.btn_scan_export.configure(state="disabled")
+            self.btn_scan_llm_qa.configure(state="disabled")
         self.lbl_scan_status_bar.configure(text=self._t("status_exporting"))
         threading.Thread(target=self._run_export,
                          args=(task_id, fmt, export_type, task_name, adv_state,
                                scan_created),
+                         kwargs={"llm_qa": llm_qa},
                          daemon=True).start()
 
     def _run_export(self, task_id, fmt, export_type="changes", task_name="",
-                    adv_state=None, scan_created=""):
+                    adv_state=None, scan_created="", llm_qa=False):
         try:
             if export_type == "changes":
                 changes = mr_api.detect_scan_changes(task_id)
@@ -774,6 +804,12 @@ class ScanTasksTab:
             # visual cue where the file landed — pop the file manager.
             if fmt != "html":
                 self.parent.after(0, lambda p=saved: reveal_in_folder(p))
+            # Send to LLM QA: JSON is out — now copy the LQA prompt to the
+            # clipboard and tell the user to upload + paste in their LLM. Must
+            # run on the main thread (Tk clipboard + dialog), hence after(0).
+            if llm_qa:
+                self.parent.after(0, lambda b=basename:
+                    llm_qa_module.send_prompt_and_notify(self.parent, b, self.app.lang))
         except Exception as e:
             msg = str(e)[:50]
             self.parent.after(0, lambda: self.lbl_scan_status_bar.configure(
@@ -782,6 +818,8 @@ class ScanTasksTab:
             def _restore():
                 if IS_MAC:
                     self.btn_scan_export.state(["!disabled"])
+                    self.btn_scan_llm_qa.state(["!disabled"])
                 else:
                     self.btn_scan_export.configure(state="normal")
+                    self.btn_scan_llm_qa.configure(state="normal")
             self.parent.after(0, _restore)

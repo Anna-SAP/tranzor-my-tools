@@ -302,6 +302,9 @@ import export_changes
 import export_translations
 import gui_tabs
 import tranzor_auth
+# Aliased so the ``llm_qa`` boolean flag threaded through the export handlers
+# doesn't shadow the module inside those methods.
+import llm_qa as llm_qa_module
 
 _boot_mark("core_siblings_imported")
 
@@ -1635,6 +1638,20 @@ class ExportApp:
             padx=20, pady=8, state="disabled")
         self.btn_open.pack(side="left", padx=(12, 0))
 
+        # One-click "export full-translation JSON + copy the LQA prompt" for the
+        # /rc-core-products-trans-checker workflow. Forces JSON + All
+        # Translations regardless of the radios above (see _on_run / _run_export),
+        # then copies the prompt to the clipboard and pops a how-to dialog.
+        self.btn_llm_qa = self._create_button(
+            btn_frame, text=llm_qa_module.button_label(self.lang),
+            command=lambda: self._on_run(llm_qa=True),
+            style_name="Secondary",
+            font=(FONT_FAMILY, 12, "bold"),
+            bg="#7c5cff", fg="#fff",
+            activebackground="#6c47ff", activeforeground="#fff",
+            padx=18, pady=8)
+        self.btn_llm_qa.pack(side="left", padx=(12, 0))
+
         self.status_label = ttk.Label(btn_frame, text="", style="Status.TLabel")
         self.status_label.pack(side="right")
 
@@ -1842,6 +1859,7 @@ class ExportApp:
         self.rb_json.configure(text=self._t("output_fmt_json"))
         self.btn_run.configure(text=self._t("btn_run"))
         self.btn_open.configure(text=self._t("btn_open"))
+        self.btn_llm_qa.configure(text=llm_qa_module.button_label(self.lang))
         self.lbl_log_header.configure(text=self._t("log_header"))
         self.lbl_footer.configure(text=self._t("footer"))
         self.btn_lang.configure(text=self._t("lang_toggle"))
@@ -2563,7 +2581,10 @@ class ExportApp:
                 self.task_var.set(str(task_id))
 
     # ── Event Handlers ──
-    def _on_run(self):
+    def _on_run(self, llm_qa=False):
+        """Run an export. ``llm_qa=True`` is the "Send to LLM QA" path: it
+        forces JSON + All Translations (done in _run_export) and, on success,
+        copies the LQA prompt to the clipboard and pops a how-to dialog."""
         if self.running:
             return
 
@@ -2581,10 +2602,12 @@ class ExportApp:
         self.last_output_path = None
         if IS_MAC:
             self.btn_run.state(["disabled"])
+            self.btn_llm_qa.state(["disabled"])
             self.btn_open.state(["disabled"])
             self.btn_open.configure(style="Secondary.TButton")
         else:
             self.btn_run.configure(state="disabled", bg="#555")
+            self.btn_llm_qa.configure(state="disabled", bg="#555")
             self.btn_open.configure(state="disabled", fg="#888")
         self.progress.start(15)
         self._mark_busy(self.status_label, self._t("status_exporting"))
@@ -2596,16 +2619,22 @@ class ExportApp:
 
         # Run in background thread
         t = threading.Thread(target=self._run_export,
-                              args=(task_id,), daemon=True)
+                              args=(task_id,), kwargs={"llm_qa": llm_qa},
+                              daemon=True)
         t.start()
 
-    def _run_export(self, task_id):
-        """Execute export in a background thread."""
+    def _run_export(self, task_id, llm_qa=False):
+        """Execute export in a background thread.
+
+        ``llm_qa=True`` (Send to LLM QA) forces JSON + All Translations so the
+        product always emits the LQA-audit schema regardless of the radios.
+        """
         redirector = TextRedirector(self.log_text)
         old_stdout = sys.stdout
         sys.stdout = redirector
 
-        export_type = self.export_type_var.get()
+        # Send to LLM QA always exports the full-translation JSON audit shape.
+        export_type = "translations" if llm_qa else self.export_type_var.get()
         # Capture language at start (user might toggle mid-export)
         lang = self.lang
 
@@ -2623,10 +2652,11 @@ class ExportApp:
             if not rows:
                 no_msg = STRINGS[lang]["no_records"].format(type=record_label)
                 print(no_msg)
-                self.root.after(0, self._on_done, None, False)
+                self.root.after(0, self._on_done, None, False, llm_qa)
                 return
 
-            fmt = self.fmt_var.get()
+            # Send to LLM QA always writes the JSON audit format.
+            fmt = "json" if llm_qa else self.fmt_var.get()
             ext = {"xlsx": ".xlsx", "json": ".json"}.get(fmt, ".html")
             today_str = date.today().isoformat()
             # Stamp the export instant down to the second (not just the date)
@@ -2682,23 +2712,25 @@ class ExportApp:
                     rows, filepath, label, fmt,
                     bridge_info=bridge_info, open_after=False)
 
-            self.root.after(0, self._on_done, saved or filepath, True)
+            self.root.after(0, self._on_done, saved or filepath, True, llm_qa)
 
         except Exception as e:
             err_msg = STRINGS[lang]["export_failed"].format(error=e)
             print(f"\n{err_msg}")
-            self.root.after(0, self._on_done, None, False)
+            self.root.after(0, self._on_done, None, False, llm_qa)
         finally:
             sys.stdout = old_stdout
 
-    def _on_done(self, filepath, success):
+    def _on_done(self, filepath, success, llm_qa=False):
         """Export completion callback (main thread)."""
         self.running = False
         self.progress.stop()
         if IS_MAC:
             self.btn_run.state(["!disabled"])
+            self.btn_llm_qa.state(["!disabled"])
         else:
             self.btn_run.configure(state="normal", bg=self.ACCENT_BTN)
+            self.btn_llm_qa.configure(state="normal", bg="#7c5cff")
 
         if success and filepath:
             self.last_output_path = filepath
@@ -2723,6 +2755,13 @@ class ExportApp:
                 # so the user can grab the file (drag into chat, attach to
                 # email, etc.) without hunting through the install dir.
                 reveal_in_folder(filepath)
+            # Send to LLM QA: JSON is out and revealed — now copy the LQA prompt
+            # to the clipboard and tell the user to upload + paste in their LLM.
+            if llm_qa:
+                llm_qa_copied = llm_qa_module.send_prompt_and_notify(
+                    self.root, basename, self.lang)
+                if not llm_qa_copied:
+                    print("[llm-qa] clipboard copy failed; prompt shown for manual copy")
         else:
             self._mark_idle(self.status_label, self._t("status_no_data"))
 
