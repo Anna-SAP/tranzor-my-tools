@@ -147,6 +147,7 @@ import threading
 import webbrowser
 import subprocess
 import tkinter as tk
+from concurrent.futures import ThreadPoolExecutor
 from tkinter import ttk, messagebox
 from datetime import date, datetime
 
@@ -504,9 +505,13 @@ STRINGS = {
         "summary_next_tip":   "Next page",
         "summary_page_info":  "Page {page} / {total_pages}  ·  {start}-{end} of {total}",
         "summary_page_empty": "Page 0 / 0  ·  No tasks",
-        "summary_col_id":     "ID",
+        "summary_col_idx":    "#",
+        "summary_col_id":     "Task ID",
         "summary_col_name":   "Task Name",
         "summary_col_creator":"Creator",
+        "summary_col_status": "Status",
+        "summary_col_src":    "en-US Strings",
+        "summary_col_created":"Created",
         # Platform login (Bearer-JWT auth)
         "login_title":        "Platform Sign-in",
         "login_subtitle":     "The platform requires sign-in. Use your LDAP (RingCentral) email and password. Only a 7-day token is stored — never your password.",
@@ -648,9 +653,13 @@ STRINGS = {
         "summary_next_tip":   "下一页",
         "summary_page_info":  "第 {page}/{total_pages} 页  ·  {start}-{end} / {total}",
         "summary_page_empty": "第 0/0 页  ·  暂无任务",
-        "summary_col_id":     "ID",
+        "summary_col_idx":    "#",
+        "summary_col_id":     "Task ID",
         "summary_col_name":   "任务名称",
         "summary_col_creator":"创建者",
+        "summary_col_status": "状态",
+        "summary_col_src":    "en-US 字符串数",
+        "summary_col_created":"创建时间",
         # Platform login (Bearer-JWT auth)
         "login_title":        "平台登录",
         "login_subtitle":     "平台现在需要登录。请使用你的 LDAP（RingCentral）邮箱和密码。本机只保存 7 天有效的令牌，绝不保存密码。",
@@ -1038,6 +1047,15 @@ class ExportApp:
         self.summary_page_size = self.SUMMARY_DEFAULT_PAGE_SIZE
         self.summary_selected_task_id = None
         self.summary_resize_job = None
+        # task_id → distinct en-US source-string count for the platform-task
+        # table. Cached so paging back/forth doesn't re-hit the translations
+        # API — a completed task's source-string count is immutable. Filled
+        # from worker threads, so guard it with a lock (mirrors MR Pipeline).
+        self._summary_src_cache: dict[str, int] = {}
+        self._summary_src_lock = threading.Lock()
+        # task_id → Treeview iid, populated by _render_summary_page so async
+        # callbacks (post-edit prefix, src-count fill) can find the row.
+        self._summary_row_iid_by_task: dict[str, str] = {}
 
         # Setup
         _boot_mark("ExportApp_init_start")
@@ -1542,21 +1560,19 @@ class ExportApp:
         _boot_mark("tab_same_origin")
 
         # ═══════════════════════════════════════════
-        # TAB 1 CONTENTS (File Translation — preserved)
+        # TAB 1 CONTENTS (File Translation)
         # ═══════════════════════════════════════════
+        # Layout mirrors MR Pipeline / Scan Tasks: settings + action buttons on
+        # top, then a WIDE platform-task table (left) beside a compact stats
+        # sidebar (right), then a small export-log strip along the bottom. The
+        # task list used to be squeezed into the narrow right sidebar with no
+        # en-US Strings column; it is now the primary, full-width view.
         content = ttk.Frame(tab1, style="App.TFrame")
         content.pack(fill="both", expand=True, padx=8, pady=(8, 0))
 
-        left = ttk.Frame(content, style="App.TFrame")
-        left.pack(side="left", fill="both", expand=True)
-
-        right = ttk.Frame(content, style="App.TFrame", width=360)
-        right.pack(side="right", fill="y", padx=(16, 0))
-        right.pack_propagate(False)
-
-        # ── Settings Card ──
-        card = ttk.Frame(left, style="Card.TFrame")
-        card.pack(fill="x", pady=(0, 0))
+        # ── Settings Card (full width, top) ──
+        card = ttk.Frame(content, style="Card.TFrame")
+        card.pack(side="top", fill="x", pady=(0, 0))
         card.configure(borderwidth=1, relief="solid")
 
         inner = ttk.Frame(card, style="Card.TFrame")
@@ -1617,9 +1633,9 @@ class ExportApp:
                          style="Card.TRadiobutton")
         self.rb_json.pack(side="left")
 
-        # ── Button Area ──
-        btn_frame = ttk.Frame(left, style="App.TFrame")
-        btn_frame.pack(fill="x", pady=(16, 0))
+        # ── Button Area (full width, top) ──
+        btn_frame = ttk.Frame(content, style="App.TFrame")
+        btn_frame.pack(side="top", fill="x", pady=(12, 0))
 
         self.btn_run = self._create_button(
             btn_frame, text="", command=self._on_run,
@@ -1655,27 +1671,39 @@ class ExportApp:
         self.status_label = ttk.Label(btn_frame, text="", style="Status.TLabel")
         self.status_label.pack(side="right")
 
-        # ── Log Area ──
-        log_frame = ttk.Frame(left, style="App.TFrame")
-        log_frame.pack(fill="both", expand=True, pady=(12, 0))
+        # ── Log Area (compact strip along the bottom) ──
+        # The task table now owns the tab's vertical space, so the export log
+        # shrinks to a short strip pinned at the bottom — enough to read the
+        # "found N records / saved to …" progress without dominating the view.
+        log_frame = ttk.Frame(content, style="App.TFrame")
+        log_frame.pack(side="bottom", fill="x", pady=(10, 0))
 
         self.lbl_log_header = ttk.Label(log_frame, text="", style="Subtitle.TLabel")
         self.lbl_log_header.pack(anchor="w", pady=(0, 4))
 
         self.log_text = tk.Text(
-            log_frame, height=12,
+            log_frame, height=6,
             bg="#0a0a1a", fg="#aaa",
             font=(FONT_MONO, 10),
             relief="flat", bd=0,
             highlightthickness=1,
             highlightbackground=self.BORDER,
             wrap="word", state="disabled")
-        self.log_text.pack(fill="both", expand=True)
+        self.log_text.pack(fill="x")
 
-        # ═══════════════════════════════════════════
-        # RIGHT PANEL — Summary
-        # ═══════════════════════════════════════════
-        self._build_summary_panel(right)
+        # ── Main split: wide task table (left) + compact stats sidebar (right) ──
+        main = ttk.Frame(content, style="App.TFrame")
+        main.pack(side="top", fill="both", expand=True, pady=(12, 0))
+
+        table_area = ttk.Frame(main, style="App.TFrame")
+        table_area.pack(side="left", fill="both", expand=True)
+
+        sidebar = ttk.Frame(main, style="App.TFrame", width=230)
+        sidebar.pack(side="right", fill="y", padx=(16, 0))
+        sidebar.pack_propagate(False)
+
+        self._build_task_table(table_area)
+        self._build_summary_panel(sidebar)
 
         # ── Progress Bar (inside tab1) ──
         self.progress = ttk.Progressbar(tab1, mode="indeterminate",
@@ -1686,8 +1714,117 @@ class ExportApp:
         self.lbl_footer = ttk.Label(self.root, text="", style="Status.TLabel")
         self.lbl_footer.pack(pady=(0, 8))
 
+    # Wide platform-task table columns (File Translation). Mirrors MR Pipeline /
+    # Scan Tasks so the three task views read identically; ``src_strings`` is the
+    # distinct en-US source-string count. Positional reads elsewhere resolve the
+    # task_id from the row's iid (== task id), not a column index, so this order
+    # can change without breaking selection.
+    _SUMMARY_COLUMNS = ("idx", "id", "name", "creator",
+                        "status", "src_strings", "created")
+
+    def _build_task_table(self, parent):
+        """Build the wide MR-Pipeline-style platform-task table (left of the
+        File Translation tab). Selecting a row fills the Task ID entry; the
+        en-US Strings cell fills in asynchronously (see _prefetch_summary_src_counts)."""
+        # ── Header + pagination / refresh action bar ──
+        header_bar = ttk.Frame(parent, style="App.TFrame")
+        header_bar.pack(fill="x", pady=(0, 6))
+
+        self.lbl_recent_header = ttk.Label(
+            header_bar, text="", style="Subtitle.TLabel")
+        self.lbl_recent_header.pack(side="left")
+
+        # Refresh (icon) + prev/next pager, right-aligned. Page label sits left
+        # of the buttons so it reads with them.
+        self.btn_refresh = self._create_button(
+            header_bar, text="", command=self._load_summary_data,
+            style_name="SecondaryTiny", font=(FONT_FAMILY, 11),
+            bg=self.ACCENT, fg="#ccc", activebackground="#1a3a6a",
+            activeforeground="#fff", padx=10, pady=3)
+        self.btn_refresh.pack(side="right", padx=(8, 0))
+
+        self.btn_summary_next = self._create_button(
+            header_bar, text="▶", command=self._next_summary_page,
+            style_name="SecondarySmall", font=(FONT_FAMILY, 9),
+            bg=self.ACCENT, fg="#ccc", activebackground="#1a3a6a",
+            activeforeground="#fff", padx=8, pady=3, state="disabled")
+        self.btn_summary_next.pack(side="right")
+
+        self.btn_summary_prev = self._create_button(
+            header_bar, text="◀", command=self._prev_summary_page,
+            style_name="SecondarySmall", font=(FONT_FAMILY, 9),
+            bg=self.ACCENT, fg="#ccc", activebackground="#1a3a6a",
+            activeforeground="#fff", padx=8, pady=3, state="disabled")
+        self.btn_summary_prev.pack(side="right", padx=(0, 4))
+
+        self.lbl_summary_page = ttk.Label(
+            header_bar, text="", style="Status.TLabel")
+        self.lbl_summary_page.pack(side="right", padx=(0, 10))
+
+        # ── Task list table ──
+        self.summary_tree_frame = ttk.Frame(parent, style="App.TFrame")
+        self.summary_tree_frame.pack(fill="both", expand=True)
+        self.summary_tree_frame.bind("<Configure>", self._schedule_summary_resize)
+
+        cols = self._SUMMARY_COLUMNS
+        self.task_tree = ttk.Treeview(
+            self.summary_tree_frame,
+            columns=cols,
+            show="headings",
+            style="Summary.Treeview",
+            height=self.summary_page_size,
+            selectmode="browse",
+        )
+        # (width, anchor, stretch) per column — headings set in _refresh_ui_text.
+        col_cfg = {
+            "idx":         (40,  "center", False),
+            "id":          (60,  "center", False),
+            "name":        (240, "w",      True),
+            "creator":     (100, "w",      False),
+            "status":      (90,  "center", False),
+            "src_strings": (95,  "center", False),
+            "created":     (140, "center", False),
+        }
+        for c in cols:
+            w, anchor, stretch = col_cfg[c]
+            self.task_tree.column(c, width=w, anchor=anchor, stretch=stretch)
+
+        # Warm gold tint for tasks the post-edit prefetch marks. The three
+        # task-list tabs share this exact palette so the signal reads
+        # identically across them.
+        self.task_tree.tag_configure(
+            "post_edit", background="#3a2e1f", foreground="#fde68a",
+        )
+
+        tree_scroll = ttk.Scrollbar(
+            self.summary_tree_frame, orient="vertical", command=self.task_tree.yview)
+        self.task_tree.configure(yscrollcommand=tree_scroll.set)
+        self.task_tree.pack(side="left", fill="both", expand=True)
+        tree_scroll.pack(side="right", fill="y")
+
+        # Bind row click to fill Task ID
+        self.task_tree.bind("<<TreeviewSelect>>", self._on_task_select)
+
+        # Legend for the ✏️ marker the async post-edit prefetch may prepend to
+        # Task Name — placed below the table, matching MR / Scan tabs.
+        self.lbl_summary_post_edit_legend = ttk.Label(
+            parent, text="", style="Status.TLabel")
+        self.lbl_summary_post_edit_legend.pack(anchor="w", pady=(4, 0))
+
+        # Hover tooltips (text assigned via _refresh_ui_text for i18n).
+        self._tip_summary_prev = Tooltip(self.btn_summary_prev)
+        self._tip_summary_next = Tooltip(self.btn_summary_next)
+        self._tip_summary_refresh = Tooltip(self.btn_refresh)
+
+        self._update_summary_pager()
+
     def _build_summary_panel(self, parent):
-        """Build the right-side summary panel."""
+        """Build the compact right-side stats sidebar (Platform Task Overview).
+
+        The task list itself now lives in the wide table built by
+        :meth:`_build_task_table`; this sidebar only carries the total-task
+        stat and the load status.
+        """
         panel = ttk.Frame(parent, style="Summary.TFrame")
         panel.pack(fill="both", expand=True)
         panel.configure(borderwidth=1, relief="solid")
@@ -1719,115 +1856,7 @@ class ExportApp:
         # ── Status message (loading / error) ──
         self.lbl_summary_status = ttk.Label(
             inner, text="", style="SummaryStatus.TLabel")
-        self.lbl_summary_status.pack(anchor="w")
-
-        # Separator
-        sep2 = tk.Frame(inner, bg=self.BORDER, height=1)
-        sep2.pack(fill="x", pady=(8, 10))
-
-        # ── Recent tasks section header ──
-        self.lbl_recent_header = ttk.Label(
-            inner, text="", style="SummarySection.TLabel")
-        self.lbl_recent_header.pack(anchor="w", pady=(0, 8))
-
-        # Legend for the ✏️ marker the async post-edit prefetch may
-        # prepend to Task Name once detail fetches return.
-        self.lbl_summary_post_edit_legend = ttk.Label(
-            inner, text="", style="SummaryStatus.TLabel")
-        self.lbl_summary_post_edit_legend.pack(anchor="w", pady=(0, 4))
-
-        # ── Treeview for task list ──
-        self.summary_tree_frame = ttk.Frame(inner, style="Summary.TFrame")
-        self.summary_tree_frame.pack(fill="both", expand=True)
-        self.summary_tree_frame.bind("<Configure>", self._schedule_summary_resize)
-
-        self.task_tree = ttk.Treeview(
-            self.summary_tree_frame,
-            columns=("id", "name", "creator"),
-            show="headings",
-            style="Summary.Treeview",
-            height=self.summary_page_size,
-            selectmode="browse",
-        )
-        self.task_tree.heading("id", text="ID")
-        self.task_tree.heading("name", text="Task Name")
-        self.task_tree.heading("creator", text="Creator")
-
-        self.task_tree.column("id", width=45, minwidth=40, stretch=False, anchor="center")
-        self.task_tree.column("name", width=200, minwidth=100, stretch=True)
-        self.task_tree.column("creator", width=80, minwidth=60, stretch=False)
-
-        # Warm gold tint for tasks the post-edit prefetch marks. The
-        # three task-list tabs share this exact palette so the signal
-        # reads identically across them; see gui_tab_scan_tasks for the
-        # original choice rationale.
-        self.task_tree.tag_configure(
-            "post_edit", background="#3a2e1f", foreground="#fde68a",
-        )
-
-        # Scrollbar
-        tree_scroll = ttk.Scrollbar(
-            self.summary_tree_frame, orient="vertical", command=self.task_tree.yview)
-        self.task_tree.configure(yscrollcommand=tree_scroll.set)
-
-        self.task_tree.pack(side="left", fill="both", expand=True)
-        tree_scroll.pack(side="right", fill="y")
-
-        # Bind row click to fill Task ID
-        self.task_tree.bind("<<TreeviewSelect>>", self._on_task_select)
-
-        # ── Pagination + refresh controls (two-row: info on top, actions below) ──
-        btn_bar = ttk.Frame(inner, style="Summary.TFrame")
-        btn_bar.pack(fill="x", pady=(10, 0))
-
-        # Row 1 — page info; wraps on narrow widths so it never squeezes buttons.
-        self.lbl_summary_page = ttk.Label(
-            btn_bar, text="", style="SummaryStatus.TLabel",
-            wraplength=280, justify="left")
-        self.lbl_summary_page.pack(side="top", fill="x", anchor="w", pady=(0, 6))
-        # Keep wraplength in sync with actual available width on resize.
-        btn_bar.bind(
-            "<Configure>",
-            lambda e: self.lbl_summary_page.configure(
-                wraplength=max(120, e.width - 8)))
-
-        # Row 2 — action buttons, right-aligned via an expanding spacer.
-        actions_bar = ttk.Frame(btn_bar, style="Summary.TFrame")
-        actions_bar.pack(side="top", fill="x")
-        ttk.Frame(actions_bar, style="Summary.TFrame").pack(
-            side="left", fill="x", expand=True)
-
-        self.btn_summary_prev = self._create_button(
-            actions_bar, text="", command=self._prev_summary_page,
-            style_name="SecondaryTiny",
-            font=(FONT_FAMILY, 9),
-            bg=self.ACCENT, fg="#ccc", activebackground="#1a3a6a",
-            activeforeground="#fff", padx=10, pady=3, state="disabled")
-        self.btn_summary_prev.pack(side="left", padx=(0, 6))
-
-        self.btn_summary_next = self._create_button(
-            actions_bar, text="", command=self._next_summary_page,
-            style_name="SecondaryTiny",
-            font=(FONT_FAMILY, 9),
-            bg=self.ACCENT, fg="#ccc", activebackground="#1a3a6a",
-            activeforeground="#fff", padx=10, pady=3, state="disabled")
-        self.btn_summary_next.pack(side="left", padx=(0, 6))
-
-        # Refresh is an icon-only button — text saved for tooltip / a11y.
-        self.btn_refresh = self._create_button(
-            actions_bar, text="", command=self._load_summary_data,
-            style_name="SecondaryTiny",
-            font=(FONT_FAMILY, 11),
-            bg=self.ACCENT, fg="#ccc", activebackground="#1a3a6a",
-            activeforeground="#fff", padx=10, pady=3)
-        self.btn_refresh.pack(side="left")
-
-        # Hover tooltips (text assigned via _refresh_ui_text for i18n).
-        self._tip_summary_prev = Tooltip(self.btn_summary_prev)
-        self._tip_summary_next = Tooltip(self.btn_summary_next)
-        self._tip_summary_refresh = Tooltip(self.btn_refresh)
-
-        self._update_summary_pager()
+        self.lbl_summary_status.pack(anchor="w", pady=(4, 0))
 
     # ── i18n: refresh all visible text ──
     def _refresh_ui_text(self):
@@ -1987,15 +2016,23 @@ class ExportApp:
         self.lbl_recent_header.configure(text=self._t("summary_recent"))
         self.lbl_summary_post_edit_legend.configure(
             text=self._t("summary_post_edit_legend"))
-        self.btn_summary_prev.configure(text=self._t("summary_prev"))
-        self.btn_summary_next.configure(text=self._t("summary_next"))
+        # Prev/Next are icon buttons (◀/▶) set at build time — don't relabel
+        # them with words; the tooltips carry the localized description. Refresh
+        # is the 🔄 glyph.
         self.btn_refresh.configure(text=self._t("summary_refresh"))
         self._tip_summary_prev.set_text(self._t("summary_prev_tip"))
         self._tip_summary_next.set_text(self._t("summary_next_tip"))
         self._tip_summary_refresh.set_text(self._t("summary_refresh_tip"))
-        self.task_tree.heading("id", text=self._t("summary_col_id"))
-        self.task_tree.heading("name", text=self._t("summary_col_name"))
-        self.task_tree.heading("creator", text=self._t("summary_col_creator"))
+        # Platform-task table headings (# / Task ID / Task Name / Creator /
+        # Status / en-US Strings / Created).
+        _summary_head = {
+            "idx": "summary_col_idx", "id": "summary_col_id",
+            "name": "summary_col_name", "creator": "summary_col_creator",
+            "status": "summary_col_status", "src_strings": "summary_col_src",
+            "created": "summary_col_created",
+        }
+        for _col, _key in _summary_head.items():
+            self.task_tree.heading(_col, text=self._t(_key))
         self._update_summary_pager()
 
         # MR Pipeline (1) & Quality Overview (2) — same lazy treatment;
@@ -2086,18 +2123,13 @@ class ExportApp:
     def _restore_summary_selection_if_possible(self):
         if self.summary_selected_task_id is None:
             return
-
-        selected_item = None
-        for item in self.task_tree.get_children():
-            values = self.task_tree.item(item, "values")
-            if values and str(values[0]) == str(self.summary_selected_task_id):
-                selected_item = item
-                break
-
-        if selected_item is not None:
-            self.task_tree.selection_set(selected_item)
-            self.task_tree.focus(selected_item)
-            self.task_tree.see(selected_item)
+        # Rows use the task id as their iid, so the previously-selected row (if
+        # still on this page) is a direct lookup — no column-position scan.
+        iid = str(self.summary_selected_task_id)
+        if self.task_tree.exists(iid):
+            self.task_tree.selection_set(iid)
+            self.task_tree.focus(iid)
+            self.task_tree.see(iid)
 
     def _render_summary_page(self):
         total_pages = self._get_summary_total_pages()
@@ -2113,19 +2145,23 @@ class ExportApp:
         for item in self.task_tree.get_children():
             self.task_tree.delete(item)
 
-        # Reset row mapping; populated below so the async post-edit
-        # prefetch callback can patch Task Name when detail returns.
+        # Reset row mapping; populated below so the async post-edit prefetch
+        # and en-US src-count fill callbacks can find the row by task id.
         self._summary_row_iid_by_task: dict[str, str] = {}
         prefetch_items: list[tuple[str, str]] = []
+        src_prefetch_ids: list[str] = []
 
         # Late import — task_post_edit is its own module and keeps the
         # main GUI cold start cheap.
         import task_post_edit as _tpe_local
 
-        for task in page_tasks:
+        start_idx = self.summary_page * self.summary_page_size
+        for i, task in enumerate(page_tasks):
             tid = task.get("id", "")
             tname = task.get("task_name", "")
             creator = task.get("created_by", "") or task.get("creator", "") or "-"
+            status = task.get("status", "") or ""
+            created = (task.get("created_at") or "")[:19].replace("T", " ")
             # Synchronous render when we've already cached the answer.
             cached = (
                 _tpe_local.get_cache().get("legacy", tid)
@@ -2138,16 +2174,24 @@ class ExportApp:
             # async callback (_apply_summary_post_edit_prefix) so paging
             # back doesn't briefly drop the highlight.
             row_tags = ("post_edit",) if cached else ()
+            # en-US source-string count: render from cache when known, else a
+            # "…" placeholder + queue an async fetch (mirrors MR / Scan tabs).
+            with self._summary_src_lock:
+                src_count = self._summary_src_cache.get(str(tid)) if tid else None
+            src_display = src_count if src_count is not None else ("…" if tid else "")
             iid = self.task_tree.insert(
                 "", "end",
                 iid=str(tid) if tid else None,
-                values=(tid, display_name, creator),
+                values=(start_idx + i + 1, tid, display_name, creator,
+                        status, src_display, created),
                 tags=row_tags,
             )
             if tid:
                 self._summary_row_iid_by_task[str(tid)] = iid
                 if cached is None:
                     prefetch_items.append(("legacy", str(tid)))
+                if src_count is None:
+                    src_prefetch_ids.append(str(tid))
 
         if prefetch_items:
             _tpe_local.prefetch_async(
@@ -2155,6 +2199,11 @@ class ExportApp:
                 on_result=self._on_summary_post_edit_result,
                 max_workers=4,
             )
+
+        # Fill the en-US source-string counts asynchronously so paging stays
+        # snappy; cells flip from "…" to the number as each fetch returns.
+        if src_prefetch_ids:
+            self._prefetch_summary_src_counts(src_prefetch_ids)
 
         self._restore_summary_selection_if_possible()
         self._update_summary_pager()
@@ -2177,23 +2226,62 @@ class ExportApp:
         if not iid:
             return
         try:
-            vals = list(self.task_tree.item(iid, "values"))
+            # Read/write the Task Name cell by column id so the row's column
+            # order can change without breaking the prefix (was a fixed index).
+            name = self.task_tree.set(iid, "name") or ""
             current_tags = list(self.task_tree.item(iid, "tags") or ())
         except tk.TclError:
             return
-        if len(vals) < 2:
-            return
-        name = vals[1] or ""
         if name.startswith(_tpe_local.POST_EDIT_PREFIX):
             return
-        vals[1] = _tpe_local.POST_EDIT_PREFIX + name
         # Append the "post_edit" tag for the warm gold tint configured at
         # build time. ``tree.item(iid, tags=...)`` REPLACES the tuple, so
         # we must preserve any existing tags rather than overwriting.
         if "post_edit" not in current_tags:
             current_tags.append("post_edit")
         try:
-            self.task_tree.item(iid, values=vals, tags=tuple(current_tags))
+            self.task_tree.set(iid, "name", _tpe_local.POST_EDIT_PREFIX + name)
+            self.task_tree.item(iid, tags=tuple(current_tags))
+        except tk.TclError:
+            pass
+
+    # ------------------------------------------------------------------
+    # en-US source-string counts — filled asynchronously so the page paints
+    # immediately (mirrors MRPipelineTab._prefetch_src_counts).
+    # ------------------------------------------------------------------
+    def _prefetch_summary_src_counts(self, task_ids):
+        ids = [tid for tid in task_ids if tid]
+        if not ids:
+            return
+
+        def _run():
+            def _work(tid):
+                with self._summary_src_lock:
+                    count = self._summary_src_cache.get(tid)
+                if count is None:
+                    count = export_translations.count_legacy_source_strings(tid)
+                    with self._summary_src_lock:
+                        self._summary_src_cache[tid] = count
+                try:
+                    self.root.after(0, self._apply_summary_src_count, tid, count)
+                except Exception:
+                    pass
+
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                list(pool.map(_work, ids))
+
+        threading.Thread(target=_run, name="ft-src-count-prefetch",
+                         daemon=True).start()
+
+    def _apply_summary_src_count(self, task_id, count):
+        """Replace one row's "…" placeholder with its real count. Runs on the
+        Tk thread. The row may be gone (user paged / refreshed mid-fetch); a
+        stale write is harmless because iid == task_id, so guard regardless."""
+        iid = getattr(self, "_summary_row_iid_by_task", {}).get(str(task_id))
+        if not iid:
+            return
+        try:
+            self.task_tree.set(iid, "src_strings", count)
         except tk.TclError:
             pass
 
@@ -2571,14 +2659,17 @@ class ExportApp:
         return result["ok"]
 
     def _on_task_select(self, event):
-        """When user clicks a task row, fill the Task ID entry."""
+        """When user clicks a task row, fill the Task ID entry.
+
+        Rows use the task id as their iid, so read it straight off the
+        selection — robust to the table's column order (the ``#`` index column
+        now sits at position 0, so a positional read would grab the wrong cell).
+        """
         sel = self.task_tree.selection()
         if sel:
-            values = self.task_tree.item(sel[0], "values")
-            if values:
-                task_id = values[0]
-                self.summary_selected_task_id = task_id
-                self.task_var.set(str(task_id))
+            task_id = sel[0]
+            self.summary_selected_task_id = task_id
+            self.task_var.set(str(task_id))
 
     # ── Event Handlers ──
     def _on_run(self, llm_qa=False):
