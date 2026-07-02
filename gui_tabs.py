@@ -14,6 +14,9 @@ import export_mr_pipeline as mr_api
 import quality_overview as qa
 import task_post_edit as _tpe
 import advanced_filter
+# Aliased so the ``llm_qa`` boolean flag threaded through the export handlers
+# doesn't shadow the module inside those methods.
+import llm_qa as llm_qa_module
 from export_gui import FONT_FAMILY, IS_MAC, reveal_in_folder, sanitize_for_filename
 from date_picker import attach_calendar
 
@@ -212,6 +215,18 @@ class MRPipelineTab:
             font=(FONT_FAMILY, 10, "bold"),
             bg="#2ecc71", fg="#fff", padx=14, pady=4, state="disabled")
         self.btn_mr_export.pack(side="left")
+
+        # One-click "export full-translation JSON + copy the LQA prompt" for the
+        # /rc-core-products-trans-checker workflow. Forces JSON + All
+        # Translations (see _on_export) then copies the prompt + pops a how-to
+        # dialog. Enable/disable tracks btn_mr_export (needs rows to export).
+        self.btn_mr_llm_qa = self.app._create_button(
+            action, text=llm_qa_module.button_label(self.app.lang),
+            command=lambda: self._on_export(llm_qa=True),
+            style_name="SuccessSmall",
+            font=(FONT_FAMILY, 10, "bold"),
+            bg="#7c5cff", fg="#fff", padx=14, pady=4, state="disabled")
+        self.btn_mr_llm_qa.pack(side="left", padx=(8, 0))
 
         # Export Type selector (mirrors File Translation panel)
         self.lbl_mr_export_type = ttk.Label(action, text="", style="Card.TLabel")
@@ -416,6 +431,7 @@ class MRPipelineTab:
         self.btn_mr_search.configure(text=t("mr_search"))
         self.btn_mr_reset.configure(text=t("mr_reset"))
         self.btn_mr_export.configure(text=t("mr_export"))
+        self.btn_mr_llm_qa.configure(text=llm_qa_module.button_label(self.app.lang))
         self.btn_mr_load_more.configure(text=t("mr_load_more"))
         self.lbl_mr_export_type.configure(text=t("export_type_label"))
         self.rb_mr_changes.configure(text=t("export_type_changes"))
@@ -595,11 +611,13 @@ class MRPipelineTab:
         if IS_MAC:
             flag = ["!disabled"] if enabled else ["disabled"]
             self.btn_mr_export.state(flag)
+            self.btn_mr_llm_qa.state(flag)
             self.btn_mr_prev.state(flag)
             self.btn_mr_next.state(flag)
             self.btn_mr_load_more.state(flag)
         else:
             self.btn_mr_export.configure(state=state)
+            self.btn_mr_llm_qa.configure(state=state)
             self.btn_mr_prev.configure(state=state)
             self.btn_mr_next.configure(state=state)
             self.btn_mr_load_more.configure(state=state)
@@ -922,11 +940,13 @@ class MRPipelineTab:
             self.btn_mr_next.state(["!disabled"] if has_next else ["disabled"])
             self.btn_mr_load_more.state(["!disabled"] if has_more else ["disabled"])
             self.btn_mr_export.state(["!disabled"] if has_rows else ["disabled"])
+            self.btn_mr_llm_qa.state(["!disabled"] if has_rows else ["disabled"])
         else:
             self.btn_mr_prev.configure(state="normal" if has_prev else "disabled")
             self.btn_mr_next.configure(state="normal" if has_next else "disabled")
             self.btn_mr_load_more.configure(state="normal" if has_more else "disabled")
             self.btn_mr_export.configure(state="normal" if has_rows else "disabled")
+            self.btn_mr_llm_qa.configure(state="normal" if has_rows else "disabled")
         self.lbl_mr_status_bar.configure(text=self._t("status_ready"))
 
         # Re-apply the "✏️ only" view filter to the freshly rendered rows
@@ -1038,8 +1058,10 @@ class MRPipelineTab:
         has_rows = bool(visible)
         if IS_MAC:
             self.btn_mr_export.state(["!disabled"] if has_rows else ["disabled"])
+            self.btn_mr_llm_qa.state(["!disabled"] if has_rows else ["disabled"])
         else:
             self.btn_mr_export.configure(state="normal" if has_rows else "disabled")
+            self.btn_mr_llm_qa.configure(state="normal" if has_rows else "disabled")
         if self.mr_post_edit_only_var.get():
             self.lbl_mr_status_bar.configure(
                 text=self._t("mr_post_edit_filter_status").format(n=len(visible)))
@@ -1202,7 +1224,13 @@ class MRPipelineTab:
         parts.extend(seg for seg in (id_tag, type_tag, date_tag) if seg)
         return "_".join(parts) + ext
 
-    def _on_export(self):
+    def _on_export(self, llm_qa=False):
+        """Export the selected MR (or all rows when nothing is selected).
+
+        ``llm_qa=True`` is the "Send to LLM QA" path: it forces JSON + All
+        Translations regardless of the radios and, on success, copies the LQA
+        prompt to the clipboard and pops a how-to dialog (see _run_export).
+        """
         sel = self.mr_tree.selection()
         mr_iid = ""
         mr_created = ""
@@ -1224,8 +1252,9 @@ class MRPipelineTab:
                     mr_created = str(values[created_col] or "")
         else:
             task_id = None  # Export all tasks
-        fmt = self.mr_fmt_var.get()
-        export_type = self.mr_export_type_var.get()
+        # Send to LLM QA always writes the full-translation JSON audit shape.
+        fmt = "json" if llm_qa else self.mr_fmt_var.get()
+        export_type = "translations" if llm_qa else self.mr_export_type_var.get()
         # Read the Advanced Filters state on the main thread (Tk widgets are
         # not thread-safe) and hand it to the worker.
         adv_state = self.adv_filter.get_state() if self.adv_filter else None
@@ -1241,16 +1270,20 @@ class MRPipelineTab:
         }
         if IS_MAC:
             self.btn_mr_export.state(["disabled"])
+            self.btn_mr_llm_qa.state(["disabled"])
         else:
             self.btn_mr_export.configure(state="disabled")
+            self.btn_mr_llm_qa.configure(state="disabled")
         self.lbl_mr_status_bar.configure(text=self._t("status_exporting"))
         threading.Thread(target=self._run_export,
                          args=(task_id, fmt, export_type, mr_iid, adv_state,
                                basic_filters, mr_created),
+                         kwargs={"llm_qa": llm_qa},
                          daemon=True).start()
 
     def _run_export(self, task_id, fmt, export_type="changes", mr_iid="",
-                    adv_state=None, basic_filters=None, mr_created=""):
+                    adv_state=None, basic_filters=None, mr_created="",
+                    llm_qa=False):
         try:
             if export_type == "changes":
                 if not task_id:
@@ -1330,14 +1363,22 @@ class MRPipelineTab:
             # no visual confirmation of the destination. Pop the file manager.
             if fmt != "html":
                 self.parent.after(0, lambda p=saved: reveal_in_folder(p))
+            # Send to LLM QA: JSON is out — now copy the LQA prompt to the
+            # clipboard and tell the user to upload + paste in their LLM. Must
+            # run on the main thread (Tk clipboard + dialog), hence after(0).
+            if llm_qa:
+                self.parent.after(0, lambda b=basename:
+                    llm_qa_module.send_prompt_and_notify(self.parent, b, self.app.lang))
         except Exception as e:
             self.parent.after(0, lambda: self.lbl_mr_status_bar.configure(text=f"❌ {str(e)[:50]}"))
         finally:
             def _restore():
                 if IS_MAC:
                     self.btn_mr_export.state(["!disabled"])
+                    self.btn_mr_llm_qa.state(["!disabled"])
                 else:
                     self.btn_mr_export.configure(state="normal")
+                    self.btn_mr_llm_qa.configure(state="normal")
             self.parent.after(0, _restore)
 
     def _load_overview(self):

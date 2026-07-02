@@ -121,6 +121,8 @@ The window is a `ttk.Notebook`. The first three tabs are core; the remaining ele
 
 **Cross-cutting — the Tranzor Bridge.** A tiny loopback HTTP server (`127.0.0.1`, per-launch token) plus a Tampermonkey userscript lets the desktop app drive Tranzor's own browser page: tick problem rows in a report, click **↗ Send to Tranzor**, and the matching String Keys are auto-highlighted and auto-ticked across all languages so the platform's native *Batch Retranslate* is immediately usable.
 
+**Cross-cutting — Send to LLM QA.** On **File Translation**, **MR Pipeline** and **Scan Tasks**, a `🤖 Send to LLM QA` button (next to *Export Selected*) does the whole LQA hand-off in one click: it exports the selected task's **full-translation JSON** (the audit schema the `/rc-core-products-trans-checker` skill consumes — no need to toggle the format radios), copies the prompt `/rc-core-products-trans-checker 检查附件JSON这批翻译的质量，重点关注 Critical 问题。` to the clipboard, reveals the file, and tells you to upload the attachment and paste the prompt in your LLM chat.
+
 See [SPEC.md](SPEC.md) for the full rules, scope and acceptance criteria, and [ARCHITECTURE.md](ARCHITECTURE.md) for how it is built.
 
 ---
