@@ -119,6 +119,39 @@ class IncompleteExportError(RuntimeError):
             f"缺失数据的文件。失败任务：{head}{more}")
 
 
+class AuthRequiredError(RuntimeError):
+    """Raised when the platform answers 401 Unauthorized — the stored JWT
+    is missing, expired (7-day lifetime) or revoked.
+
+    Deliberately distinct from :class:`IncompleteExportError`: a 401 poisons
+    *every* request, so retrying, backing off, or aggregating "what we could
+    fetch" is meaningless — the run would end as an all-zero inventory that
+    the GUI used to misreport as "No translations matched the selection"
+    (2026-07-08 RCA). The only fix is a re-login, so callers catch this type
+    and route the user to the 🔑 sign-in flow instead.
+    """
+
+    def __init__(self, cause=None):
+        detail = f"（{cause}）" if cause else ""
+        super().__init__(
+            "平台登录已过期或未登录（401 Unauthorized）——请重新登录后重试。"
+            + detail)
+
+
+def _is_auth_error(exc) -> bool:
+    """True when ``exc`` is (or wraps) an HTTP 401 from the platform.
+
+    Prefer the structured check (requests.HTTPError carries ``.response``);
+    fall back to the message heuristic for exceptions that already stringified
+    the status (mirrors export_gui._looks_like_auth_error).
+    """
+    resp = getattr(exc, "response", None)
+    if resp is not None and getattr(resp, "status_code", None) == 401:
+        return True
+    msg = str(exc).lower()
+    return "401 client error" in msg or "unauthorized" in msg
+
+
 # ---------------------------------------------------------------------------
 # 工具函数
 # ---------------------------------------------------------------------------
@@ -166,6 +199,11 @@ def _fetch_task_with_retry(fetch_fn, task_id, *, progress_cb=None, what=""):
         try:
             return fetch_fn(task_id)
         except Exception as e:  # noqa: BLE001 — every class is worth retrying once
+            if _is_auth_error(e):
+                # A 401 fails identically on every retry AND on every other
+                # task — don't burn ~10s of backoff per task; surface it
+                # immediately as a login problem.
+                raise AuthRequiredError(e) from e
             last_exc = e
             if attempt < _TASK_FETCH_RETRIES:
                 wait = _TASK_FETCH_BACKOFF * (2 ** (attempt - 1))
@@ -512,6 +550,8 @@ def _build_legacy_light(
     try:
         tasks = _legacy.fetch_tasks()
     except Exception as e:
+        if _is_auth_error(e):
+            raise AuthRequiredError(e) from e
         _log(progress_cb, f"  ⚠ [Legacy] 获取 task 列表失败: {e}")
         return [], set()
 
@@ -565,6 +605,8 @@ def _build_mr_light(
     try:
         filters = _mr.fetch_mr_filters_full()
     except Exception as e:
+        if _is_auth_error(e):
+            raise AuthRequiredError(e) from e
         _log(progress_cb, f"  ⚠ [MR] 获取 filters 失败: {e}")
         return [], set()
 
@@ -596,6 +638,11 @@ def _build_mr_light(
             data = _mr.fetch_dashboard_overview(project_id=pid)
             return pid, int(data.get("total_cases") or 0)
         except Exception as e:
+            if _is_auth_error(e):
+                # Without this the refresh "succeeds" with every MR count
+                # silently missing — the exact misleading-401 shape this
+                # change exists to eliminate.
+                raise AuthRequiredError(e) from e
             _log(progress_cb, f"  ⚠ [MR] overview {pid} 失败: {e}")
             return pid, None
 
@@ -603,7 +650,12 @@ def _build_mr_light(
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(_fetch_one, p["project_id"]): p for p in products}
         for f in as_completed(futures):
-            pid, count = f.result()
+            try:
+                pid, count = f.result()
+            except AuthRequiredError:
+                # Abort the queue immediately (see _collect_from_legacy).
+                pool.shutdown(wait=False, cancel_futures=True)
+                raise
             for p in products:
                 if p["project_id"] == pid:
                     p["entry_count"] = count
@@ -640,6 +692,8 @@ def _build_scan_light(
                 break
             offset += batch_size
     except Exception as e:
+        if _is_auth_error(e):
+            raise AuthRequiredError(e) from e
         _log(progress_cb, f"  ⚠ [Scan] 获取 task 列表失败: {e}")
         return [], set()
 
@@ -737,6 +791,8 @@ def _collect_from_legacy(
     try:
         tasks = _legacy.fetch_tasks()
     except Exception as e:
+        if _is_auth_error(e):
+            raise AuthRequiredError(e) from e
         _log(progress_cb, f"  ⚠ [Legacy] 获取 task 列表失败: {e}")
         return 0
 
@@ -767,6 +823,8 @@ def _collect_from_legacy(
             entries = _fetch_task_with_retry(
                 _legacy.fetch_all_translations, tid,
                 progress_cb=progress_cb, what=f"[Legacy {idx}/{total}]")
+        except AuthRequiredError:
+            raise  # login problem, not a per-task failure — fail the run loud
         except Exception as e:
             # Retries exhausted — record as a hard failure so strict mode
             # refuses to emit a silently incomplete export. Never swallow.
@@ -804,7 +862,15 @@ def _collect_from_legacy(
         futures = [pool.submit(_fetch_one, i, t)
                    for i, t in enumerate(tasks, 1)]
         for f in as_completed(futures):
-            n = f.result()
+            try:
+                n = f.result()
+            except AuthRequiredError:
+                # Cancel everything still queued NOW: without this the
+                # `with` exit drains hundreds of doomed 401 fetches before
+                # the sign-in prompt can appear (only ≤ workers in-flight
+                # calls still finish, each failing fast).
+                pool.shutdown(wait=False, cancel_futures=True)
+                raise
             with counter_lock:
                 added += n
                 done += 1
@@ -857,6 +923,8 @@ def _collect_from_mr(
                 if not batch or offset >= total:
                     break
         except Exception as e:
+            if _is_auth_error(e):
+                raise AuthRequiredError(e) from e
             _log(progress_cb, f"  ⚠ [MR] 获取 task 列表失败 ({project_id}): {e}")
         return out
 
@@ -887,6 +955,8 @@ def _collect_from_mr(
             results = _fetch_task_with_retry(
                 _mr.fetch_mr_results, tid,
                 progress_cb=progress_cb, what=f"[MR {idx}/{total_tasks}]")
+        except AuthRequiredError:
+            raise  # login problem, not a per-task failure — fail the run loud
         except Exception as e:
             # Retries exhausted — record as a hard failure. This is the exact
             # spot where a single transient miss used to make a whole MR run
@@ -942,7 +1012,13 @@ def _collect_from_mr(
         futures = [pool.submit(_fetch_one, i, t)
                    for i, t in enumerate(all_tasks, 1)]
         for f in as_completed(futures):
-            n = f.result()
+            try:
+                n = f.result()
+            except AuthRequiredError:
+                # See _collect_from_legacy: abort the queue immediately so
+                # the sign-in prompt isn't delayed by a doomed-fetch drain.
+                pool.shutdown(wait=False, cancel_futures=True)
+                raise
             with counter_lock:
                 added += n
                 done += 1
@@ -989,6 +1065,8 @@ def _collect_from_scan(
                 if not batch or offset >= total:
                     break
         except Exception as e:
+            if _is_auth_error(e):
+                raise AuthRequiredError(e) from e
             _log(progress_cb, f"  ⚠ [Scan] 获取 task 列表失败 ({project_id}): {e}")
         return out
 
@@ -1019,6 +1097,8 @@ def _collect_from_scan(
             results = _fetch_task_with_retry(
                 _mr.fetch_scan_results, tid,
                 progress_cb=progress_cb, what=f"[Scan {idx}/{total_tasks}]")
+        except AuthRequiredError:
+            raise  # login problem, not a per-task failure — fail the run loud
         except Exception as e:
             inv.record_failure("Scan", tid, e)
             _log(progress_cb,
@@ -1063,7 +1143,13 @@ def _collect_from_scan(
         futures = [pool.submit(_fetch_one, i, t)
                    for i, t in enumerate(all_tasks, 1)]
         for f in as_completed(futures):
-            n = f.result()
+            try:
+                n = f.result()
+            except AuthRequiredError:
+                # See _collect_from_legacy: abort the queue immediately so
+                # the sign-in prompt isn't delayed by a doomed-fetch drain.
+                pool.shutdown(wait=False, cancel_futures=True)
+                raise
             with counter_lock:
                 added += n
                 done += 1
@@ -1498,7 +1584,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     sources = _parse_csv(args.sources) or ["legacy", "mr", "scan"]
-    inv = collect_full_translations(sources=sources, progress_cb=print)
+    try:
+        inv = collect_full_translations(sources=sources, progress_cb=print)
+    except AuthRequiredError as e:
+        # One clear line instead of a two-level chained traceback. (No emoji
+        # here: a piped cp936 stdout cannot encode them.)
+        print(str(e))
+        return 1
 
     if not inv.data:
         print("⚠ 未聚合到任何数据，跳过写 zip")
