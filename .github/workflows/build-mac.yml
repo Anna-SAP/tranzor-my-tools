@@ -20,6 +20,9 @@ on:
 jobs:
   build:
     runs-on: macos-latest
+    permissions:
+      contents: read
+      actions: write   # prune step deletes this workflow's old artifacts
 
     steps:
       - name: Checkout code
@@ -70,9 +73,31 @@ jobs:
           ditto -c -k --keepParent TranzorExporter.app TranzorExporter-Mac.zip
           ls -lh TranzorExporter-Mac.zip
 
+      - name: Prune old TranzorExporter-Mac artifacts (keep newest 4)
+        # 2026-07-08: builds #123/#60 failed with "Artifact storage quota has
+        # been hit" — see build-windows.yml for the full rationale. Bound
+        # total artifact usage by keeping only the newest 4 per name.
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const NAME = 'TranzorExporter-Mac', KEEP = 4;
+            const arts = await github.paginate(
+              github.rest.actions.listArtifactsForRepo,
+              { owner: context.repo.owner, repo: context.repo.repo, per_page: 100 });
+            const old = arts
+              .filter(a => a.name === NAME && !a.expired)
+              .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+              .slice(KEEP - 1);  // keep newest (KEEP-1); this run uploads one more
+            for (const a of old) {
+              core.info(`Deleting artifact ${a.id} (${a.name}, ${a.created_at})`);
+              await github.rest.actions.deleteArtifact(
+                { owner: context.repo.owner, repo: context.repo.repo, artifact_id: a.id });
+            }
+            core.info(`Pruned ${old.length} old artifact(s).`);
+
       - name: Upload TranzorExporter.app zip
         uses: actions/upload-artifact@v4
         with:
           name: TranzorExporter-Mac
           path: dist/TranzorExporter-Mac.zip
-          retention-days: 90
+          retention-days: 7  # repo cap is 7 anyway; the prune step above is the real bound
