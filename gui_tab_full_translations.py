@@ -157,6 +157,7 @@ STRINGS = {
         "ft_err_no_inv":          "Inventory not loaded yet. Click 'Refresh Inventory'.",
         "ft_err_no_selection":    "Please select at least one product and one language.",
         "ft_err_no_data":         "No translations matched the selection.",
+        "ft_err_auth":            "Platform sign-in expired (tokens last 7 days) — sign in again to continue.",
         "ft_err_module":          "export_full_translations module failed to load.",
         "ft_select_all":          "Select All",
         "ft_clear_all":           "Clear",
@@ -226,6 +227,7 @@ STRINGS = {
         "ft_err_no_inv":          "尚未加载清单，请点击「刷新清单」。",
         "ft_err_no_selection":    "请至少选择一个产品和一种语言。",
         "ft_err_no_data":         "选择范围内未聚合到任何翻译。",
+        "ft_err_auth":            "平台登录已过期（令牌有效期 7 天）——请重新登录后继续。",
         "ft_err_module":          "export_full_translations 模块加载失败。",
         "ft_select_all":          "全选",
         "ft_clear_all":           "清空",
@@ -1237,6 +1239,37 @@ class FullTranslationsTab:
         return sources or ["legacy", "mr", "scan"]
 
     # ---- inventory load (LIGHT — selectors only) --------------------
+    # ---- platform auth ----------------------------------------------
+    def _preflight_platform_auth(self) -> bool:
+        """Ensure a live platform token before any API round-trip.
+
+        Every endpoint this tab touches sits behind Bearer-JWT auth with a
+        7-day token. Without this preflight an expired token turns the run
+        into a wall of 401s that aggregate to an all-zero inventory — which
+        the export path used to misreport as "no translations matched"
+        (2026-07-08 RCA). Delegates to the app's 🔑 flow: instant no-op when
+        the saved token is still valid, modal sign-in dialog otherwise.
+
+        Fail-open on plumbing errors (e.g. an older app object without the
+        helper): the server-side 401 is still caught by the
+        AuthRequiredError handlers below.
+        """
+        try:
+            ok = bool(self.app._ensure_platform_auth())
+        except Exception:
+            return True
+        if not ok:
+            self.lbl_status.configure(
+                text=self._t("ft_err_auth"), foreground="#e94560")
+        return ok
+
+    def _prompt_sign_in(self) -> bool:
+        """Show the app's modal 🔑 dialog; True once a token is obtained."""
+        try:
+            return bool(self.app._show_login_dialog())
+        except Exception:
+            return False
+
     def _on_refresh(self) -> None:
         """(Re)load the lightweight Product × Language inventory.
 
@@ -1244,6 +1277,8 @@ class FullTranslationsTab:
         hits cheap distinct/aggregate APIs to fill the selector widgets.
         """
         if _exp is None or self._busy:
+            return
+        if not self._preflight_platform_auth():
             return
         sources = self._selected_sources()
         self._set_busy(True)
@@ -1266,6 +1301,19 @@ class FullTranslationsTab:
     def _on_light_refresh_done(self, inv, err) -> None:
         self._set_busy(False)
         if err:
+            # A 401 means the token died between preflight and fetch (rare,
+            # but possible when it expires mid-run or gets revoked). Route to
+            # the sign-in flow and retry once instead of a generic failure.
+            try:
+                is_auth = bool(self.app._looks_like_auth_error(err))
+            except Exception:
+                is_auth = False
+            if is_auth:
+                self.lbl_status.configure(
+                    text=self._t("ft_err_auth"), foreground="#e94560")
+                if self._prompt_sign_in():
+                    self._on_refresh()
+                return
             self.lbl_status.configure(
                 text=f"❌ {err}", foreground="#e94560")
             return
@@ -1368,6 +1416,13 @@ class FullTranslationsTab:
         if not effective_sources:
             messagebox.showwarning(
                 "Full Translations", self._t("ft_err_no_selection"))
+            return
+
+        # Preflight before the save dialog: the heavy fetch below is 100%
+        # Bearer-JWT platform traffic, and the 7-day token can be expired on
+        # a routine daily export. Prompt the sign-in NOW rather than letting
+        # every list fetch 401 into a bogus "no data" failure.
+        if not self._preflight_platform_auth():
             return
 
         # Time-of-day in the default name (not just the date) so two same-day
@@ -1493,8 +1548,47 @@ class FullTranslationsTab:
             # Stash mode so _on_export_done can render the right summary view.
             summary["_mode"] = mode
             self.parent.after(0, self._on_export_done, summary, None)
+        except _exp.AuthRequiredError:
+            # Token expired mid-run (or was revoked): don't show a generic
+            # failure — close the dialog, prompt a re-sign-in, and retry the
+            # same export with the same output path and selection.
+            self.parent.after(
+                0, self._on_export_auth_error,
+                (out_path, mode, sources, legacy_filter, mr_filter,
+                 scan_filter, locales))
         except Exception as e:
             self.parent.after(0, self._on_export_done, None, str(e))
+
+    def _on_export_auth_error(self, export_args) -> None:
+        """Tk thread: the export died on a 401 — sign in again, then retry.
+
+        Mirrors export_gui._on_summary_error: when the actual fix is the 🔑
+        dialog, never leave the user staring at a generic error. Each retry
+        round requires an explicit, successful sign-in, so this cannot spin.
+        """
+        self._set_busy(False)
+        dlg = self._progress_dlg
+        self._progress_dlg = None
+        if dlg is not None:
+            try:
+                dlg.close()
+            except Exception:
+                pass
+        self.lbl_status.configure(
+            text=self._t("ft_err_auth"), foreground="#e94560")
+        if not self._prompt_sign_in():
+            messagebox.showwarning(
+                "Full Translations", self._t("ft_err_auth"))
+            return
+        # Fresh token in hand — restart the same export.
+        self._set_busy(True)
+        self.lbl_status.configure(
+            text=f"⏳ {self._t('ft_status_collecting')}", foreground="#fbbf24")
+        self._progress_dlg = _ExportProgressDialog(
+            self.parent, self._t, title=self._t("ft_progress_title"))
+        t = threading.Thread(
+            target=self._run_export, args=export_args, daemon=True)
+        t.start()
 
     def _on_export_done(self, summary, err) -> None:
         self._set_busy(False)
