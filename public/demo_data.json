@@ -1,286 +1,286 @@
 {
   "source": "Tranzor MR Pipeline API (/api/v1/tasks) — real captured snapshot",
-  "captured_utc": "2026-07-09T02:25:10Z",
+  "captured_utc": "2026-07-10T09:13:57Z",
   "tranzor_base": "http://tranzor-platform.int.rclabenv.com",
   "stats": {
-    "total_tasks": 34352,
-    "completed_tasks": 10100,
-    "failed_tasks": 725,
+    "total_tasks": 35289,
+    "completed_tasks": 10238,
+    "failed_tasks": 749,
     "running_tasks": 0,
-    "average_score": 96.19,
-    "total_mrs": 10176
+    "average_score": 96.2,
+    "total_mrs": 10501
   },
   "recent_projects": [
     {
       "project_id": "engage-digital/engage-digital",
-      "age_seconds": 50994
+      "age_seconds": 155082
     },
     {
       "project_id": "loc-tools/gooddata-ringcx",
-      "age_seconds": 143704
+      "age_seconds": 247792
     },
     {
       "project_id": "web/bui",
-      "age_seconds": 2302350
+      "age_seconds": 2406437
     },
     {
       "project_id": "platform/i18n",
-      "age_seconds": 2393117
+      "age_seconds": 2497205
     },
     {
       "project_id": "common/awp",
-      "age_seconds": 2486162
+      "age_seconds": 2590250
     },
     {
       "project_id": "RND/rwc-visual-assist",
-      "age_seconds": 2657909
+      "age_seconds": 2761996
     },
     {
       "project_id": "common/uns",
-      "age_seconds": 3086272
+      "age_seconds": 3190360
     },
     {
       "project_id": "web/push-to-talk",
-      "age_seconds": 3094267
+      "age_seconds": 3198355
     },
     {
       "project_id": "web/cic",
-      "age_seconds": 3114595
+      "age_seconds": 3218683
     },
     {
       "project_id": "admin-web/backend",
-      "age_seconds": 3157022
+      "age_seconds": 3261109
     },
     {
       "project_id": "engage-voice/frontend/agent/agent-service",
-      "age_seconds": 3241534
+      "age_seconds": 3345622
     },
     {
       "project_id": "web/i18n",
-      "age_seconds": 4409914
+      "age_seconds": 4514002
     }
   ],
   "row_count": 20,
   "rows": [
     {
-      "project_id": "copilot-platform/nova/nova-studio-app",
-      "mr_id": "1167",
-      "release": "No Pro Release",
-      "status": "completed",
-      "strings": 93,
-      "score": 99.7,
-      "duration": "54s",
-      "post_edit": true,
-      "age_seconds": 0
-    },
-    {
-      "project_id": "web/web",
-      "mr_id": "40805",
-      "release": "Release 26.3.2",
-      "status": "completed",
-      "strings": 1,
-      "score": 100.0,
-      "duration": "48s",
-      "post_edit": false,
-      "age_seconds": 735
-    },
-    {
-      "project_id": "web/web",
-      "mr_id": "40792",
-      "release": "Release 26.3.2",
+      "project_id": "web-modules/web-modules-core",
+      "mr_id": "6173",
+      "release": "5.7 Xiamen Sprint 2",
       "status": "completed",
       "strings": 4,
-      "score": 96.1,
-      "duration": "56s",
-      "post_edit": false,
-      "age_seconds": 1470
-    },
-    {
-      "project_id": "Fiji/video",
-      "mr_id": "1700",
-      "release": "Jupiter Web 26.3.10",
-      "status": "completed",
-      "strings": null,
-      "score": null,
-      "duration": "35s",
-      "post_edit": false,
-      "age_seconds": 3089
-    },
-    {
-      "project_id": "web/web",
-      "mr_id": "40786",
-      "release": "Release 26.3.2",
-      "status": "completed",
-      "strings": 8,
-      "score": 98.1,
-      "duration": "53s",
-      "post_edit": false,
-      "age_seconds": 4231
-    },
-    {
-      "project_id": "web/chc",
-      "mr_id": "2804",
-      "release": "Release 26.3.2",
-      "status": "completed",
-      "strings": null,
-      "score": null,
-      "duration": "27s",
-      "post_edit": false,
-      "age_seconds": 5193
-    },
-    {
-      "project_id": "copilot-platform/nova/nova-studio-app",
-      "mr_id": "1206",
-      "release": "Nova 26.3.120",
-      "status": "completed",
-      "strings": 1,
-      "score": 99.7,
-      "duration": "53s",
-      "post_edit": false,
-      "age_seconds": 5447
-    },
-    {
-      "project_id": "web/bui",
-      "mr_id": "3046",
-      "release": "BUI 26.3.1",
-      "status": "completed",
-      "strings": 2,
-      "score": 59.5,
-      "duration": "38s",
-      "post_edit": false,
-      "age_seconds": 38817
-    },
-    {
-      "project_id": "web-modules/web-modules-core",
-      "mr_id": "6163",
-      "release": "unknown",
-      "status": "completed",
-      "strings": 1,
-      "score": 100.0,
-      "duration": "1m20s",
-      "post_edit": false,
-      "age_seconds": 41286
-    },
-    {
-      "project_id": "admin-web/frontend",
-      "mr_id": "5674",
-      "release": "unknown",
-      "status": "completed",
-      "strings": 1,
-      "score": 100.0,
-      "duration": "50s",
-      "post_edit": false,
-      "age_seconds": 42149
-    },
-    {
-      "project_id": "admin-web/frontend",
-      "mr_id": "5673",
-      "release": "unknown",
-      "status": "completed",
-      "strings": 1,
-      "score": 100.0,
-      "duration": "30s",
-      "post_edit": false,
-      "age_seconds": 43027
-    },
-    {
-      "project_id": "admin-web/backend",
-      "mr_id": "6682",
-      "release": "Pending Prioritization",
-      "status": "completed",
-      "strings": 1,
-      "score": 100.0,
-      "duration": "43s",
-      "post_edit": false,
-      "age_seconds": 44162
-    },
-    {
-      "project_id": "web-modules/web-modules-core",
-      "mr_id": "6162",
-      "release": "unknown",
-      "status": "completed",
-      "strings": 1,
-      "score": 98.3,
-      "duration": "29s",
-      "post_edit": false,
-      "age_seconds": 45470
-    },
-    {
-      "project_id": "web/web",
-      "mr_id": "40839",
-      "release": "Pending Prioritization",
-      "status": "completed",
-      "strings": 2,
-      "score": 100.0,
-      "duration": "1m42s",
-      "post_edit": false,
-      "age_seconds": 45726
-    },
-    {
-      "project_id": "CoreLib/mthor",
-      "mr_id": "10840",
-      "release": "mThor 26.3.10",
-      "status": "completed",
-      "strings": 1,
-      "score": 100.0,
-      "duration": "5m02s",
-      "post_edit": false,
-      "age_seconds": 45881
-    },
-    {
-      "project_id": "engage-voice/frontend/frontend",
-      "mr_id": "9898",
-      "release": "unknown",
-      "status": "completed",
-      "strings": 3,
-      "score": 100.0,
-      "duration": "1m41s",
-      "post_edit": false,
-      "age_seconds": 50134
-    },
-    {
-      "project_id": "CoreLib/mthor",
-      "mr_id": "10852",
-      "release": "mThor 26.3.10",
-      "status": "completed",
-      "strings": 3,
-      "score": 98.8,
-      "duration": "3m02s",
-      "post_edit": true,
-      "age_seconds": 52940
-    },
-    {
-      "project_id": "admin-web/frontend",
-      "mr_id": "5667",
-      "release": "Release 26.3",
-      "status": "completed",
-      "strings": 1,
       "score": 100.0,
       "duration": "44s",
       "post_edit": false,
-      "age_seconds": 54015
+      "age_seconds": 0
     },
     {
-      "project_id": "web/jedi",
-      "mr_id": "21847",
-      "release": "Pending Prioritization",
+      "project_id": "Fiji/Fiji",
+      "mr_id": "45463",
+      "release": "Jupiter Web 26.3.20",
+      "status": "completed",
+      "strings": 1,
+      "score": 99.9,
+      "duration": "1m55s",
+      "post_edit": false,
+      "age_seconds": 1677
+    },
+    {
+      "project_id": "web/web",
+      "mr_id": "40757",
+      "release": "unknown",
       "status": "completed",
       "strings": 1,
       "score": 100.0,
-      "duration": "1m13s",
+      "duration": "7m25s",
+      "post_edit": false,
+      "age_seconds": 1725
+    },
+    {
+      "project_id": "web/web",
+      "mr_id": "40890",
+      "release": "Release 26.3.2",
+      "status": "completed",
+      "strings": 350,
+      "score": 91.3,
+      "duration": "35m27s",
       "post_edit": true,
-      "age_seconds": 56722
+      "age_seconds": 2267
+    },
+    {
+      "project_id": "web/jedi",
+      "mr_id": "21862",
+      "release": "Release 26.3.2",
+      "status": "completed",
+      "strings": 2,
+      "score": 96.5,
+      "duration": "1m44s",
+      "post_edit": false,
+      "age_seconds": 2852
+    },
+    {
+      "project_id": "integration/integration-apps",
+      "mr_id": "29005",
+      "release": "Release 26.3.10",
+      "status": "completed",
+      "strings": 1,
+      "score": 99.4,
+      "duration": "2m27s",
+      "post_edit": false,
+      "age_seconds": 3430
+    },
+    {
+      "project_id": "web/web",
+      "mr_id": "40888",
+      "release": "5.7 Xiamen Sprint 2",
+      "status": "completed",
+      "strings": 21,
+      "score": 98.5,
+      "duration": "1m24s",
+      "post_edit": true,
+      "age_seconds": 4976
+    },
+    {
+      "project_id": "admin-web/frontend",
+      "mr_id": "5679",
+      "release": "unknown",
+      "status": "completed",
+      "strings": 54,
+      "score": 99.2,
+      "duration": "31s",
+      "post_edit": false,
+      "age_seconds": 5937
+    },
+    {
+      "project_id": "Fiji/Fiji",
+      "mr_id": "45498",
+      "release": "Jupiter Web 26.3.10",
+      "status": "completed",
+      "strings": 2,
+      "score": 100.0,
+      "duration": "5m13s",
+      "post_edit": false,
+      "age_seconds": 6194
+    },
+    {
+      "project_id": "web/web",
+      "mr_id": "40883",
+      "release": "5.7 Xiamen Sprint 2",
+      "status": "completed",
+      "strings": 3,
+      "score": 98.0,
+      "duration": "1m01s",
+      "post_edit": false,
+      "age_seconds": 13188
+    },
+    {
+      "project_id": "copilot-platform/nova/nova-studio-app",
+      "mr_id": "1213",
+      "release": "unknown",
+      "status": "completed",
+      "strings": 32,
+      "score": 99.0,
+      "duration": "312m50s",
+      "post_edit": true,
+      "age_seconds": 14058
+    },
+    {
+      "project_id": "admin-web/frontend",
+      "mr_id": "5678",
+      "release": "unknown",
+      "status": "completed",
+      "strings": 54,
+      "score": 99.2,
+      "duration": "2m16s",
+      "post_edit": false,
+      "age_seconds": 14951
+    },
+    {
+      "project_id": "web-modules/web-modules-core",
+      "mr_id": "6170",
+      "release": "5.7 Xiamen Sprint 2",
+      "status": "completed",
+      "strings": 5,
+      "score": 99.9,
+      "duration": "41s",
+      "post_edit": false,
+      "age_seconds": 15289
+    },
+    {
+      "project_id": "copilot-platform/nova/nova-studio-app",
+      "mr_id": "1178",
+      "release": "Nova 26.3.120",
+      "status": "completed",
+      "strings": 53,
+      "score": 99.4,
+      "duration": "40s",
+      "post_edit": true,
+      "age_seconds": 15292
+    },
+    {
+      "project_id": "copilot-platform/nova/nova-studio-app",
+      "mr_id": "1214",
+      "release": "Nova Studio Backlog",
+      "status": "completed",
+      "strings": null,
+      "score": null,
+      "duration": "34s",
+      "post_edit": false,
+      "age_seconds": 16368
+    },
+    {
+      "project_id": "Fiji/Fiji",
+      "mr_id": "45421",
+      "release": "Jupiter Web 26.3.10",
+      "status": "completed",
+      "strings": 1,
+      "score": 100.0,
+      "duration": "2m42s",
+      "post_edit": false,
+      "age_seconds": 16686
+    },
+    {
+      "project_id": "web/web",
+      "mr_id": "40881",
+      "release": "5.7 Xiamen Sprint 2",
+      "status": "completed",
+      "strings": 3,
+      "score": 98.0,
+      "duration": "55s",
+      "post_edit": false,
+      "age_seconds": 16790
     },
     {
       "project_id": "engage-voice/frontend/rcx-crm-integrations",
-      "mr_id": "1505",
+      "mr_id": "1509",
       "release": "EOINT 26.3.3",
       "status": "completed",
       "strings": 6,
-      "score": 100.0,
-      "duration": "37s",
+      "score": 99.9,
+      "duration": "43s",
       "post_edit": false,
-      "age_seconds": 59522
+      "age_seconds": 19192
+    },
+    {
+      "project_id": "web-modules/web-modules-core",
+      "mr_id": "6169",
+      "release": "unknown",
+      "status": "completed",
+      "strings": 1,
+      "score": 89.3,
+      "duration": "1m31s",
+      "post_edit": true,
+      "age_seconds": 19728
+    },
+    {
+      "project_id": "web/web",
+      "mr_id": "40856",
+      "release": "Release 26.3.2",
+      "status": "completed",
+      "strings": 1,
+      "score": 100.0,
+      "duration": "55s",
+      "post_edit": false,
+      "age_seconds": 19846
     }
   ]
 }
