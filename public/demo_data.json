@@ -1,209 +1,264 @@
 {
   "source": "Tranzor MR Pipeline API (/api/v1/tasks) — real captured snapshot",
-  "captured_utc": "2026-07-14T05:28:17Z",
+  "captured_utc": "2026-07-15T03:23:16Z",
   "tranzor_base": "http://tranzor-platform.int.rclabenv.com",
   "stats": {
-    "total_tasks": 36123,
-    "completed_tasks": 10375,
-    "failed_tasks": 762,
+    "total_tasks": 36603,
+    "completed_tasks": 10441,
+    "failed_tasks": 770,
     "running_tasks": 0,
     "average_score": 96.11,
-    "total_mrs": 10848
+    "total_mrs": 11011
   },
   "recent_projects": [
     {
+      "project_id": "RND/ai/ringsense/ringsense-ui",
+      "age_seconds": 74785
+    },
+    {
       "project_id": "RND/ai/ringsense/data-export-service",
-      "age_seconds": 8628
+      "age_seconds": 87563
     },
     {
       "project_id": "sean.zhuang/Fiji",
-      "age_seconds": 80364
+      "age_seconds": 159299
     },
     {
       "project_id": "engage-digital/engage-digital",
-      "age_seconds": 493984
+      "age_seconds": 572918
     },
     {
       "project_id": "loc-tools/gooddata-ringcx",
-      "age_seconds": 586694
+      "age_seconds": 665628
     },
     {
       "project_id": "web/bui",
-      "age_seconds": 2745339
+      "age_seconds": 2824274
     },
     {
       "project_id": "platform/i18n",
-      "age_seconds": 2836106
+      "age_seconds": 2915041
     },
     {
       "project_id": "common/awp",
-      "age_seconds": 2929151
+      "age_seconds": 3008086
     },
     {
       "project_id": "RND/rwc-visual-assist",
-      "age_seconds": 3100898
+      "age_seconds": 3179832
     },
     {
       "project_id": "common/uns",
-      "age_seconds": 3529262
+      "age_seconds": 3608196
     },
     {
       "project_id": "web/push-to-talk",
-      "age_seconds": 3537257
+      "age_seconds": 3616191
     },
     {
       "project_id": "web/cic",
-      "age_seconds": 3557584
-    },
-    {
-      "project_id": "admin-web/backend",
-      "age_seconds": 3600011
+      "age_seconds": 3636519
     }
   ],
   "row_count": 20,
   "rows": [
     {
-      "project_id": "web/jedi",
-      "mr_id": "21883",
+      "project_id": "RND/rcvnc",
+      "mr_id": "5916",
       "release": "unknown",
       "status": "completed",
-      "strings": 3,
-      "score": 97.6,
-      "duration": "1m26s",
+      "strings": 1,
+      "score": 100.0,
+      "duration": "37s",
       "post_edit": false,
       "age_seconds": 0
     },
     {
-      "project_id": "web/web",
-      "mr_id": "40945",
-      "release": "unknown",
+      "project_id": "copilot-platform/nova/nova-studio-app",
+      "mr_id": "1178",
+      "release": "Nova 26.3.210",
       "status": "completed",
-      "strings": 104,
-      "score": 96.0,
-      "duration": "6m19s",
+      "strings": 58,
+      "score": 99.5,
+      "duration": "48s",
       "post_edit": true,
-      "age_seconds": 331
-    },
-    {
-      "project_id": "RND/ai/ringsense/data-export-service",
-      "mr_id": "183",
-      "release": "unknown",
-      "status": "completed",
-      "strings": 1,
-      "score": 99.9,
-      "duration": "45s",
-      "post_edit": false,
-      "age_seconds": 902
-    },
-    {
-      "project_id": "dpw-xmn/apw-in-jupiter",
-      "mr_id": "2673",
-      "release": "NWB 26.3.125",
-      "status": "completed",
-      "strings": 24,
-      "score": 99.9,
-      "duration": "34s",
-      "post_edit": false,
-      "age_seconds": 3803
-    },
-    {
-      "project_id": "admin-web/backend",
-      "mr_id": "6706",
-      "release": "unknown",
-      "status": "completed",
-      "strings": 4,
-      "score": 99.9,
-      "duration": "39s",
-      "post_edit": false,
-      "age_seconds": 6193
-    },
-    {
-      "project_id": "web/chc",
-      "mr_id": "2839",
-      "release": "unknown",
-      "status": "completed",
-      "strings": 902,
-      "score": 97.5,
-      "duration": "15m40s",
-      "post_edit": true,
-      "age_seconds": 6295
-    },
-    {
-      "project_id": "admin-web/frontend",
-      "mr_id": "5686",
-      "release": "unknown",
-      "status": "completed",
-      "strings": 60,
-      "score": 100.0,
-      "duration": "30s",
-      "post_edit": true,
-      "age_seconds": 6397
-    },
-    {
-      "project_id": "RND/rcvnc",
-      "mr_id": "5920",
-      "release": "NC_26.3.20",
-      "status": "completed",
-      "strings": 27,
-      "score": 91.0,
-      "duration": "7m16s",
-      "post_edit": false,
-      "age_seconds": 6529
-    },
-    {
-      "project_id": "web/npa",
-      "mr_id": "438",
-      "release": "unknown",
-      "status": "completed",
-      "strings": 1,
-      "score": 100.0,
-      "duration": "55s",
-      "post_edit": false,
-      "age_seconds": 6707
-    },
-    {
-      "project_id": "iva/iva-ui",
-      "mr_id": "2273",
-      "release": "unknown",
-      "status": "completed",
-      "strings": 2,
-      "score": 100.0,
-      "duration": "32s",
-      "post_edit": false,
-      "age_seconds": 6918
-    },
-    {
-      "project_id": "admin-web/backend",
-      "mr_id": "6705",
-      "release": "unknown",
-      "status": "completed",
-      "strings": 4,
-      "score": 99.9,
-      "duration": "53s",
-      "post_edit": false,
-      "age_seconds": 7553
+      "age_seconds": 835
     },
     {
       "project_id": "integration/integration-apps",
-      "mr_id": "29022",
-      "release": "Release 26.3.10",
+      "mr_id": "29035",
+      "release": "unknown",
       "status": "completed",
-      "strings": 15,
+      "strings": 14,
       "score": 99.9,
-      "duration": "45s",
+      "duration": "49s",
       "post_edit": false,
-      "age_seconds": 8180
+      "age_seconds": 1082
+    },
+    {
+      "project_id": "RND/rcvnc",
+      "mr_id": "5954",
+      "release": "NC_26.3.20",
+      "status": "completed",
+      "strings": 11,
+      "score": 99.1,
+      "duration": "2m53s",
+      "post_edit": false,
+      "age_seconds": 1674
+    },
+    {
+      "project_id": "admin-web/frontend",
+      "mr_id": "5690",
+      "release": "5.7 Xiamen Sprint 2",
+      "status": "completed",
+      "strings": 294,
+      "score": 98.9,
+      "duration": "2m58s",
+      "post_edit": true,
+      "age_seconds": 2145
+    },
+    {
+      "project_id": "admin-web/backend",
+      "mr_id": "6710",
+      "release": "5.7 Xiamen Sprint 2",
+      "status": "completed",
+      "strings": 1,
+      "score": 100.0,
+      "duration": "43s",
+      "post_edit": false,
+      "age_seconds": 2174
+    },
+    {
+      "project_id": "web/web",
+      "mr_id": "40968",
+      "release": "Release 26.4",
+      "status": "completed",
+      "strings": 1,
+      "score": 100.0,
+      "duration": "41s",
+      "post_edit": true,
+      "age_seconds": 2522
+    },
+    {
+      "project_id": "web/web",
+      "mr_id": "40969",
+      "release": "5.7 Xiamen Sprint 2",
+      "status": "completed",
+      "strings": 45,
+      "score": 94.6,
+      "duration": "6m51s",
+      "post_edit": true,
+      "age_seconds": 3046
+    },
+    {
+      "project_id": "copilot-platform/nova/nova-studio-app",
+      "mr_id": "1224",
+      "release": "unknown",
+      "status": "completed",
+      "strings": 1,
+      "score": 88.1,
+      "duration": "1m43s",
+      "post_edit": false,
+      "age_seconds": 4456
+    },
+    {
+      "project_id": "web/web",
+      "mr_id": "40966",
+      "release": "5.7 Xiamen Sprint 2",
+      "status": "completed",
+      "strings": 45,
+      "score": 94.6,
+      "duration": "2m06s",
+      "post_edit": true,
+      "age_seconds": 4961
+    },
+    {
+      "project_id": "engage-voice/frontend/workflow-studio",
+      "mr_id": "38",
+      "release": "CXWF 26.303.1",
+      "status": "completed",
+      "strings": 1,
+      "score": 100.0,
+      "duration": "59s",
+      "post_edit": false,
+      "age_seconds": 6316
     },
     {
       "project_id": "web/chc",
-      "mr_id": "2836",
-      "release": "Release 26.3.2",
+      "mr_id": "2844",
+      "release": "unknown",
       "status": "completed",
-      "strings": 37,
-      "score": 66.5,
-      "duration": "42s",
+      "strings": 3,
+      "score": 99.2,
+      "duration": "1m58s",
+      "post_edit": false,
+      "age_seconds": 8160
+    },
+    {
+      "project_id": "admin-web/frontend",
+      "mr_id": "5689",
+      "release": "SCP 26.3.2",
+      "status": "completed",
+      "strings": 5934,
+      "score": 97.2,
+      "duration": "7m04s",
+      "post_edit": false,
+      "age_seconds": 17624
+    },
+    {
+      "project_id": "RND/ai/ringsense/ringsense-ui",
+      "mr_id": "3036",
+      "release": "RS-2606.1.0",
+      "status": "completed",
+      "strings": 51,
+      "score": 91.8,
+      "duration": "10m55s",
+      "post_edit": false,
+      "age_seconds": 38628
+    },
+    {
+      "project_id": "web/bui",
+      "mr_id": "3057",
+      "release": "BUI 26.3.1",
+      "status": "completed",
+      "strings": 2,
+      "score": 100.0,
+      "duration": "30s",
+      "post_edit": false,
+      "age_seconds": 41369
+    },
+    {
+      "project_id": "web/bui",
+      "mr_id": "3052",
+      "release": "BUI 26.3.1",
+      "status": "completed",
+      "strings": 7,
+      "score": 98.8,
+      "duration": "3m39s",
       "post_edit": true,
-      "age_seconds": 8576
+      "age_seconds": 43240
+    },
+    {
+      "project_id": "admin-web/frontend",
+      "mr_id": "5672",
+      "release": "SCP 26.3.2",
+      "status": "completed",
+      "strings": 12,
+      "score": 98.9,
+      "duration": "480m23s",
+      "post_edit": false,
+      "age_seconds": 46337
+    },
+    {
+      "project_id": "RND/rcvnc",
+      "mr_id": "5944",
+      "release": "NC_25.3.20",
+      "status": "completed",
+      "strings": 2,
+      "score": 74.1,
+      "duration": "2m48s",
+      "post_edit": true,
+      "age_seconds": 48088
     },
     {
       "project_id": "copilot-platform/nova/nova-studio-app",
@@ -212,75 +267,20 @@
       "status": "completed",
       "strings": 99,
       "score": 99.5,
-      "duration": "44s",
-      "post_edit": true,
-      "age_seconds": 8966
-    },
-    {
-      "project_id": "integration/integration-apps",
-      "mr_id": "28995",
-      "release": "unknown",
-      "status": "completed",
-      "strings": 2,
-      "score": 86.1,
       "duration": "53s",
-      "post_edit": false,
-      "age_seconds": 9751
-    },
-    {
-      "project_id": "web-modules/web-modules-core",
-      "mr_id": "6180",
-      "release": "unknown",
-      "status": "completed",
-      "strings": 10,
-      "score": 100.0,
-      "duration": "41s",
       "post_edit": true,
-      "age_seconds": 11553
+      "age_seconds": 49091
     },
     {
       "project_id": "engage-voice/frontend/frontend",
-      "mr_id": "9997",
-      "release": "EVAA 26.3.1",
+      "mr_id": "9801",
+      "release": "EVCR 26.2.3",
       "status": "completed",
-      "strings": 7,
-      "score": 87.0,
-      "duration": "1m30s",
+      "strings": 1,
+      "score": 99.9,
+      "duration": "2m26s",
       "post_edit": false,
-      "age_seconds": 12643
-    },
-    {
-      "project_id": "admin-web/frontend",
-      "mr_id": "5685",
-      "release": "Release 26.3.2",
-      "status": "completed",
-      "strings": 10,
-      "score": 100.0,
-      "duration": "40s",
-      "post_edit": false,
-      "age_seconds": 12950
-    },
-    {
-      "project_id": "Fiji/Fiji",
-      "mr_id": "43699",
-      "release": "Jupiter Web 26.3.20",
-      "status": "completed",
-      "strings": 2,
-      "score": 100.0,
-      "duration": "1m35s",
-      "post_edit": false,
-      "age_seconds": 13442
-    },
-    {
-      "project_id": "web/stc",
-      "mr_id": "496",
-      "release": "Release 26.3.2",
-      "status": "completed",
-      "strings": 2,
-      "score": 99.1,
-      "duration": "2m03s",
-      "post_edit": false,
-      "age_seconds": 13715
+      "age_seconds": 49115
     }
   ]
 }
