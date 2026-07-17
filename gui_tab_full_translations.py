@@ -154,6 +154,7 @@ STRINGS = {
         "ft_status_exporting":    "Writing zip…",
         "ft_status_writing_json": "Writing merged JSON…",
         "ft_status_exported":     "✓ Exported to {path}",
+        "ft_status_exported_partial": "⚠ Partial export saved to {path} ({n} tasks failed)",
         "ft_err_no_inv":          "Inventory not loaded yet. Click 'Refresh Inventory'.",
         "ft_err_no_selection":    "Please select at least one product and one language.",
         "ft_err_no_data":         "No translations matched the selection.",
@@ -187,8 +188,11 @@ STRINGS = {
         "ft_progress_phase_write":   "Writing output file…",
         "ft_progress_log_label":  "Activity log",
         "ft_result_title_ok":     "Export complete",
+        "ft_result_title_partial": "Partial export complete",
         "ft_result_title_err":    "Export failed",
         "ft_result_summary":      "Summary",
+        "ft_result_partial_warning": "Only a partial result was exported. The file contains every translation fetched successfully, but {n} task(s) could not be fetched after retries.",
+        "ft_result_failed_tasks": "Failed tasks",
         "ft_result_per_product":  "Keys per product",
         "ft_result_per_locale":   "Keys per language",
         "ft_result_col_product":  "Product",
@@ -224,6 +228,7 @@ STRINGS = {
         "ft_status_exporting":    "正在写 zip…",
         "ft_status_writing_json": "正在写合并 JSON…",
         "ft_status_exported":     "✓ 已导出：{path}",
+        "ft_status_exported_partial": "⚠ 已部分导出：{path}（{n} 个任务失败）",
         "ft_err_no_inv":          "尚未加载清单，请点击「刷新清单」。",
         "ft_err_no_selection":    "请至少选择一个产品和一种语言。",
         "ft_err_no_data":         "选择范围内未聚合到任何翻译。",
@@ -257,8 +262,11 @@ STRINGS = {
         "ft_progress_phase_write":   "正在写出文件…",
         "ft_progress_log_label":  "执行日志",
         "ft_result_title_ok":     "导出完成",
+        "ft_result_title_partial": "部分导出完成",
         "ft_result_title_err":    "导出失败",
         "ft_result_summary":      "汇总",
+        "ft_result_partial_warning": "仅完成部分导出。文件已包含所有成功抓取的翻译，但仍有 {n} 个任务在重试后抓取失败，因此文件并不完整。",
+        "ft_result_failed_tasks": "失败任务",
         "ft_result_per_product":  "每个产品的 Key 数",
         "ft_result_per_locale":   "每种语言的 Key 数",
         "ft_result_col_product":  "产品",
@@ -440,9 +448,21 @@ class _ExportProgressDialog:
         if self._closed:
             return
         self._stop_progressbar()
+        partial_count = int(summary.get("_fetch_failure_count") or 0)
         try:
-            self.lbl_header.configure(text=self._t("ft_result_title_ok"))
-            self.lbl_phase.configure(text=self._t("ft_result_summary"))
+            if partial_count:
+                self.lbl_header.configure(
+                    text=self._t("ft_result_title_partial"),
+                    foreground="#fbbf24",
+                )
+                self.lbl_phase.configure(
+                    text=self._t("ft_result_partial_warning").format(
+                        n=partial_count),
+                    foreground="#fbbf24",
+                )
+            else:
+                self.lbl_header.configure(text=self._t("ft_result_title_ok"))
+                self.lbl_phase.configure(text=self._t("ft_result_summary"))
         except Exception:
             pass
 
@@ -474,8 +494,36 @@ class _ExportProgressDialog:
         out_path = summary.get("out_path") or ""
         per_product = summary.get("per_product") or {}
         per_locale = summary.get("per_locale") or {}
+        failures = list(summary.get("_fetch_failures") or [])
 
         self.frame_result.pack(fill="both", expand=True, padx=14)
+
+        # A partial export is still a successful file write, but it must never
+        # look indistinguishable from a complete export. Keep the warning in
+        # the result popup (which is already modal) and include a compact task
+        # preview; the full errors remain available in the activity log.
+        if failures:
+            preview_limit = 10
+            preview = []
+            for failure in failures[:preview_limit]:
+                source = str(failure.get("source") or "?")
+                task_id = str(failure.get("task_id") or "?")
+                preview.append(f"[{source}] {task_id}")
+            if len(failures) > preview_limit:
+                preview.append(f"+{len(failures) - preview_limit}")
+            warning = self._t("ft_result_partial_warning").format(
+                n=len(failures))
+            if preview:
+                warning += (f"\n{self._t('ft_result_failed_tasks')}: "
+                            + ", ".join(preview))
+            ttk.Label(
+                self.frame_result,
+                text=warning,
+                style="Status.TLabel",
+                foreground="#fbbf24",
+                justify="left",
+                wraplength=1000,
+            ).pack(fill="x", anchor="w", pady=(0, 10))
 
         # Path row
         path_row = ttk.Frame(self.frame_result, style="App.TFrame")
@@ -1497,11 +1545,11 @@ class FullTranslationsTab:
                 legacy_project_filter=legacy_filter or None,
                 mr_project_filter=mr_filter or None,
                 scan_project_filter=scan_filter or None,
-                # Hard contract for the export surface: if any task can't be
-                # fetched after retries, fail loudly with the missing-task list
-                # instead of writing a file that looks complete but isn't.
-                # (Override per-run with env TRANZOR_ALLOW_PARTIAL_EXPORT=1.)
-                strict_complete=True,
+                # GUI exports are best-effort: keep every successfully fetched
+                # translation and carry the failed-task list into the result
+                # popup. The collector's strict mode remains available to
+                # callers that require an all-or-nothing completeness gate.
+                strict_complete=False,
                 # Merge-to-JSON keeps full per-key provenance so the file can
                 # carry _all_sources + inconsistencies_in_new. The zip path
                 # doesn't need it (and skipping keeps its memory footprint low).
@@ -1545,6 +1593,10 @@ class FullTranslationsTab:
                     locales=locales,
                     progress_cb=self._dialog_log,
                 )
+            failures = [dict(f) for f in heavy_inv.fetch_failures]
+            summary["_fetch_failures"] = failures
+            summary["_fetch_failure_count"] = len(failures)
+            summary["_is_partial"] = bool(failures)
             # Stash mode so _on_export_done can render the right summary view.
             summary["_mode"] = mode
             self.parent.after(0, self._on_export_done, summary, None)
@@ -1599,9 +1651,17 @@ class FullTranslationsTab:
             if dlg is not None:
                 dlg.show_error(err)
             return
+        partial_count = int(summary.get("_fetch_failure_count") or 0)
+        if partial_count:
+            status_text = self._t("ft_status_exported_partial").format(
+                path=summary["out_path"], n=partial_count)
+            status_color = "#fbbf24"
+        else:
+            status_text = self._t("ft_status_exported").format(
+                path=summary["out_path"])
+            status_color = "#2ecc71"
         self.lbl_status.configure(
-            text=self._t("ft_status_exported").format(path=summary["out_path"]),
-            foreground="#2ecc71")
+            text=status_text, foreground=status_color)
         if dlg is not None:
             mode = summary.get("_mode", "zip")
             dlg.show_success(summary, mode=mode)
