@@ -149,7 +149,7 @@ import subprocess
 import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor
 from tkinter import ttk, messagebox
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 _boot_mark("stdlib_imports_done")
 
@@ -525,6 +525,19 @@ STRINGS = {
         "account_login":      "🔑 Sign In",
         "account_logged_in":  "🔑 {user}",
         "account_tip":        "Platform sign-in (token valid 7 days)",
+        # Header token-expiry pill (assess before starting a long run)
+        "token_status_none":    "🕒 Not signed in",
+        "token_status_unknown": "🕒 Token expiry: unknown",
+        "token_status_expired": "🕒 Token expired",
+        "token_status_fmt":     "🕒 Token expires: {time} ({left} left)",
+        "token_left_d":         "{d}d {h}h",
+        "token_left_h":         "{h}h {m}m",
+        "token_left_m":         "{m} min",
+        "token_relogin":        "🔄 Re-login",
+        "token_status_tip":     ("Platform tokens last 7 days; one that dies "
+                                 "mid-run kills a long export. Check the "
+                                 "remaining lifetime before starting a long "
+                                 "task — Re-login renews it for 7 more days."),
         # Messages
         "err_title":          "Input Error",
         "err_task_id":        "Task ID must be a number (e.g. 53), or leave empty to export all.",
@@ -673,6 +686,19 @@ STRINGS = {
         "account_login":      "🔑 登录",
         "account_logged_in":  "🔑 {user}",
         "account_tip":        "平台登录（令牌有效期 7 天）",
+        # Header token-expiry pill (assess before starting a long run)
+        "token_status_none":    "🕒 未登录",
+        "token_status_unknown": "🕒 Token 有效期未知",
+        "token_status_expired": "🕒 Token 已过期",
+        "token_status_fmt":     "🕒 Token 过期时间: {time}（剩 {left}）",
+        "token_left_d":         "{d} 天 {h} 小时",
+        "token_left_h":         "{h} 小时 {m} 分",
+        "token_left_m":         "{m} 分钟",
+        "token_relogin":        "🔄 重新登录",
+        "token_status_tip":     ("平台令牌有效期 7 天，任务执行中令牌过期会导致"
+                                 "请求被拦截、任务失败。启动耗时较长的任务前，"
+                                 "请先确认剩余有效期是否充足；点击「重新登录」"
+                                 "即可立即续期 7 天。"),
         # Messages
         "err_title":          "输入错误",
         "err_task_id":        "Task ID 必须是纯数字（如 53），或留空导出全部。",
@@ -861,6 +887,63 @@ try:
         STRINGS.setdefault(_lang_code, {}).update(_extra)
 except Exception:
     pass
+
+
+# ============================================================
+# Token-expiry status — header pill text + urgency color
+# ============================================================
+# Color ladder mirrors the risk of starting a long export right now:
+# green = the token comfortably outlives any run, amber = dies within a
+# day (overnight / batch runs at risk), red = expired or about to be
+# (<1h) — re-login BEFORE starting anything long.
+TOKEN_STATUS_GREEN = "#4ade80"
+TOKEN_STATUS_AMBER = "#fbbf24"
+TOKEN_STATUS_RED = "#e94560"
+TOKEN_STATUS_GRAY = "#8888a0"
+
+
+def format_token_expiry_status(seconds_left, *, now=None, lang="en",
+                               signed_in=True):
+    """Map the JWT expiry state to the header pill's ``(text, color)``.
+
+    ``seconds_left`` comes from :func:`tranzor_auth.token_seconds_left`
+    (``None`` when the token's ``exp`` can't be decoded); ``signed_in``
+    says whether any token is stored at all. ``now`` is injectable so
+    tests stay stable across clocks. Pure function, no tkinter — the
+    24h/1h color ladder and the day/hour/minute wording are pinned by
+    ``test_token_status.py``.
+    """
+    s = STRINGS.get(lang) or STRINGS["en"]
+    if not signed_in:
+        return s["token_status_none"], TOKEN_STATUS_GRAY
+    if seconds_left is None:
+        # Token present but exp undecodable. has_valid_token() treats it
+        # as usable (the server stays the authority), so stay neutral.
+        return s["token_status_unknown"], TOKEN_STATUS_GRAY
+    if seconds_left <= 0:
+        return s["token_status_expired"], TOKEN_STATUS_RED
+
+    exp = (now or datetime.now()) + timedelta(seconds=seconds_left)
+    minutes_total = int(seconds_left // 60)
+    days, rest = divmod(minutes_total, 24 * 60)
+    hours, minutes = divmod(rest, 60)
+    if days > 0:
+        left = s["token_left_d"].format(d=days, h=hours)
+    elif hours > 0:
+        left = s["token_left_h"].format(h=hours, m=minutes)
+    else:
+        left = s["token_left_m"].format(m=minutes)
+
+    if seconds_left > 24 * 3600:
+        color = TOKEN_STATUS_GREEN
+    elif seconds_left > 3600:
+        color = TOKEN_STATUS_AMBER
+    else:
+        color = TOKEN_STATUS_RED
+    # "7/22 14:00" — month/day without zero-padding, done by hand because
+    # strftime's no-pad flag is platform-split (%-m POSIX vs %#m Windows).
+    when = f"{exp.month}/{exp.day} {exp.strftime('%H:%M')}"
+    return s["token_status_fmt"].format(time=when, left=left), color
 
 
 # ============================================================
@@ -1084,6 +1167,11 @@ class ExportApp:
         self._bridge_wizard_shown_this_session = False
         self._bridge_wizard_instance = None
         self._start_bridge_watchdog()
+        # Token-expiry pill live refresh. First paint already happened via
+        # _refresh_ui_text → _update_account_button, so the first tick can
+        # simply wait a full interval.
+        self.root.after(self.TOKEN_STATUS_INTERVAL_MS,
+                        self._token_status_tick)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         # Center window
@@ -1358,6 +1446,24 @@ class ExportApp:
             activeforeground="#fff", padx=12, pady=2)
         self.btn_account.pack(side="right", anchor="ne", padx=(0, 8))
         self._account_tip = Tooltip(self.btn_account, "")
+
+        # Token-expiry pill + one-click Re-login (left of the 🔑 button).
+        # The 7-day token dying mid-run kills a long export (2026-07-08
+        # RCA); surfacing the exact expiry time lets the user answer
+        # "will my token outlive this run?" BEFORE starting it.
+        self.btn_token_relogin = self._create_button(
+            header, text="", command=self._on_account_button,
+            style_name="Secondary",
+            font=(FONT_FAMILY, 10),
+            bg=self.ACCENT, fg="#ccc", activebackground="#1a3a6a",
+            activeforeground="#fff", padx=12, pady=2)
+        self.btn_token_relogin.pack(side="right", anchor="ne", padx=(0, 8))
+        self.lbl_token_status = tk.Label(
+            header, text="", bg=self.BG, fg=TOKEN_STATUS_GRAY,
+            font=(FONT_FAMILY, 10))
+        self.lbl_token_status.pack(side="right", anchor="ne",
+                                   padx=(0, 6), pady=(5, 0))
+        self._token_tip = Tooltip(self.lbl_token_status, "")
 
         self.lbl_title = ttk.Label(header, text="", style="Title.TLabel")
         self.lbl_title.pack(anchor="w")
@@ -2548,9 +2654,52 @@ class ExportApp:
                 self._account_tip.set_text(self._t("account_tip"))
         except Exception:
             pass
+        self._update_token_status()
+
+    TOKEN_STATUS_INTERVAL_MS = 30_000  # 30s — local JWT decode only, no I/O
+
+    def _update_token_status(self):
+        """Refresh the header token-expiry pill + Re-login button.
+
+        Runs on every auth-state change (via _update_account_button, which
+        _refresh_ui_text also calls — so language flips are covered) and
+        every TOKEN_STATUS_INTERVAL_MS from _token_status_tick, keeping the
+        shown remaining lifetime honest while the app sits open.
+        """
+        lbl = getattr(self, "lbl_token_status", None)
+        btn = getattr(self, "btn_token_relogin", None)
+        if lbl is None or btn is None:
+            return
+        try:
+            signed_in = bool(tranzor_auth.get_token())
+            text, color = format_token_expiry_status(
+                tranzor_auth.token_seconds_left(),
+                lang=self.lang, signed_in=signed_in)
+            lbl.configure(text=text, fg=color)
+            btn.configure(text=self._t("token_relogin"))
+            if getattr(self, "_token_tip", None):
+                self._token_tip.set_text(self._t("token_status_tip"))
+            # Signed out: the 🔑 Sign-In button next door opens the very
+            # same dialog — hide the redundant Re-login button until a
+            # token exists (expired ones keep it: that's its whole point).
+            if signed_in and not btn.winfo_manager():
+                btn.pack(side="right", anchor="ne", padx=(0, 8), before=lbl)
+            elif not signed_in and btn.winfo_manager():
+                btn.pack_forget()
+        except Exception:
+            pass  # the status pill must never break the header
+
+    def _token_status_tick(self):
+        try:
+            self._update_token_status()
+        finally:
+            self.root.after(
+                self.TOKEN_STATUS_INTERVAL_MS, self._token_status_tick)
 
     def _on_account_button(self):
-        """Header 🔑 button: (re-)sign-in, then refresh the current view."""
+        """Header 🔑 / Re-login button: (re-)sign-in, then refresh the
+        current view. The token pill updates via _show_login_dialog's
+        closing _update_account_button call."""
         if self._show_login_dialog():
             self._load_summary_data()
 

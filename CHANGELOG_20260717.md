@@ -1,0 +1,9 @@
+Updated **TranzorExporter.exe** (v20260717)
+
+What's new in 17 July update:
+
+*The platform force-expires every sign-in token after 7 days. Long, uninterruptible runs (Full Translation exports, big MR batches) that straddle that wall die mid-flight on 401s — the 2026-07-08 update made that failure honest and recoverable, but you still couldn't SEE it coming before pressing Start. Now you can.*
+
+- 🕒 **Token expiry pill in the header** — the blank space right of the title now shows exactly when the current sign-in token dies, e.g. `Token 过期时间: 7/22 14:00（剩 5 天 3 小时）` / `Token expires: 7/22 14:00 (5d 3h left)`. Refreshed on every auth change plus a 30-second tick, all from a local JWT decode — zero network. The color says how nervous to be: **green** = more than a day left, **amber** = dies within 24 h (overnight / batch runs at risk), **red** = under an hour or already expired. Bilingual like the rest of the header.
+- 🔄 **One-click Re-login right next to it** — opens the existing sign-in dialog, renews the token for a fresh 7 days and refreshes the current view; no restart, no digging for the 🔑 button. Start a long export only when the pill will outlive it. While signed out the button hides (the 🔑 Sign-In button next door already covers that); an **expired** token keeps it visible — that is exactly when you need it.
+- 🧱 **Pure-additive & tested** — the wording, the 24 h / 1 h color ladder and the unpadded `7/22 14:00` date rendering are pinned by 20 new headless unit tests (`test_token_status.py`). The pill rides the existing auth-state hooks (sign-in dialog close, language flip), so no existing behaviour changed; the full suite still passes (the 3 `test_merge_watchdog` failures + 1 `test_pretranslation_check` import error predate this change and reproduce on a clean master checkout).
