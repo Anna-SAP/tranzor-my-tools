@@ -22,21 +22,34 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import export_translations as et
 
 
 class _FakeResp:
-    def __init__(self, payload):
+    def __init__(self, payload, status_code=200, headers=None):
         self._p = payload
+        self.status_code = status_code
+        self.headers = headers or {}
+        self.closed = False
 
     def raise_for_status(self):
-        pass
+        if self.status_code >= 400:
+            exc = RuntimeError(f"HTTP {self.status_code}")
+            exc.response = self
+            raise exc
 
     def json(self):
         return self._p
+
+    def close(self):
+        self.closed = True
 
 
 def _entry(opus, lang, text="t"):
@@ -211,11 +224,114 @@ class TestLanguageDiscovery(_PatchMixin):
         self.assertIn(("K0", "de-DE"), self._pairs(out))
 
     def test_truly_empty_task_returns_nothing(self):
-        # No data and no configured languages -> flat fallback -> empty.
+        # A successful empty probe is authoritative; do not issue the old
+        # redundant limit=1 flat-fallback request.
         backend = _Backend([], honor_filter=True)
         self._install(backend, [])
         out = et.fetch_all_translations("T")
         self.assertEqual(out, [])
+        self.assertFalse(any(c.get("limit") == 1 for c in backend.calls))
+
+    def test_probe_503_is_not_swallowed_into_limit_one_fallback(self):
+        calls = []
+        error = RuntimeError("503 Server Error: Service Temporarily Unavailable")
+        error.response = _FakeResp({}, status_code=503)
+
+        def fail_probe(url, **kwargs):
+            calls.append(dict(kwargs.get("params") or {}))
+            raise error
+
+        et._api_get = fail_probe
+        et.fetch_task_languages = lambda task_id: []
+        with self.assertRaisesRegex(RuntimeError, "503 Server Error"):
+            et.fetch_all_translations("T")
+        self.assertEqual(calls, [{"limit": 200, "offset": 0}])
+
+
+class TestApiGetResilience(unittest.TestCase):
+    def setUp(self):
+        self._orig_session = et._session
+        self._orig_gate = et._HTTP_GATE
+        self._orig_retries = et.MAX_RETRIES
+
+    def tearDown(self):
+        et._session = self._orig_session
+        et._HTTP_GATE = self._orig_gate
+        et.MAX_RETRIES = self._orig_retries
+
+    def test_503_is_retried_at_request_boundary(self):
+        responses = [
+            _FakeResp({}, status_code=503, headers={"Retry-After": "2"}),
+            _FakeResp({}, status_code=503),
+            _FakeResp({"ok": True}),
+        ]
+
+        class _Session:
+            def __init__(self):
+                self.calls = 0
+
+            def get(self, *_args, **_kwargs):
+                response = responses[self.calls]
+                self.calls += 1
+                return response
+
+        session = _Session()
+        et._session = session
+        et._HTTP_GATE = threading.BoundedSemaphore(1)
+        et.MAX_RETRIES = 3
+        with mock.patch.object(et.random, "uniform", return_value=0.0), \
+                mock.patch.object(et.time, "sleep") as slept:
+            response = et._api_get("http://example/translations")
+
+        self.assertEqual(response.json(), {"ok": True})
+        self.assertEqual(session.calls, 3)
+        self.assertEqual([c.args[0] for c in slept.call_args_list], [2.0, 2.0])
+        self.assertTrue(responses[0].closed)
+        self.assertTrue(responses[1].closed)
+
+    def test_non_retryable_401_returns_immediately(self):
+        class _Session:
+            def __init__(self):
+                self.calls = 0
+
+            def get(self, *_args, **_kwargs):
+                self.calls += 1
+                return _FakeResp({}, status_code=401)
+
+        session = _Session()
+        et._session = session
+        with mock.patch.object(et.time, "sleep") as slept:
+            response = et._api_get("http://example/translations")
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(session.calls, 1)
+        slept.assert_not_called()
+
+    def test_global_gate_caps_nested_request_concurrency(self):
+        class _Session:
+            def __init__(self):
+                self.active = 0
+                self.max_active = 0
+                self.lock = threading.Lock()
+
+            def get(self, *_args, **_kwargs):
+                with self.lock:
+                    self.active += 1
+                    self.max_active = max(self.max_active, self.active)
+                time.sleep(0.02)
+                with self.lock:
+                    self.active -= 1
+                return _FakeResp({})
+
+        session = _Session()
+        et._session = session
+        et._HTTP_GATE = threading.BoundedSemaphore(2)
+        et.MAX_RETRIES = 1
+        with ThreadPoolExecutor(max_workers=12) as pool:
+            list(pool.map(
+                lambda _i: et._api_get("http://example/translations"),
+                range(12),
+            ))
+        self.assertLessEqual(session.max_active, 2)
 
 
 if __name__ == "__main__":

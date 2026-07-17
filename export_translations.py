@@ -15,7 +15,10 @@ Tranzor 全部翻译导出工具
 import argparse
 import html
 import os
+import random
 import sys
+import threading
+import time
 import webbrowser
 from datetime import date
 
@@ -48,22 +51,86 @@ MAX_WORKERS = 8
 # 单个 task 内的并发 API 请求数
 MAX_PAGE_WORKERS = 6
 
+# Legacy 全量导出有两层线程池：Full Translation 面板并发 task，单个 task
+# 又并发语言/分页。不能让两层并发相乘后直接打到后端（8 x 6 = 48）；所有
+# Legacy GET 最终都经过这个进程级闸门，限制真实在途请求数。单 task 导出仍可
+# 保留并发加速，但全量导出不会再形成请求风暴。
+MAX_HTTP_WORKERS = max(
+    1, int(os.getenv("TRANZOR_LEGACY_HTTP_WORKERS", "6") or "6"))
+_HTTP_GATE = threading.BoundedSemaphore(MAX_HTTP_WORKERS)
+
+# 这些状态通常是限流、网关抖动或服务临时过载。连接异常原本会重试，但 HTTP
+# 响应一旦成功到达（即使是 503）旧代码就立即返回，让上层整 task 重跑；这会
+# 丢掉已经成功抓到的分页，并进一步放大后端压力。现在在单请求边界退避重试。
+_RETRYABLE_HTTP_STATUSES = {429, 500, 502, 503, 504}
+
+
+def _retry_wait(attempt, response=None):
+    """Exponential backoff with jitter, honoring numeric Retry-After."""
+    wait = float(2 ** attempt)
+    try:
+        retry_after = (getattr(response, "headers", None) or {}).get(
+            "Retry-After")
+        if retry_after is not None:
+            wait = max(wait, float(retry_after))
+    except (TypeError, ValueError):
+        pass
+    # Jitter prevents all worker threads from retrying the overloaded service
+    # on the same millisecond (the previous task-level retries were synchronized).
+    return wait + random.uniform(0.0, 0.5)
+
+
+def _log_retry(reason, wait, attempt):
+    try:
+        print(f"    {reason}，{wait:.1f}s 后重试 "
+              f"({attempt + 1}/{MAX_RETRIES})...")
+    except Exception:
+        # Logging must never turn a recoverable HTTP failure into an export crash
+        # on terminals whose code page cannot render the message.
+        pass
+
 
 def _api_get(url, **kwargs):
-    """带重试的 GET 请求，遇到超时/连接错误自动重试"""
-    import time
+    """带并发上限的 GET；重试连接错误和临时 HTTP 服务错误。"""
     kwargs.setdefault("timeout", 30)
     for attempt in range(MAX_RETRIES):
         try:
-            return _session.get(url, **kwargs)
+            # Only the actual socket request holds the permit. Backoff sleeps
+            # happen outside the gate so another request can make progress.
+            with _HTTP_GATE:
+                resp = _session.get(url, **kwargs)
+
+            status = getattr(resp, "status_code", None)
+            if (status not in _RETRYABLE_HTTP_STATUSES
+                    or attempt >= MAX_RETRIES - 1):
+                return resp
+
+            wait = _retry_wait(attempt, resp)
+            try:
+                resp.close()
+            except Exception:
+                pass
+            _log_retry(f"HTTP {status} 服务暂时不可用", wait, attempt)
+            time.sleep(wait)
         except (requests.exceptions.Timeout,
                 requests.exceptions.ConnectionError) as e:
             if attempt < MAX_RETRIES - 1:
-                wait = 2 ** attempt  # 1s, 2s, 4s
-                print(f"    ⚠ 请求超时，{wait}s 后重试 ({attempt+1}/{MAX_RETRIES})...")
+                wait = _retry_wait(attempt)
+                _log_retry("请求超时或连接异常", wait, attempt)
                 time.sleep(wait)
             else:
                 raise
+
+
+class _ApiGetSession:
+    """Minimal Session facade so full-text hydration shares retry + gating."""
+
+    @staticmethod
+    def get(url, **kwargs):
+        return _api_get(url, **kwargs)
+
+
+_api_get_session = _ApiGetSession()
 
 
 # ---------------------------------------------------------------------------
@@ -285,23 +352,37 @@ def _discover_languages(task_id):
         inventory / monitor 等跨任务消费方需要的（旧整表实现本来也会带上它）。
 
     再并上 task 配置的 ``target_languages`` 兜底，确保连首页里恰好稀疏缺席的
-    配置语言也不漏。识别不出任何语言（空任务或全失败）时返回空集合，由调用方
-    决定兜底。
+    配置语言也不漏。返回 (languages, probe_had_entries)：成功探测到空任务时
+    调用方可直接返回；若首页存在无语言字段的旧格式行，则保留整表兜底。若首页
+    请求失败且 task metadata 也无法提供语言，则重新抛出原异常，避免掩盖 503。
     """
     observed = set()
+    probe_error = None
+    probe_had_entries = False
     try:
         resp = _api_get(
             f"{API}/tasks/{task_id}/translations",
             params={"limit": 200, "offset": 0},
         )
         resp.raise_for_status()
-        for e in (resp.json().get("entries") or []):
+        entries = resp.json().get("entries") or []
+        probe_had_entries = bool(entries)
+        for e in entries:
             lg = e.get("target_language")
             if lg:
                 observed.add(lg)
-    except Exception:
-        pass
-    return observed | set(fetch_task_languages(task_id) or [])
+    except Exception as exc:
+        # Try task metadata as an independent source, but remember the probe
+        # failure. If metadata cannot supply languages either, re-raise this
+        # error instead of issuing another unfiltered limit=1 request.
+        # The old fallback tripled traffic during a 503 outage and hid the
+        # original failure until the service was already overloaded.
+        probe_error = exc
+
+    languages = observed | set(fetch_task_languages(task_id) or [])
+    if not languages and probe_error is not None:
+        raise probe_error
+    return languages, probe_had_entries
 
 
 def fetch_all_translations(task_id):
@@ -315,11 +396,16 @@ def fetch_all_translations(task_id):
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    languages = _discover_languages(task_id)
+    languages, probe_had_entries = _discover_languages(task_id)
 
     if not languages:
-        # 极端兜底：连一种语言都识别不出时才走旧整表分页（已知会漏行，但好过空）
-        print("    [!] 未能识别任务的目标语言，退回整表分页（可能漏行）")
+        if not probe_had_entries:
+            # The translations probe succeeded and proved the task empty.
+            # Do not make a redundant limit=1 request.
+            return []
+        # Malformed/legacy payload: rows exist but carry no language. Preserve
+        # the historical flat fallback for compatibility.
+        print("    [!] 翻译行缺少目标语言，退回整表分页（可能漏行）")
         all_translations = _fetch_all_translations_flat(task_id)
     else:
         all_translations = []
@@ -338,7 +424,10 @@ def fetch_all_translations(task_id):
         all_translations,
         api_base=API,
         task_id=task_id,
-        session=_session,
+        # Route full-text calls through the same retry/concurrency guard as
+        # ordinary translation pages; otherwise 8 tasks x 6 hydrators would
+        # recreate the very same 48-request burst.
+        session=_api_get_session,
         max_workers=MAX_PAGE_WORKERS,
     )
     if hydrated:
