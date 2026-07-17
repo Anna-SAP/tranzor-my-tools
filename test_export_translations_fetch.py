@@ -142,8 +142,11 @@ class TestPerLanguageFetch(_PatchMixin):
         for i in range(5):
             for lg in langs:
                 self.assertIn((f"K{i}", lg), self._pairs(out))
-        # Actual data fetches were language-scoped (the probe is not).
+        # Task-detail metadata was sufficient, so every translations request
+        # was language-scoped; the expensive unfiltered probe was skipped.
         self.assertTrue(self._lang_scoped_calls(backend))
+        self.assertTrue(all(
+            "target_language" in call for call in backend.calls))
 
     def test_empty_translations_are_filtered(self):
         langs = ["de-DE", "zh-CN"]
@@ -196,6 +199,17 @@ class TestPaginationWithinLanguage(_PatchMixin):
 
 
 class TestLanguageDiscovery(_PatchMixin):
+    def test_task_detail_unions_configured_and_available_languages(self):
+        et._api_get = lambda *_args, **_kwargs: _FakeResp({
+            "target_languages": ["de-DE", "fr-FR"],
+            "available_languages": ["fr-FR", "zh-CN"],
+        })
+
+        self.assertEqual(
+            et.fetch_task_languages("T"),
+            ["de-DE", "fr-FR", "zh-CN"],
+        )
+
     def test_self_heals_when_task_languages_unavailable(self):
         # task detail gives NO target_languages, but the data still carries
         # them — the probe discovers the languages and the stable per-language
@@ -213,12 +227,12 @@ class TestLanguageDiscovery(_PatchMixin):
 
     def test_out_of_config_language_is_not_dropped(self):
         # A locale present in the data but absent from the configured
-        # target_languages (e.g. removed after translation) must survive,
-        # because languages are discovered from the data too.
-        configured = ["de-DE"]
+        # target_languages must survive because task detail's merged
+        # target_languages + available_languages includes it.
+        metadata_languages = ["de-DE", "zh-CN"]
         data = [_entry("K0", "de-DE"), _entry("K0", "zh-CN")]  # zh-CN stray
         backend = _Backend(data, honor_filter=True)
-        self._install(backend, configured)
+        self._install(backend, metadata_languages)
         out = et.fetch_all_translations("T")
         self.assertIn(("K0", "zh-CN"), self._pairs(out))
         self.assertIn(("K0", "de-DE"), self._pairs(out))

@@ -53,10 +53,11 @@ MAX_PAGE_WORKERS = 6
 
 # Legacy 全量导出有两层线程池：Full Translation 面板并发 task，单个 task
 # 又并发语言/分页。不能让两层并发相乘后直接打到后端（8 x 6 = 48）；所有
-# Legacy GET 最终都经过这个进程级闸门，限制真实在途请求数。单 task 导出仍可
-# 保留并发加速，但全量导出不会再形成请求风暴。
+# Legacy GET 最终都经过这个进程级闸门，限制真实在途请求数。生产实测表明 4 个
+# 短并发可以成功，但长时间维持 6 并发仍会触发 503 容量保护；2 是已验证的稳定
+# 默认值。需要在更强部署上提速时仍可通过环境变量显式调高。
 MAX_HTTP_WORKERS = max(
-    1, int(os.getenv("TRANZOR_LEGACY_HTTP_WORKERS", "6") or "6"))
+    1, int(os.getenv("TRANZOR_LEGACY_HTTP_WORKERS", "2") or "2"))
 _HTTP_GATE = threading.BoundedSemaphore(MAX_HTTP_WORKERS)
 
 # 这些状态通常是限流、网关抖动或服务临时过载。连接异常原本会重试，但 HTTP
@@ -148,11 +149,16 @@ def fetch_task_info(task_id):
 
 
 def fetch_task_languages(task_id):
-    """返回单个 task 配置的目标语言列表（用于全量 JSON 导出的语言补齐）。
+    """返回单个 task 配置或实际存在的目标语言列表。
 
     全量导出要求每个 key 100% 覆盖配置目标语言。源数据稀疏，光靠"观察到的
     语言并集"无法覆盖"整个 task 一条译文都没有"的语言，因此从 task 详情
-    （``GET /tasks/{id}``，字段 ``target_languages``）取权威配置列表。
+    读取两个权威字段：
+
+    - target_languages：任务配置语言，即使尚无译文也必须补齐；
+    - available_languages：实际已有数据的语言，包含历史或配置外语言。
+
+    合并两者也避免了为"发现语言"请求昂贵的无过滤 translations 首屏。
 
     任何异常都降级为空列表——此时调用方仍会用"观察到的语言并集"补齐，
     不会让导出失败。
@@ -161,7 +167,15 @@ def fetch_task_languages(task_id):
         resp = _api_get(f"{API}/tasks/{task_id}")
         resp.raise_for_status()
         data = resp.json() or {}
-        return [str(x) for x in (data.get("target_languages") or []) if x]
+        out = []
+        seen = set()
+        for field in ("target_languages", "available_languages"):
+            for value in (data.get(field) or []):
+                value = str(value) if value else ""
+                if value and value not in seen:
+                    seen.add(value)
+                    out.append(value)
+        return out
     except Exception:
         return []
 
@@ -340,59 +354,42 @@ def count_legacy_source_strings(task_id):
 
 
 def _discover_languages(task_id):
-    """探测该 task 数据里实际出现的目标语言集合（用于逐语言抓取）。
+    """取得逐语言抓取所需的完整语言集合。
 
-    取首页（flat）即可：``/translations`` 结果按 source(key) 分组，前若干个 key
-    已是完整的多语言组，足以覆盖该 task 的全部语言。这一步的好处：
-      - 自愈：即便 task 详情拿不到 ``target_languages``（旧后端 / 详情接口报错），
-        也能从数据里识别出语言，照样走稳定的逐语言抓取，而不是退回会漏行的整表
-        分页（见 review 确认的兜底缺陷）。
-      - 不漏"配置外"语言：若某语言存在真实译文但已不在 task 配置的
-        ``target_languages`` 里（任务改配/历史遗留 locale），也能被抓到——这是
-        inventory / monitor 等跨任务消费方需要的（旧整表实现本来也会带上它）。
+    优先读取轻量 task detail 的 target_languages 与 available_languages 并集。
+    绝大多数任务在这里即可确定完整语言集，避免原实现为每个 task 额外请求一次
+    最昂贵的无语言过滤 translations 首屏。生产全量导出正是这批冗余请求在持续
+    并发下触发了 Legacy 后端 503 容量保护。
 
-    再并上 task 配置的 ``target_languages`` 兜底，确保连首页里恰好稀疏缺席的
-    配置语言也不漏。返回 (languages, probe_had_entries)：成功探测到空任务时
-    调用方可直接返回；若首页存在无语言字段的旧格式行，则保留整表兜底。若首页
-    请求失败且 task metadata 也无法提供语言，则重新抛出原异常，避免掩盖 503。
+    只有旧任务或旧后端拿不到语言元数据时，才退回 translations 首屏自愈。返回
+    (languages, probe_had_entries)；probe 的 503 直接抛出，不再吞错或追加
+    limit=1 请求。
     """
-    observed = set()
-    probe_error = None
-    probe_had_entries = False
-    try:
-        resp = _api_get(
-            f"{API}/tasks/{task_id}/translations",
-            params={"limit": 200, "offset": 0},
-        )
-        resp.raise_for_status()
-        entries = resp.json().get("entries") or []
-        probe_had_entries = bool(entries)
-        for e in entries:
-            lg = e.get("target_language")
-            if lg:
-                observed.add(lg)
-    except Exception as exc:
-        # Try task metadata as an independent source, but remember the probe
-        # failure. If metadata cannot supply languages either, re-raise this
-        # error instead of issuing another unfiltered limit=1 request.
-        # The old fallback tripled traffic during a 503 outage and hid the
-        # original failure until the service was already overloaded.
-        probe_error = exc
+    metadata_languages = set(fetch_task_languages(task_id) or [])
+    if metadata_languages:
+        return metadata_languages, False
 
-    languages = observed | set(fetch_task_languages(task_id) or [])
-    if not languages and probe_error is not None:
-        raise probe_error
-    return languages, probe_had_entries
+    observed = set()
+    resp = _api_get(
+        f"{API}/tasks/{task_id}/translations",
+        params={"limit": 200, "offset": 0},
+    )
+    resp.raise_for_status()
+    entries = resp.json().get("entries") or []
+    for entry in entries:
+        language = entry.get("target_language")
+        if language:
+            observed.add(language)
+    return observed, bool(entries)
 
 
 def fetch_all_translations(task_id):
     """获取某个 task 中所有翻译条目（全量，不筛选类型）。
 
     按目标语言逐语言分页抓取——这是规避服务端整表分页漏行 bug 的关键（详见
-    :func:`_fetch_language_translations`）。语言之间并发，语言内部顺序分页
-    （单语言内 opus_id 唯一，分页稳定）。语言集合来自"数据首页观察 ∪ task 配置"
-    （见 :func:`_discover_languages`）。万一一种语言都识别不出，才退回旧整表
-    分页兜底，避免空导出。
+    :func:`_fetch_language_translations`）。语言之间并发，语言内部顺序分页。
+    语言集合优先来自 task detail；元数据缺失时才探测数据首页。若旧格式数据仍
+    没有语言字段，最后才退回旧整表分页。
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -400,8 +397,8 @@ def fetch_all_translations(task_id):
 
     if not languages:
         if not probe_had_entries:
-            # The translations probe succeeded and proved the task empty.
-            # Do not make a redundant limit=1 request.
+            # Metadata was empty and the translations probe proved the task
+            # empty. Do not make a redundant limit=1 request.
             return []
         # Malformed/legacy payload: rows exist but carry no language. Preserve
         # the historical flat fallback for compatibility.
@@ -425,8 +422,8 @@ def fetch_all_translations(task_id):
         api_base=API,
         task_id=task_id,
         # Route full-text calls through the same retry/concurrency guard as
-        # ordinary translation pages; otherwise 8 tasks x 6 hydrators would
-        # recreate the very same 48-request burst.
+        # ordinary translation pages; otherwise nested task/hydrator pools
+        # would recreate the same request burst.
         session=_api_get_session,
         max_workers=MAX_PAGE_WORKERS,
     )
