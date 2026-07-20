@@ -1,0 +1,9 @@
+Updated **TranzorExporter.exe** (v20260720)
+
+What's new in 20 July update:
+
+*Every master build since 17 July ended red — not from any code change, but from GitHub's storage quota. The final RCA (after packages, artifacts and 20 automated retries were ruled out one by one): on the enhanced billing platform the free plan's "500 MB" of Actions storage is really a **cumulative monthly budget of ~365 GB-hours**. July's budget was already spent by mid-month (early-July artifact pile-ups before the 07-08 prune fix, plus a sibling repo hoarding 503 MB at 90-day retention), and deleting files can never refund GB-hours already burned — so uploads stay blocked until the budget resets on Aug 1. The fix ships a delivery channel that quota can't touch.*
+
+- 📦 **Rolling `master-latest` release** — every master push now publishes `TranzorExporter.exe` and `TranzorExporter-Mac.zip` as assets on a single prerelease tag, replaced in place with `--clobber`. Release assets are free and completely outside the Actions storage quota, and the download URL is stable — grab the newest build any time from the repo's Releases page, no more digging through per-run artifact lists.
+- 🟢 **Artifact upload demoted to best-effort** — `actions/upload-artifact` now runs with `continue-on-error: true`. While a monthly budget is exhausted the step logs its failure but the build stays green, because the release channel above already delivered the binaries. When the budget resets, artifacts resume automatically (still pruned to the newest 4, still 7-day retention).
+- 🧹 **Account-level hygiene (companion fixes)** — the sibling repo that hoarded 503 MB now prunes to the newest 2 artifacts with 7-day retention (All-About-Feedback PR #5), and its 25-artifact backlog was cleared. Steady-state account storage is now ~90 MB, so future months stay far below the budget even without this fallback.
