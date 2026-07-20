@@ -21,7 +21,7 @@ jobs:
   build:
     runs-on: macos-latest
     permissions:
-      contents: read
+      contents: write  # rolling "master-latest" release (create/upload assets)
       actions: write   # prune step deletes this workflow's old artifacts
 
     steps:
@@ -73,6 +73,24 @@ jobs:
           ditto -c -k --keepParent TranzorExporter.app TranzorExporter-Mac.zip
           ls -lh TranzorExporter-Mac.zip
 
+      - name: Publish .app zip to rolling "master-latest" release
+        # 2026-07-20 RCA: July's "Actions storage" GB-hour budget is spent
+        # account-wide (see build-windows.yml for the full story). Release
+        # assets are free and quota-independent — this is the reliable Mac
+        # download channel; the artifact upload below is best-effort only.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view master-latest >/dev/null 2>&1; then
+            # Both platform builds race to create it on first run — tolerate
+            # "already exists" and just upload.
+            gh release create master-latest --prerelease --target master \
+              --title "Latest master build (rolling)" \
+              --notes "Auto-updated on every master push. Assets are replaced in place, so download links are stable." \
+              || echo "release create lost the race (already exists) - continuing"
+          fi
+          gh release upload master-latest dist/TranzorExporter-Mac.zip --clobber
+
       - name: Prune old TranzorExporter-Mac artifacts (keep newest 4)
         # 2026-07-08: builds #123/#60 failed with "Artifact storage quota has
         # been hit" — see build-windows.yml for the full rationale. Bound
@@ -95,7 +113,11 @@ jobs:
             }
             core.info(`Pruned ${old.length} old artifact(s).`);
 
-      - name: Upload TranzorExporter.app zip
+      - name: Upload TranzorExporter.app zip (best-effort artifact channel)
+        # May fail while the monthly storage budget is exhausted — the
+        # release above is the channel that must succeed, so don't let this
+        # step turn the run red.
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: TranzorExporter-Mac

@@ -30,7 +30,7 @@ jobs:
   build:
     runs-on: windows-latest
     permissions:
-      contents: read
+      contents: write  # rolling "master-latest" release (create/upload assets)
       actions: write   # prune step deletes this workflow's old artifacts
 
     steps:
@@ -62,6 +62,28 @@ jobs:
           $sizeMB = [math]::Round($exe.Length / 1MB, 2)
           Write-Host "Built EXE: $($exe.FullName) ($sizeMB MB)"
 
+      - name: Publish EXE to rolling "master-latest" release
+        # 2026-07-20 RCA: the account's July "Actions storage" allowance is a
+        # CUMULATIVE monthly GB-hour budget on the enhanced billing platform
+        # (366 GBh consumed of ~365 included) — deleting artifacts cannot
+        # refund it, so every upload-artifact stayed red and would until
+        # Aug 1. Release assets are free and outside that quota, so this
+        # rolling prerelease is the RELIABLE download channel with a stable
+        # URL; the artifact upload below is best-effort only.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          gh release view master-latest *> $null
+          if ($LASTEXITCODE -ne 0) {
+            # Both platform builds race to create it on first run — tolerate
+            # "already exists" and just upload.
+            gh release create master-latest --prerelease --target master --title "Latest master build (rolling)" --notes "Auto-updated on every master push. Assets are replaced in place, so download links are stable."
+            if ($LASTEXITCODE -ne 0) { Write-Host "release create lost the race (already exists) - continuing" }
+          }
+          gh release upload master-latest dist/TranzorExporter.exe --clobber
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
       - name: Prune old TranzorExporter-Windows artifacts (keep newest 4)
         # 2026-07-08: builds #123/#60 failed with "Artifact storage quota has
         # been hit" — retention-days alone doesn't bound usage on busy days
@@ -86,7 +108,11 @@ jobs:
             }
             core.info(`Pruned ${old.length} old artifact(s).`);
 
-      - name: Upload TranzorExporter EXE
+      - name: Upload TranzorExporter EXE (best-effort artifact channel)
+        # May fail while the monthly storage budget is exhausted — the
+        # release above is the channel that must succeed, so don't let this
+        # step turn the run red.
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: TranzorExporter-Windows
