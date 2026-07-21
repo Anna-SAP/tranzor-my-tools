@@ -85,6 +85,8 @@ a = Analysis(
         # 📅 日期选择器）。各 tab 通过普通 import 引用，分析器本能找到，这里
         # 仍按既有惯例显式登记作安全网。
         'date_picker',
+        # 共享可搜索下拉组件（MR Pipeline 的 Project 关键字过滤弹窗）。
+        'searchable_combobox',
         'merge_watchdog',
         'unregistered_terms',
         'daily_digest',
