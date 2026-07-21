@@ -252,10 +252,12 @@ class _FakeSession:
         self._payload = payload
         self._status_code = status_code
         self.calls = []
+        self.request_kwargs = []
         self.headers = {}
 
     def get(self, url, **kwargs):
         self.calls.append(url)
+        self.request_kwargs.append(kwargs)
         return _FakeResponse(self._payload, self._status_code)
 
 
@@ -338,6 +340,34 @@ class TestFetchMrLabels(unittest.TestCase):
         client = _make_client_with_session(session)
         self.assertEqual(client.fetch_mr_labels("p", 1), ["a", "b"])
 
+
+class TestListMergeRequests(unittest.TestCase):
+
+    def test_global_title_search_passes_exact_gitlab_filters_and_caches(self):
+        payload = [{"iid": 7, "title": "BUP-4360 checkout"}]
+        session = _FakeSession(payload)
+        client = _make_client_with_session(session)
+
+        self.assertEqual(client.list_merge_requests("BUP-4360"), payload)
+        self.assertEqual(client.list_merge_requests("BUP-4360"), payload)
+
+        self.assertEqual(len(session.calls), 1)
+        self.assertTrue(session.calls[0].endswith("/api/v4/merge_requests"))
+        params = session.request_kwargs[0]["params"]
+        self.assertEqual(params["scope"], "all")
+        self.assertEqual(params["state"], "all")
+        self.assertEqual(params["search"], "BUP-4360")
+        self.assertEqual(params["in"], "title")
+
+    def test_project_search_url_encodes_project_path(self):
+        session = _FakeSession([])
+        client = _make_client_with_session(session)
+
+        client.list_merge_requests("BUP-4360", project_id="web/bui")
+
+        self.assertIn(
+            "/api/v4/projects/web%2Fbui/merge_requests",
+            session.calls[0])
 
 if __name__ == "__main__":
     unittest.main()

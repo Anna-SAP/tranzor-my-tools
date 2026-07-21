@@ -137,6 +137,17 @@ class MRPipelineTab:
                                     bg="#0a0a1a", fg="#fff", insertbackground="#fff", relief="flat")
         self.ent_mr_iid.pack(side="left", padx=(4, 0), ipady=3)
 
+        self.lbl_mr_jira_id = ttk.Label(
+            r1, text="", style="Card.TLabel")
+        self.lbl_mr_jira_id.pack(side="left", padx=(16, 0))
+        self.mr_jira_var = tk.StringVar()
+        self.ent_mr_jira = tk.Entry(
+            r1, textvariable=self.mr_jira_var, width=14,
+            font=(FONT_FAMILY, 10), bg="#0a0a1a", fg="#fff",
+            insertbackground="#fff", relief="flat")
+        self.ent_mr_jira.pack(side="left", padx=(4, 0), ipady=3)
+        self.ent_mr_jira.bind("<Return>", lambda _event: self._on_search())
+
         # Row 1b: Task ID (UUID from Tranzor Bot notifications)
         r1b = ttk.Frame(fi, style="Card.TFrame")
         r1b.pack(fill="x", pady=(0, 6))
@@ -441,6 +452,7 @@ class MRPipelineTab:
         self.lbl_mr_status.configure(text=t("mr_status"))
         self.lbl_mr_date.configure(text=t("mr_date_range"))
         self.lbl_mr_task_id.configure(text=t("mr_task_id"))
+        self.lbl_mr_jira_id.configure(text=t("mr_jira_id"))
         self.btn_mr_search.configure(text=t("mr_search"))
         self.btn_mr_reset.configure(text=t("mr_reset"))
         self.btn_mr_export.configure(text=t("mr_export"))
@@ -539,6 +551,7 @@ class MRPipelineTab:
         self.mr_status_var.set("")
         self.mr_iid_var.set("")
         self.mr_task_id_var.set("")
+        self.mr_jira_var.set("")
         self.mr_date_from.delete(0, "end")
         self.mr_date_to.delete(0, "end")
         self._invalidate_post_edit_cache()
@@ -556,6 +569,7 @@ class MRPipelineTab:
             self.mr_hide_empty_var.get()
             or self.mr_iid_var.get().strip()
             or self.mr_task_id_var.get().strip()
+            or self.mr_jira_var.get().strip()
         )
         effective_total = self.mr_filtered_total if filters_active else self.mr_total
         # Skip past every page already visible in the current extended
@@ -580,6 +594,7 @@ class MRPipelineTab:
             self.mr_hide_empty_var.get()
             or self.mr_iid_var.get().strip()
             or self.mr_task_id_var.get().strip()
+            or self.mr_jira_var.get().strip()
         )
         effective_total = self.mr_filtered_total if filters_active else self.mr_total
         items_shown = (self.mr_page + 1 + self.mr_extra_pages) * self.mr_page_size
@@ -670,6 +685,13 @@ class MRPipelineTab:
             status = self.mr_status_var.get() or None
             mr_iid_filter = self.mr_iid_var.get().strip()
             task_id_filter = self.mr_task_id_var.get().strip()
+            jira_filter_raw = self.mr_jira_var.get().strip()
+            jira_filter = _jira.normalize_jira_id(jira_filter_raw)
+            if jira_filter_raw and not jira_filter:
+                raise ValueError("JIRA ID must look like BUP-4360.")
+            if jira_filter and not _jira.can_fetch():
+                raise RuntimeError(
+                    "A GitLab token is required to filter by JIRA ID.")
             hide_empty = self.mr_hide_empty_var.get()
 
             # Capture-and-clear the one-shot append flag set by
@@ -705,6 +727,15 @@ class MRPipelineTab:
                 if isinstance(detail, dict) and detail.get("task_id"):
                     if mr_iid_filter and str(detail.get("merge_request_iid", "")) != mr_iid_filter:
                         detail = None
+                if (isinstance(detail, dict) and detail.get("task_id")
+                        and jira_filter):
+                    actual_jira = _jira.fetch_jira_id(
+                        detail.get("project_id"),
+                        detail.get("merge_request_iid"))
+                    if actual_jira != jira_filter:
+                        detail = None
+                    else:
+                        detail["_jira_ticket_id"] = jira_filter
                 if isinstance(detail, dict) and detail.get("task_id"):
                     if hide_empty:
                         self._check_task_translations(detail)
@@ -721,7 +752,18 @@ class MRPipelineTab:
                                   False, 0)
                 return
 
-            need_filter = hide_empty or bool(mr_iid_filter)
+            matching_jira_mrs = set()
+            if jira_filter:
+                matching_jira_mrs = _jira.find_merge_requests(
+                    jira_filter, project_id=proj)
+                if not matching_jira_mrs:
+                    self.parent.after(
+                        0, self._on_tasks_loaded, self.mr_total, [], 0,
+                        False, 0)
+                    return
+
+            need_filter = (
+                hide_empty or bool(mr_iid_filter) or bool(jira_filter))
 
             if not need_filter:
                 # Simple path: no client-side filtering needed
@@ -749,6 +791,14 @@ class MRPipelineTab:
                         limit=batch_size, offset=offset)
                     if not batch:
                         break
+                    total_scanned += len(batch)
+
+                    if jira_filter:
+                        batch = [t for t in batch
+                                 if _jira.task_matches_mrs(
+                                     t, matching_jira_mrs)]
+                        for task in batch:
+                            task["_jira_ticket_id"] = jira_filter
 
                     # MR# client-side filter first (cheap, no API call)
                     if mr_iid_filter:
@@ -761,8 +811,6 @@ class MRPipelineTab:
                             list(pool.map(self._check_task_translations, batch))
 
                     for t in batch:
-                        total_scanned += 1
-
                         # Hide empty MRs: use pre-fetched count from parallel check
                         if hide_empty:
                             if t.get("_translations_count", 0) == 0:
@@ -886,8 +934,10 @@ class MRPipelineTab:
             # "" — title fetched, no ticket in it — shown as "—"); a cache
             # miss shows "…" and queues an async GitLab title fetch below.
             jira_key = _jira._normalize_key(raw_project, mr_iid)
-            jira_cached = (_jira.get_cached(*jira_key)
-                           if jira_key is not None else None)
+            jira_cached = t.get("_jira_ticket_id")
+            if jira_cached is None:
+                jira_cached = (_jira.get_cached(*jira_key)
+                               if jira_key is not None else None)
             if jira_cached is not None:
                 jira_display = jira_cached or "—"
             elif jira_key is not None and jira_fetchable:

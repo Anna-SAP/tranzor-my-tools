@@ -66,6 +66,19 @@ def extract_jira_id(title) -> str:
     return ""
 
 
+def normalize_jira_id(value) -> str:
+    """Normalize a pasted JIRA ID for exact filtering.
+
+    Lowercase input is accepted for convenience, but URLs, free text and
+    ticket-shaped technical acronyms remain invalid. An invalid value returns
+    ``""`` so the GUI can surface a useful validation message.
+    """
+    candidate = str(value or "").strip().upper()
+    if not candidate:
+        return ""
+    return candidate if extract_jira_id(candidate) == candidate else ""
+
+
 # ---------------------------------------------------------------------------
 # 进程级缓存 —— {(project_id, mr_iid): jira_id}。MR title 一经建立基本不改
 # （改了也不影响已归档任务的归属判断），进程内缓存足够；不落盘，跟
@@ -144,6 +157,75 @@ def fetch_jira_id(project_id, mr_iid, client=None) -> Optional[str]:
     with _cache_lock:
         _cache[key] = jira
     return jira
+
+
+def _matching_key(project_id, mr_iid) -> Optional[tuple[str, int]]:
+    """Case-insensitive project-path key used by cross-project MR search."""
+    key = _normalize_key(project_id, mr_iid)
+    if key is None:
+        return None
+    return (key[0].casefold(), key[1])
+
+
+def task_matches_mrs(task, matching_mrs) -> bool:
+    """Return whether a Tranzor task belongs to one of ``matching_mrs``."""
+    if not isinstance(task, dict):
+        return False
+    key = _matching_key(task.get("project_id"), task.get("merge_request_iid"))
+    return key is not None and key in matching_mrs
+
+
+def _project_path_from_mr(mr, iid) -> str:
+    """Extract ``group/project`` from GitLab's ``references.full`` value."""
+    refs = mr.get("references") if isinstance(mr, dict) else None
+    full = refs.get("full", "") if isinstance(refs, dict) else ""
+    suffix = f"!{iid}"
+    if full.endswith(suffix):
+        return full[:-len(suffix)]
+    return ""
+
+
+def find_merge_requests(jira_id, project_id=None, client=None):
+    """Find every GitLab MR whose displayed JIRA ID equals ``jira_id``.
+
+    GitLab does the broad title search; :func:`extract_jira_id` then enforces
+    the same exact first-ticket semantics as the table column. The returned
+    set uses case-folded project paths so it can be matched directly against
+    Tranzor task payloads.
+    """
+    jira = normalize_jira_id(jira_id)
+    if not jira:
+        raise ValueError("JIRA ID must look like BUP-4360.")
+    if client is None:
+        try:
+            import task_post_edit as _tpe
+            client = _tpe._shared_gitlab_client()
+        except Exception:
+            client = None
+    if client is None or not client.has_token():
+        raise RuntimeError("A GitLab token is required to filter by JIRA ID.")
+
+    matches = set()
+    mrs = client.list_merge_requests(
+        jira, project_id=project_id, in_field="title")
+    for mr in mrs:
+        if not isinstance(mr, dict) or extract_jira_id(mr.get("title")) != jira:
+            continue
+        try:
+            iid = int(mr.get("iid"))
+        except (TypeError, ValueError):
+            continue
+        project = (str(project_id) if project_id
+                   else _project_path_from_mr(mr, iid))
+        key = _matching_key(project, iid)
+        if key is None:
+            continue
+        matches.add(key)
+        # Seed the display cache as well. Project-scoped results already use
+        # the same path Tranzor supplied; global results use references.full.
+        with _cache_lock:
+            _cache[(project, iid)] = jira
+    return matches
 
 
 def clear_cache() -> int:
