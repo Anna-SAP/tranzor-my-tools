@@ -11,6 +11,7 @@ from datetime import date, datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import export_mr_pipeline as mr_api
+import mr_jira as _jira
 import quality_overview as qa
 import task_post_edit as _tpe
 import advanced_filter
@@ -30,10 +31,12 @@ class MRPipelineTab:
 
     # Single source of truth for the task-list table columns. ``src_strings``
     # (distinct en-US source-string count) sits between Status and Avg Score
-    # so the two per-task metrics read together; inserting it there keeps the
-    # critical positional reads elsewhere valid (project @ idx 1 for the
-    # post-edit prefix, MR# @ idx 2 for the export filename).
-    _MR_COLUMNS = ("idx", "project", "mr", "release", "status",
+    # so the two per-task metrics read together; ``jira`` (the ticket ID
+    # extracted from the MR title) sits right after ``mr`` so same-origin
+    # tasks read as a pair. Both insertions keep the critical positional
+    # reads elsewhere valid (project @ idx 1 for the post-edit prefix,
+    # MR# @ idx 2 for the export filename).
+    _MR_COLUMNS = ("idx", "project", "mr", "jira", "release", "status",
                    "src_strings", "avg_score", "created", "duration")
     # Columns whose cells sort numerically; everything else sorts as text.
     _MR_NUMERIC_COLS = frozenset({"idx", "mr", "src_strings", "avg_score"})
@@ -63,6 +66,11 @@ class MRPipelineTab:
         # repaints, used by the async post-edit prefetch callback to
         # find the row to mark.
         self._mr_row_iid_by_task: dict[str, str] = {}
+        # (project_id, mr_iid) → [row iids]. One JIRA fetch must fill
+        # *every* matching row: the same MR routinely triggers several
+        # pipeline tasks (that's the whole same-origin premise), so a
+        # single-iid mapping would light up only the last-inserted row.
+        self._jira_row_iids: dict[tuple[str, int], list[str]] = {}
         # task_id → distinct en-US source-string count. Cached so paging
         # back/forth, re-search and language switches don't re-hit the
         # results API — a completed task's source-string count is immutable.
@@ -317,9 +325,9 @@ class MRPipelineTab:
         cols = self._MR_COLUMNS
         self.mr_tree = ttk.Treeview(tree_frame, columns=cols, show="headings",
                                      style="Summary.Treeview", height=14, selectmode="browse")
-        col_widths = {"idx": 35, "project": 140, "mr": 60, "release": 60,
-                      "status": 80, "src_strings": 90, "avg_score": 70,
-                      "created": 130, "duration": 70}
+        col_widths = {"idx": 35, "project": 140, "mr": 60, "jira": 90,
+                      "release": 60, "status": 80, "src_strings": 90,
+                      "avg_score": 70, "created": 130, "duration": 70}
         for c in cols:
             self.mr_tree.column(c, width=col_widths.get(c, 80), anchor="center" if c != "project" else "w")
             # Clickable header → sort the visible rows by that column. Wired
@@ -803,6 +811,7 @@ class MRPipelineTab:
             for item in self.mr_tree.get_children():
                 self.mr_tree.delete(item)
             self._mr_row_iid_by_task = {}
+            self._jira_row_iids = {}
             self.mr_extra_pages = 0
             # A fresh result set arrives in API order (created desc); drop any
             # active sort so the ▲/▼ marker doesn't lie about the row order.
@@ -817,6 +826,15 @@ class MRPipelineTab:
         # task_ids whose en-US source-string count isn't cached yet — filled
         # asynchronously after this page renders (see _prefetch_src_counts).
         src_prefetch_ids: list[str] = []
+        # (project_id, mr_iid) keys whose JIRA ID isn't cached yet — deduped
+        # here because the same MR frequently appears as several tasks on one
+        # page; one GitLab title fetch serves all of them.
+        jira_prefetch: list[tuple[str, int]] = []
+        jira_seen: set[tuple[str, int]] = set()
+        # Resolved once per repaint: when GitLab is unreachable (no token)
+        # the JIRA cells render "—" up front instead of a "…" spinner that
+        # would never resolve.
+        jira_fetchable = _jira.can_fetch()
 
         for i, t in enumerate(tasks):
             idx = base_offset + i + 1
@@ -864,17 +882,35 @@ class MRPipelineTab:
             if src_count is None:
                 src_count = t.get("_src_string_count")
             src_display = src_count if src_count is not None else "…"
+            # JIRA cell: a cached extraction renders immediately (it may be
+            # "" — title fetched, no ticket in it — shown as "—"); a cache
+            # miss shows "…" and queues an async GitLab title fetch below.
+            jira_key = _jira._normalize_key(raw_project, mr_iid)
+            jira_cached = (_jira.get_cached(*jira_key)
+                           if jira_key is not None else None)
+            if jira_cached is not None:
+                jira_display = jira_cached or "—"
+            elif jira_key is not None and jira_fetchable:
+                jira_display = "…"
+            else:
+                jira_display = "—"
             iid = self.mr_tree.insert(
                 "", "end",
                 iid=task_id or None,
                 values=(
-                    idx, display_project, mr_iid,
+                    idx, display_project, mr_iid, jira_display,
                     t.get("release", ""), t.get("status", ""),
                     src_display,
                     avg if avg is not None else "—", created, duration,
                 ),
                 tags=row_tags,
             )
+            if jira_key is not None:
+                self._jira_row_iids.setdefault(jira_key, []).append(iid)
+                if (jira_fetchable and jira_cached is None
+                        and jira_key not in jira_seen):
+                    jira_seen.add(jira_key)
+                    jira_prefetch.append(jira_key)
             if task_id:
                 self._mr_row_iid_by_task[task_id] = iid
                 if src_count is None:
@@ -902,6 +938,11 @@ class MRPipelineTab:
         # task's results fetch returns.
         if src_prefetch_ids:
             self._prefetch_src_counts(src_prefetch_ids)
+
+        # Resolve the JIRA IDs asynchronously the same way; cells flip from
+        # "…" to the ticket ID (or "—") as each MR title fetch returns.
+        if jira_prefetch:
+            self._prefetch_jira_ids(jira_prefetch)
 
         # Keep an active sort applied across Load More appends: the new rows
         # were just inserted at the bottom in API order, so fold them into the
@@ -1135,6 +1176,58 @@ class MRPipelineTab:
         # so the final order reflects real workloads — the user may have
         # clicked the header while cells still read "…".
         if self._mr_sort and self._mr_sort[0] == "src_strings":
+            self._apply_sort(*self._mr_sort)
+
+    # ------------------------------------------------------------------
+    # JIRA-ID prefetch — one GitLab MR-title fetch per distinct
+    # (project_id, mr_iid), fanned back out to every matching row.
+    # Mirrors _prefetch_src_counts: worker pool off the Tk thread,
+    # results marshalled back via after().
+    # ------------------------------------------------------------------
+    def _prefetch_jira_ids(self, keys):
+        if not keys:
+            return
+
+        def _run():
+            def _work(key):
+                jira = _jira.fetch_jira_id(*key)
+                try:
+                    self.parent.after(0, self._apply_jira_id, key, jira)
+                except Exception:
+                    pass
+
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                list(pool.map(_work, keys))
+            try:
+                self.parent.after(0, self._on_jira_prefetch_done)
+            except Exception:
+                pass
+
+        threading.Thread(target=_run, name="mr-jira-prefetch",
+                         daemon=True).start()
+
+    def _apply_jira_id(self, key, jira):
+        """Replace the "…" placeholder on every row of this MR. Runs on the
+        Tk thread. ``jira`` is None on a failed fetch (not cached — the next
+        repaint retries) or "" when the title simply has no ticket; both
+        render as "—" so no spinner is left behind. Rows may be gone (user
+        paged / re-searched mid-fetch) — guard each set."""
+        if jira is None:
+            # Failed fetch: consult the cache once more, on the Tk thread.
+            # A concurrent fetch for the same key (queued by a repaint while
+            # this one was in flight) may have resolved and painted the real
+            # ID — a late failure must not clobber it with "—".
+            jira = _jira.get_cached(*key)
+        for iid in self._jira_row_iids.get(key, ()):
+            try:
+                self.mr_tree.set(iid, "jira", jira if jira else "—")
+            except tk.TclError:
+                pass
+
+    def _on_jira_prefetch_done(self):
+        # Same contract as _on_src_counts_done: if the user sorted by the
+        # JIRA column while cells still read "…", fold the resolved IDs in.
+        if self._mr_sort and self._mr_sort[0] == "jira":
             self._apply_sort(*self._mr_sort)
 
     # ------------------------------------------------------------------
