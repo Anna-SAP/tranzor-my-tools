@@ -137,10 +137,10 @@ There are two ways to get the app. **Most users want Path A.**
 
 | Platform | Artifact | How it's built |
 |---|---|---|
-| Windows 10/11 | `TranzorExporter.exe` (single file) | `Build Windows EXE` workflow → `TranzorExporter-Windows` artifact |
-| macOS (Intel + Apple Silicon) | `TranzorExporter.app` inside `TranzorExporter-Mac.zip` | `Build Mac App` workflow → `TranzorExporter-Mac` artifact |
+| Windows 10/11 | `TranzorExporter.exe` (single file) | [`master-latest` Release](https://github.com/Anna-SAP/tranzor-my-tools/releases/tag/master-latest) → `TranzorExporter.exe` |
+| macOS (Intel + Apple Silicon) | `TranzorExporter.app` inside `TranzorExporter-Mac.zip` | [`master-latest` Release](https://github.com/Anna-SAP/tranzor-my-tools/releases/tag/master-latest) → `TranzorExporter-Mac.zip` |
 
-1. Download the artifact for your OS from the latest CI run (or the release location your team shares).
+1. Open the `master-latest` Release above and download the file for your OS.
 2. **Windows:** unzip if needed, then double-click `TranzorExporter.exe`. No Python required.
 3. **macOS:** unzip, move `TranzorExporter.app` to `Applications`. On first launch macOS Gatekeeper may warn (the app is ad-hoc-signed, not notarized) — right-click → **Open**, or run `xattr -dr com.apple.quarantine TranzorExporter.app`.
 

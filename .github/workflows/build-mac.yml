@@ -26,10 +26,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
@@ -60,7 +60,7 @@ jobs:
           codesign -dv --verbose=4 dist/TranzorExporter.app || true
 
       - name: Package .app with ditto (preserves the .app bundle wrapper)
-        # Why this step exists: actions/upload-artifact@v4 strips the top-level
+        # Why this step exists: actions/upload-artifact strips the top-level
         # directory when uploading a folder path, which on macOS means the
         # ".app" wrapper is lost and Finder ends up showing only the raw Unix
         # executable inside Contents/MacOS/. Wrapping the bundle with `ditto`
@@ -92,10 +92,11 @@ jobs:
           gh release upload master-latest dist/TranzorExporter-Mac.zip --clobber
 
       - name: Prune old TranzorExporter-Mac artifacts (keep newest 4)
+        if: ${{ vars.ENABLE_ACTIONS_ARTIFACTS == 'true' }}
         # 2026-07-08: builds #123/#60 failed with "Artifact storage quota has
         # been hit" — see build-windows.yml for the full rationale. Bound
         # total artifact usage by keeping only the newest 4 per name.
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const NAME = 'TranzorExporter-Mac', KEEP = 4;
@@ -113,12 +114,15 @@ jobs:
             }
             core.info(`Pruned ${old.length} old artifact(s).`);
 
-      - name: Upload TranzorExporter.app zip (best-effort artifact channel)
-        # May fail while the monthly storage budget is exhausted — the
-        # release above is the channel that must succeed, so don't let this
-        # step turn the run red.
-        continue-on-error: true
-        uses: actions/upload-artifact@v4
+      - name: Upload TranzorExporter.app zip (optional Actions artifact)
+        # Disabled by default while the account-wide Actions storage budget
+        # is exhausted. The rolling release above remains the reliable
+        # download channel. Set the repository variable
+        # ENABLE_ACTIONS_ARTIFACTS=true to restore this secondary channel;
+        # once enabled, a failed upload intentionally fails the job instead
+        # of producing a misleading green run with a red error annotation.
+        if: ${{ vars.ENABLE_ACTIONS_ARTIFACTS == 'true' }}
+        uses: actions/upload-artifact@v7
         with:
           name: TranzorExporter-Mac
           path: dist/TranzorExporter-Mac.zip

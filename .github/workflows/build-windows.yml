@@ -35,10 +35,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
@@ -85,12 +85,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
       - name: Prune old TranzorExporter-Windows artifacts (keep newest 4)
+        if: ${{ vars.ENABLE_ACTIONS_ARTIFACTS == 'true' }}
         # 2026-07-08: builds #123/#60 failed with "Artifact storage quota has
         # been hit" — retention-days alone doesn't bound usage on busy days
         # (repo cap is 7 days; 4 builds/day × ~37MB/pair blows the 500MB
         # private-repo quota). Delete all but the newest 4 same-name artifacts
         # BEFORE uploading so total usage stays bounded (~150MB) forever.
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const NAME = 'TranzorExporter-Windows', KEEP = 4;
@@ -108,12 +109,15 @@ jobs:
             }
             core.info(`Pruned ${old.length} old artifact(s).`);
 
-      - name: Upload TranzorExporter EXE (best-effort artifact channel)
-        # May fail while the monthly storage budget is exhausted — the
-        # release above is the channel that must succeed, so don't let this
-        # step turn the run red.
-        continue-on-error: true
-        uses: actions/upload-artifact@v4
+      - name: Upload TranzorExporter EXE (optional Actions artifact)
+        # Disabled by default while the account-wide Actions storage budget
+        # is exhausted. The rolling release above remains the reliable
+        # download channel. Set the repository variable
+        # ENABLE_ACTIONS_ARTIFACTS=true to restore this secondary channel;
+        # once enabled, a failed upload intentionally fails the job instead
+        # of producing a misleading green run with a red error annotation.
+        if: ${{ vars.ENABLE_ACTIONS_ARTIFACTS == 'true' }}
+        uses: actions/upload-artifact@v7
         with:
           name: TranzorExporter-Windows
           path: dist/TranzorExporter.exe
