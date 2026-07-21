@@ -5,6 +5,7 @@ import os
 import sys
 import threading
 import tkinter as tk
+import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tkinter import ttk
 from datetime import date, datetime
@@ -358,6 +359,15 @@ class MRPipelineTab:
         self.mr_tree.configure(yscrollcommand=scroll.set)
         self.mr_tree.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
+
+        # A ttk.Treeview cannot host a real HTML <a> element, so make the
+        # JIRA cell itself the hyperlink hit target. The pointer changes only
+        # over a resolved, valid ticket ID; clicking it opens the canonical
+        # RingCentral JIRA detail page in the user's default browser.
+        self.mr_tree.bind("<Motion>", self._on_mr_tree_motion, add="+")
+        self.mr_tree.bind("<Leave>", self._on_mr_tree_leave, add="+")
+        self.mr_tree.bind(
+            "<ButtonRelease-1>", self._on_mr_tree_click, add="+")
 
         # Loading overlay — large centered text over the Treeview area
         self.mr_loading_overlay = tk.Label(
@@ -1279,6 +1289,44 @@ class MRPipelineTab:
         # JIRA column while cells still read "…", fold the resolved IDs in.
         if self._mr_sort and self._mr_sort[0] == "jira":
             self._apply_sort(*self._mr_sort)
+
+    # ------------------------------------------------------------------
+    # JIRA hyperlink interaction
+    # ------------------------------------------------------------------
+    def _jira_link_at(self, x, y):
+        """Return the JIRA URL under a Treeview pointer position, if any."""
+        if self.mr_tree.identify_region(x, y) != "cell":
+            return ""
+        jira_column = f"#{self._MR_COLUMNS.index('jira') + 1}"
+        if self.mr_tree.identify_column(x) != jira_column:
+            return ""
+        iid = self.mr_tree.identify_row(y)
+        if not iid:
+            return ""
+        try:
+            return _jira.jira_browse_url(self.mr_tree.set(iid, "jira"))
+        except tk.TclError:
+            return ""
+
+    def _on_mr_tree_motion(self, event):
+        cursor = "hand2" if self._jira_link_at(event.x, event.y) else ""
+        try:
+            self.mr_tree.configure(cursor=cursor)
+        except tk.TclError:
+            pass
+
+    def _on_mr_tree_leave(self, _event):
+        try:
+            self.mr_tree.configure(cursor="")
+        except tk.TclError:
+            pass
+
+    def _on_mr_tree_click(self, event):
+        url = self._jira_link_at(event.x, event.y)
+        if not url:
+            return None
+        webbrowser.open_new_tab(url)
+        return "break"
 
     # ------------------------------------------------------------------
     # Column sorting — click a header to reorder the visible rows.

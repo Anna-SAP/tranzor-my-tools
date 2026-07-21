@@ -46,6 +46,9 @@ JIRA_ID_RE = re.compile(
 # 标题里出现这些缩写的概率。按需扩充。
 NON_TICKET_KEYS = frozenset({"UTF", "SHA", "ISO", "RFC", "CVE", "MR"})
 
+# Canonical target for clickable ticket IDs in the MR Pipeline table.
+JIRA_BROWSE_BASE_URL = "https://jira.ringcentral.com/browse/"
+
 
 def extract_jira_id(title) -> str:
     """从 MR title 提取第一个 JIRA ID；无匹配返回 ``""``。
@@ -77,6 +80,17 @@ def normalize_jira_id(value) -> str:
     if not candidate:
         return ""
     return candidate if extract_jira_id(candidate) == candidate else ""
+
+
+def jira_browse_url(value) -> str:
+    """Return the canonical RingCentral JIRA URL for one issue ID.
+
+    Invalid values and table placeholders are deliberately not linkable.
+    Normalization also makes a lower-case ticket safe for callers outside the
+    table while keeping the final URL in JIRA's conventional upper-case form.
+    """
+    jira_id = normalize_jira_id(value)
+    return f"{JIRA_BROWSE_BASE_URL}{jira_id}" if jira_id else ""
 
 
 # ---------------------------------------------------------------------------
