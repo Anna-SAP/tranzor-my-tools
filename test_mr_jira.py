@@ -1,6 +1,6 @@
 """Tests for mr_jira — the MR Pipeline JIRA-column logic layer.
 
-Covers the four load-bearing pieces:
+Covers the five load-bearing pieces:
 
 1. :func:`mr_jira.extract_jira_id` — the regex that turns an MR title into
    a JIRA ID, including the version-number guard ("BUI-26.3.1" must NOT
@@ -8,12 +8,11 @@ Covers the four load-bearing pieces:
 2. :func:`mr_jira.fetch_jira_id` — cache semantics: success (even "no ID
    in title") is cached, failure is NOT (so transient errors self-heal on
    the next repaint).
-3. :func:`mr_jira.find_merge_requests` — exact JIRA-title search semantics
+3. :func:`mr_jira.extract_jira_title` — single-line display-title extraction.
+4. :func:`mr_jira.find_merge_requests` — exact JIRA-title search semantics
    and conversion of GitLab's cross-project references into Tranzor task
    match keys.
-4. ``MRPipelineTab._MR_COLUMNS`` layout invariants — the positional reads
-   scattered through gui_tabs (project @ idx 1, MR# @ idx 2) that the
-   ``jira`` column insertion must not break.
+5. ``MRPipelineTab._MR_COLUMNS`` plus Title ellipsis/Tooltip invariants.
 
 Run:  python -m unittest test_mr_jira
 """
@@ -120,6 +119,34 @@ class ExtractJiraIdTests(unittest.TestCase):
             "BUP-4360")
 
 
+class ExtractJiraTitleTests(unittest.TestCase):
+
+    def test_strips_leading_ticket_and_common_separators(self):
+        cases = {
+            "UIA-411423 - [Operator Connect] Error message is unclear":
+                "[Operator Connect] Error message is unclear",
+            "[BUP-4360] Purchase flow": "Purchase flow",
+            "【RLZ-7】修复购买流程": "修复购买流程",
+            "RCAC-9: Retry failed exports": "Retry failed exports",
+        }
+        for source, expected in cases.items():
+            with self.subTest(source=source):
+                self.assertEqual(mr_jira.extract_jira_title(source), expected)
+
+    def test_normalizes_whitespace_to_one_line(self):
+        self.assertEqual(
+            mr_jira.extract_jira_title("BUP-1  First line\n  second line"),
+            "First line second line")
+
+    def test_mid_sentence_ticket_keeps_readable_full_title(self):
+        title = "fix: resolve RLZ-12345 truncation"
+        self.assertEqual(mr_jira.extract_jira_title(title), title)
+
+    def test_no_ticket_or_ticket_only_has_no_companion_title(self):
+        self.assertEqual(mr_jira.extract_jira_title("chore: bump deps"), "")
+        self.assertEqual(mr_jira.extract_jira_title("BUP-4360"), "")
+
+
 class _FakeClient:
     """In-memory stand-in for gitlab_client.GitLabClient — no network."""
 
@@ -156,6 +183,21 @@ class FetchJiraIdTests(unittest.TestCase):
             mr_jira.fetch_jira_id("web/bui", 3064, client=client), "BUP-4360")
         self.assertEqual(client.calls, 1)
         self.assertEqual(mr_jira.get_cached("web/bui", 3064), "BUP-4360")
+        self.assertEqual(
+            mr_jira.get_cached_title("web/bui", 3064), "purchase MR4")
+
+    def test_metadata_returns_id_and_title_from_one_client_call(self):
+        client = _FakeClient(
+            title="UIA-411423 - [Operator Connect] Error message is unclear")
+        metadata = mr_jira.fetch_jira_metadata(
+            "web/web", 41035, client=client)
+
+        self.assertEqual(metadata.jira_id, "UIA-411423")
+        self.assertEqual(
+            metadata.title, "[Operator Connect] Error message is unclear")
+        self.assertEqual(client.calls, 1)
+        self.assertEqual(
+            mr_jira.get_cached_metadata("web/web", 41035), metadata)
 
     def test_title_without_ticket_caches_empty(self):
         client = _FakeClient(title="chore: bump deps")
@@ -321,12 +363,36 @@ class ColumnLayoutTests(unittest.TestCase):
         from gui_tabs import MRPipelineTab
         cols = MRPipelineTab._MR_COLUMNS
         # Positional reads elsewhere in gui_tabs: project @ 1 (post-edit
-        # prefix), mr @ 2 (export filename); jira sits right after mr.
+        # prefix), mr @ 2 (export filename); JIRA and Title form a pair.
         self.assertEqual(cols.index("project"), 1)
         self.assertEqual(cols.index("mr"), 2)
         self.assertEqual(cols.index("jira"), 3)
-        # jira sorts as text — it must NOT be in the numeric set.
+        self.assertEqual(cols.index("title"), 4)
+        # Both metadata columns sort as text.
         self.assertNotIn("jira", MRPipelineTab._MR_NUMERIC_COLS)
+        self.assertNotIn("title", MRPipelineTab._MR_NUMERIC_COLS)
+
+
+class TitleEllipsisTests(unittest.TestCase):
+
+    def test_short_text_is_unchanged(self):
+        from gui_tabs import _ellipsize_text
+        self.assertEqual(
+            _ellipsize_text("Short title", 20, len), ("Short title", False))
+
+    def test_long_text_gets_literal_three_dot_suffix(self):
+        from gui_tabs import _ellipsize_text
+        display, truncated = _ellipsize_text(
+            "Operator Connect export monitoring", 19, len)
+        self.assertTrue(truncated)
+        self.assertEqual(display, "Operator Connect...")
+        self.assertLessEqual(len(display), 19)
+
+    def test_newlines_are_collapsed_before_measurement(self):
+        from gui_tabs import _ellipsize_text
+        self.assertEqual(
+            _ellipsize_text("First\n  second", 20, len),
+            ("First second", False))
 
 
 class _FakeTree:
@@ -390,6 +456,27 @@ class JiraHyperlinkInteractionTests(unittest.TestCase):
             result = tab._on_mr_tree_click(SimpleNamespace(x=10, y=20))
         opener.assert_not_called()
         self.assertIsNone(result)
+
+
+class TitleTooltipInteractionTests(unittest.TestCase):
+
+    def test_tooltip_only_targets_truncated_title_cell(self):
+        from gui_tabs import MRPipelineTab
+        tree = _FakeTree(column="#5")
+        tab = MRPipelineTab.__new__(MRPipelineTab)
+        tab.mr_tree = tree
+        tab._jira_titles_by_iid = {"task-1": "Complete JIRA title"}
+        tab._truncated_title_iids = {"task-1"}
+
+        self.assertEqual(
+            tab._title_tooltip_at(10, 20),
+            ("task-1", "Complete JIRA title"))
+
+        tree.column = "#4"
+        self.assertIsNone(tab._title_tooltip_at(10, 20))
+        tree.column = "#5"
+        tab._truncated_title_iids.clear()
+        self.assertIsNone(tab._title_tooltip_at(10, 20))
 
 
 if __name__ == "__main__":

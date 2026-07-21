@@ -7,6 +7,7 @@ import threading
 import tkinter as tk
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from tkinter import font as tkfont
 from tkinter import ttk
 from datetime import date, datetime
 
@@ -24,6 +25,42 @@ from date_picker import attach_calendar
 from searchable_combobox import attach_search
 
 
+def _single_line_title(value):
+    """Normalize a table title so it can never create a second row line."""
+    return " ".join(str(value or "").split())
+
+
+def _ellipsize_text(value, max_width, measure):
+    """Pixel-fit one line of text using a literal CSS-style ``...`` suffix.
+
+    ``measure`` is injected (normally ``tkinter.font.Font.measure``), keeping
+    the sizing logic deterministic and independently testable.
+    """
+    text = _single_line_title(value)
+    if not text:
+        return "", False
+    try:
+        available = max(0, int(max_width))
+    except (TypeError, ValueError):
+        available = 0
+    if measure(text) <= available:
+        return text, False
+
+    suffix = "..."
+    if measure(suffix) > available:
+        return suffix, True
+
+    lo, hi = 0, len(text)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        candidate = text[:mid].rstrip() + suffix
+        if measure(candidate) <= available:
+            lo = mid
+        else:
+            hi = mid - 1
+    return text[:lo].rstrip() + suffix, True
+
+
 # ============================================================
 # MR Pipeline Tab
 # ============================================================
@@ -32,13 +69,14 @@ class MRPipelineTab:
 
     # Single source of truth for the task-list table columns. ``src_strings``
     # (distinct en-US source-string count) sits between Status and Avg Score
-    # so the two per-task metrics read together; ``jira`` (the ticket ID
-    # extracted from the MR title) sits right after ``mr`` so same-origin
-    # tasks read as a pair. Both insertions keep the critical positional
-    # reads elsewhere valid (project @ idx 1 for the post-edit prefix,
-    # MR# @ idx 2 for the export filename).
-    _MR_COLUMNS = ("idx", "project", "mr", "jira", "release", "status",
-                   "src_strings", "avg_score", "created", "duration")
+    # so the two per-task metrics read together; ``jira`` and its companion
+    # ``title`` sit right after ``mr`` so same-origin tasks read as one group.
+    # These insertions keep the critical positional reads elsewhere valid
+    # (project @ idx 1 for the post-edit prefix, MR# @ idx 2 for the export
+    # filename).
+    _MR_COLUMNS = ("idx", "project", "mr", "jira", "title", "release",
+                   "status", "src_strings", "avg_score", "created",
+                   "duration")
     # Columns whose cells sort numerically; everything else sorts as text.
     _MR_NUMERIC_COLS = frozenset({"idx", "mr", "src_strings", "avg_score"})
 
@@ -72,6 +110,16 @@ class MRPipelineTab:
         # pipeline tasks (that's the whole same-origin premise), so a
         # single-iid mapping would light up only the last-inserted row.
         self._jira_row_iids: dict[tuple[str, int], list[str]] = {}
+        # Full Title stays outside Treeview values so sorting and Tooltip use
+        # the lossless text while the visible cell can carry a width-specific
+        # ``...`` rendering.
+        self._jira_titles_by_iid: dict[str, str] = {}
+        self._truncated_title_iids: set[str] = set()
+        self._title_resize_after_id = None
+        self._title_tooltip_after_id = None
+        self._title_tooltip_window = None
+        self._title_tooltip_cell = None
+        self._title_tooltip_pointer = (0, 0)
         # task_id → distinct en-US source-string count. Cached so paging
         # back/forth, re-search and language switches don't re-hit the
         # results API — a completed task's source-string count is immutable.
@@ -338,10 +386,21 @@ class MRPipelineTab:
         self.mr_tree = ttk.Treeview(tree_frame, columns=cols, show="headings",
                                      style="Summary.Treeview", height=14, selectmode="browse")
         col_widths = {"idx": 35, "project": 140, "mr": 60, "jira": 90,
-                      "release": 60, "status": 80, "src_strings": 90,
-                      "avg_score": 70, "created": 130, "duration": 70}
+                      "title": 260, "release": 60, "status": 80,
+                      "src_strings": 90, "avg_score": 70, "created": 130,
+                      "duration": 70}
         for c in cols:
-            self.mr_tree.column(c, width=col_widths.get(c, 80), anchor="center" if c != "project" else "w")
+            width = col_widths.get(c, 80)
+            is_title = c == "title"
+            self.mr_tree.column(
+                c,
+                width=width,
+                minwidth=140 if is_title else width,
+                anchor="w" if c in ("project", "title") else "center",
+                # Only Title absorbs spare horizontal space and contracts
+                # with the window; the compact metric columns stay stable.
+                stretch=is_title,
+            )
             # Clickable header → sort the visible rows by that column. Wired
             # once here; refresh_text only swaps heading *text*, which leaves
             # the command intact.
@@ -366,8 +425,14 @@ class MRPipelineTab:
         # RingCentral JIRA detail page in the user's default browser.
         self.mr_tree.bind("<Motion>", self._on_mr_tree_motion, add="+")
         self.mr_tree.bind("<Leave>", self._on_mr_tree_leave, add="+")
+        self.mr_tree.bind("<ButtonPress-1>", self._on_mr_tree_press, add="+")
         self.mr_tree.bind(
             "<ButtonRelease-1>", self._on_mr_tree_click, add="+")
+        self.mr_tree.bind(
+            "<Configure>", self._schedule_title_ellipsis, add="+")
+        tree_font = (ttk.Style().lookup("Summary.Treeview", "font")
+                     or "TkDefaultFont")
+        self._mr_title_font = tkfont.Font(root=self.mr_tree, font=tree_font)
 
         # Loading overlay — large centered text over the Treeview area
         self.mr_loading_overlay = tk.Label(
@@ -870,6 +935,9 @@ class MRPipelineTab:
                 self.mr_tree.delete(item)
             self._mr_row_iid_by_task = {}
             self._jira_row_iids = {}
+            self._jira_titles_by_iid = {}
+            self._truncated_title_iids = set()
+            self._hide_title_tooltip()
             self.mr_extra_pages = 0
             # A fresh result set arrives in API order (created desc); drop any
             # active sort so the ▲/▼ marker doesn't lie about the row order.
@@ -884,9 +952,9 @@ class MRPipelineTab:
         # task_ids whose en-US source-string count isn't cached yet — filled
         # asynchronously after this page renders (see _prefetch_src_counts).
         src_prefetch_ids: list[str] = []
-        # (project_id, mr_iid) keys whose JIRA ID isn't cached yet — deduped
-        # here because the same MR frequently appears as several tasks on one
-        # page; one GitLab title fetch serves all of them.
+        # (project_id, mr_iid) keys whose JIRA metadata isn't cached yet —
+        # deduped because one GitLab MR-title fetch supplies both JIRA and
+        # Title to every row belonging to that MR.
         jira_prefetch: list[tuple[str, int]] = []
         jira_seen: set[tuple[str, int]] = set()
         # Resolved once per repaint: when GitLab is unreachable (no token)
@@ -940,34 +1008,60 @@ class MRPipelineTab:
             if src_count is None:
                 src_count = t.get("_src_string_count")
             src_display = src_count if src_count is not None else "…"
-            # JIRA cell: a cached extraction renders immediately (it may be
-            # "" — title fetched, no ticket in it — shown as "—"); a cache
-            # miss shows "…" and queues an async GitLab title fetch below.
+            # JIRA + Title are resolved together. Prefer explicit task fields
+            # when a newer backend supplies them, otherwise use the shared
+            # GitLab-MR metadata cache populated by mr_jira.
             jira_key = _jira._normalize_key(raw_project, mr_iid)
+            metadata_cached = (_jira.get_cached_metadata(*jira_key)
+                               if jira_key is not None else None)
             jira_cached = t.get("_jira_ticket_id")
             if jira_cached is None:
-                jira_cached = (_jira.get_cached(*jira_key)
-                               if jira_key is not None else None)
-            if jira_cached is not None:
-                jira_display = jira_cached or "—"
-            elif jira_key is not None and jira_fetchable:
-                jira_display = "…"
-            else:
-                jira_display = "—"
+                jira_cached = t.get("jira_ticket_id")
+            if jira_cached is None and metadata_cached is not None:
+                jira_cached = metadata_cached.jira_id
+            if jira_cached is None and jira_key is not None:
+                jira_cached = _jira.get_cached(*jira_key)
+
+            title_cached = None
+            for field in ("_jira_title", "jira_title", "jira_ticket_title",
+                          "jira_summary"):
+                if field in t:
+                    title_cached = t.get(field)
+                    break
+            if title_cached is None and metadata_cached is not None:
+                title_cached = metadata_cached.title
+            if title_cached is None and jira_key is not None:
+                title_cached = _jira.get_cached_title(*jira_key)
+
+            needs_fetch = jira_cached is None or title_cached is None
+            can_resolve = jira_key is not None and jira_fetchable
+            jira_display = (
+                (jira_cached or "—") if jira_cached is not None
+                else ("…" if can_resolve else "—")
+            )
+            title_display = (
+                (_single_line_title(title_cached) or "—")
+                if title_cached is not None
+                else ("…" if can_resolve else "—")
+            )
+
             iid = self.mr_tree.insert(
                 "", "end",
                 iid=task_id or None,
                 values=(
-                    idx, display_project, mr_iid, jira_display,
+                    idx, display_project, mr_iid, jira_display, title_display,
                     t.get("release", ""), t.get("status", ""),
                     src_display,
                     avg if avg is not None else "—", created, duration,
                 ),
                 tags=row_tags,
             )
+            normalized_title = _single_line_title(title_cached)
+            if normalized_title:
+                self._jira_titles_by_iid[iid] = normalized_title
             if jira_key is not None:
                 self._jira_row_iids.setdefault(jira_key, []).append(iid)
-                if (jira_fetchable and jira_cached is None
+                if (can_resolve and needs_fetch
                         and jira_key not in jira_seen):
                     jira_seen.add(jira_key)
                     jira_prefetch.append(jira_key)
@@ -999,10 +1093,13 @@ class MRPipelineTab:
         if src_prefetch_ids:
             self._prefetch_src_counts(src_prefetch_ids)
 
-        # Resolve the JIRA IDs asynchronously the same way; cells flip from
-        # "…" to the ticket ID (or "—") as each MR title fetch returns.
+        # Resolve JIRA + Title asynchronously from the same MR response.
         if jira_prefetch:
-            self._prefetch_jira_ids(jira_prefetch)
+            self._prefetch_jira_metadata(jira_prefetch)
+
+        # Treeview clips text but does not draw an ellipsis itself. Repaint
+        # after geometry settles so Title uses the final elastic column width.
+        self._schedule_title_ellipsis()
 
         # Keep an active sort applied across Load More appends: the new rows
         # were just inserted at the bottom in API order, so fold them into the
@@ -1239,20 +1336,19 @@ class MRPipelineTab:
             self._apply_sort(*self._mr_sort)
 
     # ------------------------------------------------------------------
-    # JIRA-ID prefetch — one GitLab MR-title fetch per distinct
+    # JIRA metadata prefetch — one GitLab MR-title fetch per distinct
     # (project_id, mr_iid), fanned back out to every matching row.
-    # Mirrors _prefetch_src_counts: worker pool off the Tk thread,
-    # results marshalled back via after().
     # ------------------------------------------------------------------
-    def _prefetch_jira_ids(self, keys):
+    def _prefetch_jira_metadata(self, keys):
         if not keys:
             return
 
         def _run():
             def _work(key):
-                jira = _jira.fetch_jira_id(*key)
+                metadata = _jira.fetch_jira_metadata(*key)
                 try:
-                    self.parent.after(0, self._apply_jira_id, key, jira)
+                    self.parent.after(
+                        0, self._apply_jira_metadata, key, metadata)
                 except Exception:
                     pass
 
@@ -1266,32 +1362,81 @@ class MRPipelineTab:
         threading.Thread(target=_run, name="mr-jira-prefetch",
                          daemon=True).start()
 
-    def _apply_jira_id(self, key, jira):
-        """Replace the "…" placeholder on every row of this MR. Runs on the
-        Tk thread. ``jira`` is None on a failed fetch (not cached — the next
-        repaint retries) or "" when the title simply has no ticket; both
-        render as "—" so no spinner is left behind. Rows may be gone (user
-        paged / re-searched mid-fetch) — guard each set."""
-        if jira is None:
-            # Failed fetch: consult the cache once more, on the Tk thread.
-            # A concurrent fetch for the same key (queued by a repaint while
-            # this one was in flight) may have resolved and painted the real
-            # ID — a late failure must not clobber it with "—".
-            jira = _jira.get_cached(*key)
+    def _apply_jira_metadata(self, key, metadata):
+        """Paint JIRA + Title for every row of one MR on the Tk thread."""
+        if metadata is None:
+            # Close the late-failure race: a concurrent fetch may have filled
+            # both caches after this worker began.
+            metadata = _jira.get_cached_metadata(*key)
+        jira = (metadata.jira_id if metadata is not None
+                else (_jira.get_cached(*key) or ""))
+        title = (metadata.title if metadata is not None
+                 else (_jira.get_cached_title(*key) or ""))
         for iid in self._jira_row_iids.get(key, ()):
             try:
-                self.mr_tree.set(iid, "jira", jira if jira else "—")
+                self.mr_tree.set(iid, "jira", jira or "—")
+                # Preserve an authoritative task-payload title when only its
+                # missing JIRA ID required the fallback GitLab lookup.
+                row_title = self._jira_titles_by_iid.get(iid) or title
+                self._set_title_cell(iid, row_title)
             except tk.TclError:
                 pass
 
     def _on_jira_prefetch_done(self):
-        # Same contract as _on_src_counts_done: if the user sorted by the
-        # JIRA column while cells still read "…", fold the resolved IDs in.
-        if self._mr_sort and self._mr_sort[0] == "jira":
+        # If the user sorted a still-loading metadata column, fold the final
+        # values into the requested order once all workers have returned.
+        if self._mr_sort and self._mr_sort[0] in ("jira", "title"):
             self._apply_sort(*self._mr_sort)
 
     # ------------------------------------------------------------------
-    # JIRA hyperlink interaction
+    # Elastic one-line Title rendering. ttk.Treeview clips overflowing text
+    # but does not render an ellipsis, so the visible value is pixel-fitted
+    # while the lossless value remains in _jira_titles_by_iid.
+    # ------------------------------------------------------------------
+    def _schedule_title_ellipsis(self, _event=None):
+        after_id = getattr(self, "_title_resize_after_id", None)
+        if after_id is not None:
+            try:
+                self.mr_tree.after_cancel(after_id)
+            except Exception:
+                pass
+        try:
+            self._title_resize_after_id = self.mr_tree.after(
+                60, self._refresh_title_ellipsis)
+        except Exception:
+            self._title_resize_after_id = None
+
+    def _refresh_title_ellipsis(self):
+        self._title_resize_after_id = None
+        self._hide_title_tooltip()
+        for iid, title in list(self._jira_titles_by_iid.items()):
+            try:
+                self._set_title_cell(iid, title)
+            except tk.TclError:
+                # A page change may remove a row between scheduling and paint.
+                self._jira_titles_by_iid.pop(iid, None)
+                self._truncated_title_iids.discard(iid)
+
+    def _set_title_cell(self, iid, full_title):
+        title = _single_line_title(full_title)
+        if not title:
+            self._jira_titles_by_iid.pop(iid, None)
+            self._truncated_title_iids.discard(iid)
+            self.mr_tree.set(iid, "title", "—")
+            return
+
+        self._jira_titles_by_iid[iid] = title
+        column_width = int(self.mr_tree.column("title", "width"))
+        display, truncated = _ellipsize_text(
+            title, max(0, column_width - 16), self._mr_title_font.measure)
+        self.mr_tree.set(iid, "title", display)
+        if truncated:
+            self._truncated_title_iids.add(iid)
+        else:
+            self._truncated_title_iids.discard(iid)
+
+    # ------------------------------------------------------------------
+    # JIRA hyperlink + Title Tooltip interaction
     # ------------------------------------------------------------------
     def _jira_link_at(self, x, y):
         """Return the JIRA URL under a Treeview pointer position, if any."""
@@ -1308,20 +1453,114 @@ class MRPipelineTab:
         except tk.TclError:
             return ""
 
+    def _title_tooltip_at(self, x, y):
+        """Return ``(iid, full_title)`` only for a truncated Title cell."""
+        if self.mr_tree.identify_region(x, y) != "cell":
+            return None
+        title_column = f"#{self._MR_COLUMNS.index('title') + 1}"
+        if self.mr_tree.identify_column(x) != title_column:
+            return None
+        iid = self.mr_tree.identify_row(y)
+        if not iid or iid not in self._truncated_title_iids:
+            return None
+        title = self._jira_titles_by_iid.get(iid, "")
+        return (iid, title) if title else None
+
+    def _update_title_tooltip_hover(self, event):
+        target = self._title_tooltip_at(event.x, event.y)
+        if target == getattr(self, "_title_tooltip_cell", None):
+            self._title_tooltip_pointer = (
+                getattr(event, "x_root", 0), getattr(event, "y_root", 0))
+            return
+        self._hide_title_tooltip()
+        if target is None:
+            return
+        self._title_tooltip_cell = target
+        self._title_tooltip_pointer = (
+            getattr(event, "x_root", 0), getattr(event, "y_root", 0))
+        try:
+            self._title_tooltip_after_id = self.mr_tree.after(
+                450, self._show_title_tooltip)
+        except Exception:
+            self._title_tooltip_after_id = None
+
+    def _show_title_tooltip(self):
+        self._title_tooltip_after_id = None
+        target = getattr(self, "_title_tooltip_cell", None)
+        if not target:
+            return
+        iid, title = target
+        if (iid not in self._truncated_title_iids
+                or self._jira_titles_by_iid.get(iid) != title):
+            return
+
+        tw = tk.Toplevel(self.mr_tree)
+        tw.wm_overrideredirect(True)
+        try:
+            tw.wm_attributes("-topmost", True)
+        except Exception:
+            pass
+        tk.Label(
+            tw,
+            text=title,
+            background="#1e2a44",
+            foreground="#e4e7ef",
+            relief="solid",
+            borderwidth=1,
+            font=(FONT_FAMILY, 9),
+            justify="left",
+            wraplength=650,
+            padx=8,
+            pady=5,
+        ).pack()
+        tw.update_idletasks()
+        pointer_x, pointer_y = self._title_tooltip_pointer
+        x = pointer_x + 12
+        y = pointer_y + 18
+        x = max(0, min(x, tw.winfo_screenwidth() - tw.winfo_reqwidth() - 8))
+        y = max(0, min(y, tw.winfo_screenheight() - tw.winfo_reqheight() - 8))
+        tw.wm_geometry(f"+{x}+{y}")
+        self._title_tooltip_window = tw
+
+    def _hide_title_tooltip(self):
+        after_id = getattr(self, "_title_tooltip_after_id", None)
+        if after_id is not None:
+            try:
+                self.mr_tree.after_cancel(after_id)
+            except Exception:
+                pass
+        self._title_tooltip_after_id = None
+        tip = getattr(self, "_title_tooltip_window", None)
+        if tip is not None:
+            try:
+                tip.destroy()
+            except Exception:
+                pass
+        self._title_tooltip_window = None
+        self._title_tooltip_cell = None
+
     def _on_mr_tree_motion(self, event):
         cursor = "hand2" if self._jira_link_at(event.x, event.y) else ""
         try:
             self.mr_tree.configure(cursor=cursor)
         except tk.TclError:
             pass
+        self._update_title_tooltip_hover(event)
 
     def _on_mr_tree_leave(self, _event):
+        self._hide_title_tooltip()
         try:
             self.mr_tree.configure(cursor="")
         except tk.TclError:
             pass
 
+    def _on_mr_tree_press(self, _event):
+        self._hide_title_tooltip()
+
     def _on_mr_tree_click(self, event):
+        # Also catches a user-dragged column separator: recalculate against the
+        # newly selected Title width after the heading interaction finishes.
+        self._schedule_title_ellipsis()
         url = self._jira_link_at(event.x, event.y)
         if not url:
             return None
@@ -1364,9 +1603,15 @@ class MRPipelineTab:
         self._mr_sort = (col, descending)
         if rows:
             numeric = col in self._MR_NUMERIC_COLS
+            def _value(iid):
+                if col == "title":
+                    return self._jira_titles_by_iid.get(
+                        iid, self.mr_tree.set(iid, col))
+                return self.mr_tree.set(iid, col)
+
             rows.sort(
                 key=lambda iid: self._mr_sort_key(
-                    self.mr_tree.set(iid, col), numeric, descending),
+                    _value(iid), numeric, descending),
                 reverse=descending,
             )
             for pos, iid in enumerate(rows):

@@ -15,7 +15,8 @@ Tranzor 平台的任务 payload 只带 ``merge_request_iid`` / ``project_id``，
    它自身还带 per-(project, iid) 的 MR 响应缓存，双层缓存下同一 MR
    全程只打一次 GitLab）；
 2. 用正则从 title 里提取 JIRA ID（``BUP-4360`` 这类 ``KEY-123`` 形态，
-   见 :data:`JIRA_ID_RE`）。
+   见 :data:`JIRA_ID_RE`），并把标题开头的 ticket 前缀去掉，作为表格中
+   与 JIRA ID 同源的 Title。
 
 本模块只放 **纯逻辑**（不依赖 Tkinter），便于单测；GUI 层
 (:mod:`gui_tabs` 的 MR Pipeline tab) 引用本模块渲染 JIRA 列。
@@ -24,6 +25,7 @@ from __future__ import annotations
 
 import re
 import threading
+from dataclasses import dataclass
 from typing import Optional
 
 # JIRA issue key：项目 key 以大写字母开头、总长 ≥2（JIRA 对项目 key 的
@@ -50,6 +52,14 @@ NON_TICKET_KEYS = frozenset({"UTF", "SHA", "ISO", "RFC", "CVE", "MR"})
 JIRA_BROWSE_BASE_URL = "https://jira.ringcentral.com/browse/"
 
 
+@dataclass(frozen=True)
+class JiraMetadata:
+    """JIRA ID and its display title resolved from one GitLab MR response."""
+
+    jira_id: str
+    title: str
+
+
 def extract_jira_id(title) -> str:
     """从 MR title 提取第一个 JIRA ID；无匹配返回 ``""``。
 
@@ -67,6 +77,45 @@ def extract_jira_id(title) -> str:
             continue
         return candidate
     return ""
+
+
+def _single_line(value) -> str:
+    """Collapse arbitrary title text to the Treeview's single-line form."""
+    return " ".join(str(value or "").split())
+
+
+def extract_jira_title(title, jira_id=None) -> str:
+    """Return the title paired with ``jira_id`` in an MR title.
+
+    The common GitLab convention is ``[BUP-4360] Purchase flow`` or
+    ``BUP-4360 - Purchase flow``. In those leading-ticket forms the redundant
+    ticket token and separator are removed, leaving the human-readable title.
+    If the ticket occurs later in a sentence, the normalized full title is
+    retained rather than producing a grammatically broken fragment.
+
+    A title without a valid JIRA ID returns ``""``: the Title column is a
+    companion to JIRA, not a general-purpose MR-title column.
+    """
+    text = _single_line(title)
+    ticket = normalize_jira_id(jira_id) if jira_id else extract_jira_id(text)
+    if not text or not ticket:
+        return ""
+
+    match = next(
+        (m for m in JIRA_ID_RE.finditer(text) if m.group(1) == ticket), None)
+    if match is None:
+        return ""
+
+    # Permit only punctuation before a leading ticket. A prose prefix such
+    # as "Fix UTF-8 handling for BUP-4360" stays intact for readability.
+    leading = text[:match.start()].strip()
+    if leading and not re.fullmatch(r"[\[\(\{\u3010]+", leading):
+        return text
+
+    remainder = text[match.end():]
+    remainder = re.sub(
+        r"^[\s\]\)\}\u3011:：|/\\,_\-\u2013\u2014>]+", "", remainder)
+    return remainder.strip()
 
 
 def normalize_jira_id(value) -> str:
@@ -94,11 +143,12 @@ def jira_browse_url(value) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 进程级缓存 —— {(project_id, mr_iid): jira_id}。MR title 一经建立基本不改
-# （改了也不影响已归档任务的归属判断），进程内缓存足够；不落盘，跟
-# task_post_edit.PostEditCache 同一个生命周期哲学。
+# 进程级缓存 —— {(project_id, mr_iid): jira_id / title}。MR title 一经建立
+# 基本不改（改了也不影响已归档任务的归属判断），进程内缓存足够；不落盘，
+# 跟 task_post_edit.PostEditCache 同一个生命周期哲学。
 # ---------------------------------------------------------------------------
 _cache: dict[tuple[str, int], str] = {}
+_title_cache: dict[tuple[str, int], str] = {}
 _cache_lock = threading.Lock()
 
 
@@ -121,6 +171,26 @@ def get_cached(project_id, mr_iid) -> Optional[str]:
         return _cache.get(key)
 
 
+def get_cached_title(project_id, mr_iid) -> Optional[str]:
+    """Return the cached display title, including ``""`` for no title."""
+    key = _normalize_key(project_id, mr_iid)
+    if key is None:
+        return None
+    with _cache_lock:
+        return _title_cache.get(key)
+
+
+def get_cached_metadata(project_id, mr_iid) -> Optional[JiraMetadata]:
+    """Return metadata only when both ID and title were resolved together."""
+    key = _normalize_key(project_id, mr_iid)
+    if key is None:
+        return None
+    with _cache_lock:
+        if key not in _cache or key not in _title_cache:
+            return None
+        return JiraMetadata(_cache[key], _title_cache[key])
+
+
 def can_fetch() -> bool:
     """GitLab 侧是否可用（共享客户端可构建且配置了 token）。
 
@@ -135,10 +205,10 @@ def can_fetch() -> bool:
         return False
 
 
-def fetch_jira_id(project_id, mr_iid, client=None) -> Optional[str]:
-    """按 ``(project_id, mr_iid)`` 解析 JIRA ID（阻塞，供工作线程调用）。
+def fetch_jira_metadata(project_id, mr_iid, client=None) -> Optional[JiraMetadata]:
+    """按 ``(project_id, mr_iid)`` 解析 JIRA ID + Title。
 
-    成功拿到 title → 提取结果写缓存并返回（title 里没有 ID 时为 ``""``）；
+    成功拿到 GitLab MR title → 一次性提取 ID 和展示标题并写缓存；
     失败（无 token / 网络错 / 404）→ 返回 ``None`` 且 **不缓存**，下次
     渲染自动重试 —— 瞬时故障不该永久固化成 "—"。
 
@@ -148,8 +218,8 @@ def fetch_jira_id(project_id, mr_iid, client=None) -> Optional[str]:
     if key is None:
         return None
     with _cache_lock:
-        if key in _cache:
-            return _cache[key]
+        if key in _cache and key in _title_cache:
+            return JiraMetadata(_cache[key], _title_cache[key])
     if client is None:
         try:
             import task_post_edit as _tpe
@@ -163,14 +233,35 @@ def fetch_jira_id(project_id, mr_iid, client=None) -> Optional[str]:
             return None
         mr = client.get_merge_request(key[0], key[1]) or {}
     except Exception:
-        # 失败前再查一次缓存：同 key 的并发 fetch（重绘期间排队的第二发）
-        # 可能已经成功落缓存 —— 迟到的失败不该把人家的答案顶成 None。
+        # A concurrent fetch for the same key may have succeeded first.
         with _cache_lock:
-            return _cache.get(key)
-    jira = extract_jira_id(mr.get("title"))
+            if key in _cache and key in _title_cache:
+                return JiraMetadata(_cache[key], _title_cache[key])
+            return None
+    raw_title = mr.get("title")
+    jira = extract_jira_id(raw_title)
+    title = extract_jira_title(raw_title, jira)
     with _cache_lock:
         _cache[key] = jira
-    return jira
+        _title_cache[key] = title
+    return JiraMetadata(jira, title)
+
+
+def fetch_jira_id(project_id, mr_iid, client=None) -> Optional[str]:
+    """Backward-compatible ID-only view of :func:`fetch_jira_metadata`."""
+    key = _normalize_key(project_id, mr_iid)
+    if key is None:
+        return None
+    with _cache_lock:
+        if key in _cache:
+            return _cache[key]
+    metadata = fetch_jira_metadata(project_id, mr_iid, client=client)
+    if metadata is not None:
+        return metadata.jira_id
+    # Preserve the existing late-failure race contract: another worker may
+    # have resolved just the ID (for example through find_merge_requests).
+    with _cache_lock:
+        return _cache.get(key)
 
 
 def _matching_key(project_id, mr_iid) -> Optional[tuple[str, int]]:
@@ -239,12 +330,15 @@ def find_merge_requests(jira_id, project_id=None, client=None):
         # the same path Tranzor supplied; global results use references.full.
         with _cache_lock:
             _cache[(project, iid)] = jira
+            _title_cache[(project, iid)] = extract_jira_title(
+                mr.get("title"), jira)
     return matches
 
 
 def clear_cache() -> int:
     """清空缓存，返回清掉的条数。目前只有测试隔离在用。"""
     with _cache_lock:
-        n = len(_cache)
+        n = len(set(_cache) | set(_title_cache))
         _cache.clear()
+        _title_cache.clear()
         return n
