@@ -133,6 +133,7 @@ class SearchInvalidatesCacheTests(unittest.TestCase):
         tab.mr_status_var = _FakeVar()
         tab.mr_iid_var = _FakeVar()
         tab.mr_task_id_var = _FakeVar()
+        tab.mr_jira_var = _FakeVar()
         tab.mr_date_from = _FakeEntry()
         tab.mr_date_to = _FakeEntry()
 

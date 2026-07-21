@@ -1,6 +1,6 @@
 """Tests for mr_jira — the MR Pipeline JIRA-column logic layer.
 
-Covers the three load-bearing pieces:
+Covers the four load-bearing pieces:
 
 1. :func:`mr_jira.extract_jira_id` — the regex that turns an MR title into
    a JIRA ID, including the version-number guard ("BUI-26.3.1" must NOT
@@ -8,7 +8,10 @@ Covers the three load-bearing pieces:
 2. :func:`mr_jira.fetch_jira_id` — cache semantics: success (even "no ID
    in title") is cached, failure is NOT (so transient errors self-heal on
    the next repaint).
-3. ``MRPipelineTab._MR_COLUMNS`` layout invariants — the positional reads
+3. :func:`mr_jira.find_merge_requests` — exact JIRA-title search semantics
+   and conversion of GitLab's cross-project references into Tranzor task
+   match keys.
+4. ``MRPipelineTab._MR_COLUMNS`` layout invariants — the positional reads
    scattered through gui_tabs (project @ idx 1, MR# @ idx 2) that the
    ``jira`` column insertion must not break.
 
@@ -218,6 +221,78 @@ class FetchJiraIdTests(unittest.TestCase):
             mr_jira.fetch_jira_id("web/bui", 5, client=client), "BUP-4360")
         self.assertEqual(client.calls, 1)
 
+
+class NormalizeJiraIdTests(unittest.TestCase):
+
+    def test_accepts_pasted_lowercase_and_whitespace(self):
+        self.assertEqual(mr_jira.normalize_jira_id("  bup-4360\n"),
+                         "BUP-4360")
+
+    def test_rejects_free_text_urls_versions_and_acronyms(self):
+        for value in ("fix BUP-4360",
+                      "https://jira.example/browse/BUP-4360",
+                      "BUI-26.3.1", "UTF-8", ""):
+            self.assertEqual(mr_jira.normalize_jira_id(value), "", value)
+
+
+class _FakeSearchClient:
+    def __init__(self, rows, token=True):
+        self.rows = rows
+        self.token = token
+        self.calls = []
+
+    def has_token(self):
+        return self.token
+
+    def list_merge_requests(self, search, **kwargs):
+        self.calls.append((search, kwargs))
+        return self.rows
+
+
+class FindMergeRequestsTests(unittest.TestCase):
+
+    def setUp(self):
+        mr_jira.clear_cache()
+
+    def tearDown(self):
+        mr_jira.clear_cache()
+
+    def test_global_search_uses_full_reference_and_exact_displayed_ticket(self):
+        client = _FakeSearchClient([
+            {"iid": 3064, "title": "BUP-4360 purchase MR4",
+             "references": {"full": "web/bui!3064"}},
+            {"iid": 88, "title": "LOC-9 relates to BUP-4360",
+             "references": {"full": "common/clw!88"}},
+        ])
+
+        matches = mr_jira.find_merge_requests("bup-4360", client=client)
+
+        self.assertEqual(matches, {("web/bui", 3064)})
+        self.assertEqual(client.calls, [
+            ("BUP-4360", {"project_id": None, "in_field": "title"})])
+        self.assertEqual(mr_jira.get_cached("web/bui", 3064), "BUP-4360")
+
+    def test_project_search_uses_selected_project_when_reference_is_short(self):
+        client = _FakeSearchClient([
+            {"iid": "7", "title": "BUP-4360 checkout",
+             "references": {"full": "!7"}},
+        ])
+
+        matches = mr_jira.find_merge_requests(
+            "BUP-4360", project_id="Web/BUI", client=client)
+
+        self.assertEqual(matches, {("web/bui", 7)})
+        self.assertTrue(mr_jira.task_matches_mrs(
+            {"project_id": "web/bui", "merge_request_iid": "7"},
+            matches))
+        self.assertFalse(mr_jira.task_matches_mrs(
+            {"project_id": "web/bui", "merge_request_iid": 8},
+            matches))
+
+    def test_missing_token_is_an_explicit_error(self):
+        with self.assertRaisesRegex(RuntimeError, "GitLab token"):
+            mr_jira.find_merge_requests(
+                "BUP-4360", client=_FakeSearchClient([], token=False))
 
 class ColumnLayoutTests(unittest.TestCase):
     """Lock the _MR_COLUMNS invariants the positional reads depend on."""

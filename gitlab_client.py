@@ -223,6 +223,7 @@ class GitLabClient:
         self._commit_diff_cache = {}   # sha -> diff list
         self._branches_cache = {}      # (project_id, search) -> branches list
         self._mr_cache = {}            # (project_id, mr_iid) -> mr dict
+        self._mr_search_cache = {}     # (project_id, search, in_field) -> MR list
 
     def has_token(self):
         return bool(self.token)
@@ -340,6 +341,51 @@ class GitLabClient:
         data = resp.json() or {}
         self._mr_cache[key] = data
         return data
+
+    def list_merge_requests(self, search, *, project_id=None,
+                            in_field="title", per_page=100, max_pages=10):
+        """Find merge requests by title/description text.
+
+        ``project_id`` narrows the lookup to one GitLab project. Without it,
+        GitLab's authenticated global MR endpoint is used, which lets the MR
+        Pipeline JIRA filter find sibling MRs across projects in one search.
+        Results are cached for the client lifetime because MR titles are
+        effectively immutable for this app's task-history use case.
+        """
+        term = str(search or "").strip()
+        if not term:
+            return []
+        field = str(in_field or "title")
+        project_key = str(project_id) if project_id else ""
+        key = (project_key, term, field)
+        if key in self._mr_search_cache:
+            return self._mr_search_cache[key]
+
+        if project_id:
+            url = (f"{self.base_url}/api/v4/projects/"
+                   f"{self._encode(project_id)}/merge_requests")
+        else:
+            url = f"{self.base_url}/api/v4/merge_requests"
+
+        out = []
+        for page in range(1, max_pages + 1):
+            params = {
+                "scope": "all",
+                "state": "all",
+                "search": term,
+                "in": field,
+                "per_page": per_page,
+                "page": page,
+            }
+            resp = self._session.get(url, params=params, timeout=self.timeout)
+            resp.raise_for_status()
+            batch = resp.json() or []
+            out.extend(batch)
+            if len(batch) < per_page:
+                break
+
+        self._mr_search_cache[key] = out
+        return out
 
     def fetch_mr_labels(self, project_id, mr_iid):
         """Convenience wrapper returning ``mr['labels']`` as ``list[str]``.
