@@ -22,6 +22,8 @@ from __future__ import annotations
 import os
 import sys
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -235,6 +237,24 @@ class NormalizeJiraIdTests(unittest.TestCase):
             self.assertEqual(mr_jira.normalize_jira_id(value), "", value)
 
 
+class JiraBrowseUrlTests(unittest.TestCase):
+
+    def test_builds_canonical_ringcentral_url(self):
+        self.assertEqual(
+            mr_jira.jira_browse_url("RA-132077"),
+            "https://jira.ringcentral.com/browse/RA-132077")
+        self.assertEqual(
+            mr_jira.jira_browse_url("RCAC-4599"),
+            "https://jira.ringcentral.com/browse/RCAC-4599")
+
+    def test_normalizes_lowercase_and_rejects_placeholders(self):
+        self.assertEqual(
+            mr_jira.jira_browse_url(" uia-10000 "),
+            "https://jira.ringcentral.com/browse/UIA-10000")
+        for value in ("", "—", "…", "not a ticket"):
+            self.assertEqual(mr_jira.jira_browse_url(value), "", value)
+
+
 class _FakeSearchClient:
     def __init__(self, rows, token=True):
         self.rows = rows
@@ -307,6 +327,69 @@ class ColumnLayoutTests(unittest.TestCase):
         self.assertEqual(cols.index("jira"), 3)
         # jira sorts as text — it must NOT be in the numeric set.
         self.assertNotIn("jira", MRPipelineTab._MR_NUMERIC_COLS)
+
+
+class _FakeTree:
+    def __init__(self, *, region="cell", column="#4", row="task-1",
+                 jira="RA-132077"):
+        self.region = region
+        self.column = column
+        self.row = row
+        self.jira = jira
+        self.cursor = None
+
+    def identify_region(self, _x, _y):
+        return self.region
+
+    def identify_column(self, _x):
+        return self.column
+
+    def identify_row(self, _y):
+        return self.row
+
+    def set(self, _iid, column):
+        return self.jira if column == "jira" else ""
+
+    def configure(self, **kwargs):
+        self.cursor = kwargs.get("cursor")
+
+
+class JiraHyperlinkInteractionTests(unittest.TestCase):
+
+    @staticmethod
+    def _tab(tree):
+        from gui_tabs import MRPipelineTab
+        tab = MRPipelineTab.__new__(MRPipelineTab)
+        tab.mr_tree = tree
+        return tab
+
+    def test_clicking_jira_cell_opens_exact_detail_url(self):
+        tab = self._tab(_FakeTree())
+        event = SimpleNamespace(x=10, y=20)
+
+        with mock.patch("gui_tabs.webbrowser.open_new_tab") as opener:
+            result = tab._on_mr_tree_click(event)
+
+        opener.assert_called_once_with(
+            "https://jira.ringcentral.com/browse/RA-132077")
+        self.assertEqual(result, "break")
+
+    def test_pointer_changes_only_for_valid_jira_cells(self):
+        tree = _FakeTree()
+        tab = self._tab(tree)
+        tab._on_mr_tree_motion(SimpleNamespace(x=10, y=20))
+        self.assertEqual(tree.cursor, "hand2")
+
+        tree.jira = "…"
+        tab._on_mr_tree_motion(SimpleNamespace(x=10, y=20))
+        self.assertEqual(tree.cursor, "")
+
+        tree.jira = "RA-132077"
+        tree.column = "#3"
+        with mock.patch("gui_tabs.webbrowser.open_new_tab") as opener:
+            result = tab._on_mr_tree_click(SimpleNamespace(x=10, y=20))
+        opener.assert_not_called()
+        self.assertIsNone(result)
 
 
 if __name__ == "__main__":
