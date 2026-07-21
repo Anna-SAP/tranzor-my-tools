@@ -19,6 +19,7 @@ import advanced_filter
 import llm_qa as llm_qa_module
 from export_gui import FONT_FAMILY, IS_MAC, reveal_in_folder, sanitize_for_filename
 from date_picker import attach_calendar
+from searchable_combobox import attach_search
 
 
 # ============================================================
@@ -104,6 +105,10 @@ class MRPipelineTab:
         self.mr_project_var = tk.StringVar()
         self.cmb_mr_project = ttk.Combobox(r1, textvariable=self.mr_project_var, width=20, state="readonly")
         self.cmb_mr_project.pack(side="left", padx=(4, 12))
+        # 项目列表长（上百个仓库路径），原生下拉只能滚动找 —— 换成顶部带
+        # 关键字搜索框的过滤弹窗（选项仍每次现读 values，异步加载无感）。
+        attach_search(self.cmb_mr_project, font_family=FONT_FAMILY,
+                      lang=lambda: self.app.lang)
 
         self.lbl_mr_release = ttk.Label(r1, text="", style="Card.TLabel", width=8)
         self.lbl_mr_release.pack(side="left")
