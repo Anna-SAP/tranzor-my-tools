@@ -21,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
 import requests
+import atomic_io
 
 CONFIG_PATH = os.path.expanduser("~/.tranzor_exporter_config.json")
 DEFAULT_BASE_URL = "https://git.ringcentral.com"
@@ -37,8 +38,7 @@ def load_config():
 
 
 def save_config(cfg):
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, indent=2)
+    atomic_io.atomic_write_json(CONFIG_PATH, cfg, indent=2, mode=0o600)
 
 
 def update_config(**kwargs):

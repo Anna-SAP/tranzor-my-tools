@@ -31,6 +31,8 @@ import os
 import time
 from urllib.parse import urlparse
 
+import atomic_io
+
 try:
     import requests
 except Exception:  # pragma: no cover - requests should always be present
@@ -121,13 +123,11 @@ def load():
 
 def _save():
     try:
-        with open(AUTH_CONFIG_PATH, "w", encoding="utf-8") as f:
-            json.dump({"token": _token, "user": _user}, f)
-        # Best-effort tighten perms on POSIX; harmless/no-op on Windows.
-        try:
-            os.chmod(AUTH_CONFIG_PATH, 0o600)
-        except Exception:
-            pass
+        atomic_io.atomic_write_json(
+            AUTH_CONFIG_PATH,
+            {"token": _token, "user": _user},
+            mode=0o600,
+        )
     except Exception:
         pass
 

@@ -10,6 +10,7 @@ Run:  python -m unittest test_tranzor_bridge
 from __future__ import annotations
 
 import os
+import json
 import shutil
 import sys
 import tempfile
@@ -92,10 +93,10 @@ class StatusSnapshotTests(unittest.TestCase):
         self.assertIsNone(s["pending_handoff_age_sec"])
 
     def test_note_pull_records_heartbeat_and_version(self):
-        self.bridge.note_userscript_pull("0.6.0")
+        self.bridge.note_userscript_pull(tb.MIN_USERSCRIPT_VERSION)
         s = self.bridge.status_snapshot()
         self.assertIsNotNone(s["last_userscript_pull_at"])
-        self.assertEqual(s["last_userscript_version"], "0.6.0")
+        self.assertEqual(s["last_userscript_version"], tb.MIN_USERSCRIPT_VERSION)
         self.assertTrue(s["userscript_live"])
         self.assertFalse(s["userscript_outdated"])
 
@@ -113,7 +114,7 @@ class StatusSnapshotTests(unittest.TestCase):
         self.assertTrue(s["userscript_live"])
 
     def test_stale_heartbeat_no_longer_live(self):
-        self.bridge.note_userscript_pull("0.6.0")
+        self.bridge.note_userscript_pull(tb.MIN_USERSCRIPT_VERSION)
         # Pretend the pull was long ago by rolling back the timestamp past
         # the live window. We touch the public attribute on purpose — the
         # snapshot reads it directly.
@@ -130,6 +131,74 @@ class StatusSnapshotTests(unittest.TestCase):
         self.assertLessEqual(
             len(self.bridge.last_userscript_version or ""), 32
         )
+
+
+class MultiInstancePortFileTests(unittest.TestCase):
+    """One instance closing must not erase a later instance's pointer."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self._patcher = mock.patch.object(
+            tb, "_state_dir", return_value=self.tmp,
+        )
+        self._patcher.start()
+
+    def tearDown(self):
+        self._patcher.stop()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_older_instance_cannot_delete_newer_registration(self):
+        older = tb.BridgeServer()
+        older.port = 48217
+        newer = tb.BridgeServer()
+        newer.port = 48218
+
+        older._write_port_file()
+        newer._write_port_file()
+        older._delete_port_file()
+
+        payload = json.loads(tb._port_file().read_text(encoding="utf-8"))
+        self.assertEqual(payload["instance_id"], newer.instance_id)
+        self.assertEqual(payload["port"], 48218)
+
+        newer._delete_port_file()
+        self.assertFalse(tb._port_file().exists())
+
+
+class MultiInstancePortBindingTests(unittest.TestCase):
+    """Live Bridge instances must never share a listener address."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self._patcher = mock.patch.object(
+            tb, "_state_dir", return_value=self.tmp,
+        )
+        self._patcher.start()
+        self.servers = []
+
+    def tearDown(self):
+        for server in reversed(self.servers):
+            server.stop()
+        self._patcher.stop()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_two_live_servers_advance_to_different_ports(self):
+        first = tb.BridgeServer(port_range=[0])
+        first.start()
+        self.servers.append(first)
+
+        # Try the first server's live port before asking the OS for any free
+        # port. Without exclusive binding on Windows, this incorrectly reused
+        # the first port and both app instances claimed the same endpoint.
+        second = tb.BridgeServer(port_range=[first.port, 0])
+        second.start()
+        self.servers.append(second)
+
+        self.assertIsInstance(first.port, int)
+        self.assertIsInstance(second.port, int)
+        self.assertGreater(first.port, 0)
+        self.assertGreater(second.port, 0)
+        self.assertNotEqual(first.port, second.port)
 
 
 class AutoOpenHeuristicTests(unittest.TestCase):
@@ -165,7 +234,7 @@ class AutoOpenHeuristicTests(unittest.TestCase):
         )
         # A recent heartbeat means the userscript is working; even an old
         # pending envelope is the userscript's problem, not setup's.
-        self.bridge.note_userscript_pull("0.6.0")
+        self.bridge.note_userscript_pull(tb.MIN_USERSCRIPT_VERSION)
         self.assertFalse(bsw.should_auto_open_wizard(self.bridge))
 
     def test_outdated_userscript_triggers_even_when_live(self):
@@ -192,9 +261,9 @@ class SetupStateTests(unittest.TestCase):
         self.assertFalse(bsw.is_setup_known_complete())
 
     def test_mark_then_load_roundtrip(self):
-        bsw.mark_setup_complete("0.6.0")
+        bsw.mark_setup_complete(tb.MIN_USERSCRIPT_VERSION)
         state = bsw.load_setup_state()
-        self.assertEqual(state["userscript_version"], "0.6.0")
+        self.assertEqual(state["userscript_version"], tb.MIN_USERSCRIPT_VERSION)
         self.assertIn("completed_at", state)
         self.assertEqual(state["min_version_at_completion"],
                          tb.MIN_USERSCRIPT_VERSION)

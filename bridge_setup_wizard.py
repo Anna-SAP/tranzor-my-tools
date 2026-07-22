@@ -53,6 +53,8 @@ from pathlib import Path
 from tkinter import ttk
 from typing import Any, Dict, Optional
 
+import atomic_io
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # Module imports — kept lightweight so the wizard can be unit-tested
@@ -121,10 +123,8 @@ def mark_setup_complete(userscript_version: Optional[str]) -> None:
     except Exception:
         return
     path = _setup_state_path()
-    tmp = path.with_suffix(".json.tmp")
     try:
-        tmp.write_text(json.dumps(payload), encoding="utf-8")
-        os.replace(tmp, path)
+        atomic_io.atomic_write_json(path, payload)
     except Exception:
         pass
 
