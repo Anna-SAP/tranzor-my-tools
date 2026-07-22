@@ -303,6 +303,7 @@ import export_changes
 import export_translations
 import gui_tabs
 import tranzor_auth
+import app_instance
 # Aliased so the ``llm_qa`` boolean flag threaded through the export handlers
 # doesn't shadow the module inside those methods.
 import llm_qa as llm_qa_module
@@ -469,6 +470,7 @@ except Exception as _auth_init_err:  # pragma: no cover - defensive
 STRINGS = {
     "en": {
         "window_title":       "Tranzor Translation Exporter",
+        "window_title_instance": "{title} · Instance {n}",
         "title":              "🌐 Tranzor Translation Exporter",
         "subtitle":           "Export translation changes or all translations — HTML / Excel / TMX",
         "task_id_label":      "Task ID",
@@ -633,6 +635,7 @@ STRINGS = {
     },
     "zh": {
         "window_title":       "Tranzor 翻译导出器",
+        "window_title_instance": "{title} · 实例 {n}",
         "title":              "🌐 Tranzor 翻译导出器",
         "subtitle":           "导出翻译变更记录或全部翻译，支持 HTML / Excel / TMX 格式",
         "task_id_label":      "Task ID",
@@ -1117,6 +1120,11 @@ class ExportApp:
 
     def __init__(self, root):
         self.root = root
+        # No single-instance mutex: count visible roots so later launches are
+        # visibly distinct instead of opening directly behind the first one.
+        self.existing_instance_count = app_instance.count_existing_instances()
+        self.instance_number = self.existing_instance_count + 1
+
         self.root.geometry("1280x1050")
         self.root.resizable(True, True)
         self.root.configure(bg=self.BG)
@@ -1184,8 +1192,13 @@ class ExportApp:
         self.root.update_idletasks()
         w = self.root.winfo_width()
         h = self.root.winfo_height()
-        x = (self.root.winfo_screenwidth() // 2) - (w // 2)
-        y = (self.root.winfo_screenheight() // 2) - (h // 2)
+        x, y = app_instance.cascade_position(
+            self.root.winfo_screenwidth(),
+            self.root.winfo_screenheight(),
+            w,
+            h,
+            self.existing_instance_count,
+        )
         self.root.geometry(f"+{x}+{y}")
         self._recalculate_summary_page_size()
         self.root.after(250, self._recalculate_summary_page_size)
@@ -1986,7 +1999,12 @@ class ExportApp:
         ``after(0, …)`` fires on the next idle, so flips remain instantaneous
         from the user's perspective.
         """
-        self.root.title(self._t("window_title"))
+        base_title = self._t("window_title")
+        if self.instance_number > 1:
+            self.root.title(self._t("window_title_instance").format(
+                title=base_title, n=self.instance_number))
+        else:
+            self.root.title(base_title)
         self.lbl_title.configure(text=self._t("title"))
         self.lbl_subtitle.configure(text=self._t("subtitle"))
         self.lbl_task_id.configure(text=self._t("task_id_label"))
@@ -3274,6 +3292,12 @@ def main():
         except Exception:
             pass
     _boot_mark("deiconify_done")
+    # A later instance can otherwise appear exactly behind a centred first
+    # instance and look as if the double-click did nothing. The topmost flag
+    # used for activation is cleared immediately by the helper.
+    app_instance.surface_new_instance(
+        root, getattr(app, "existing_instance_count", 0))
+
     # Don't force a synchronous root.update() here — when there are 1000+
     # widgets across 10 tabs, that single call can take 15-20 s while Tk
     # paints everything. Instead, let mainloop draw the window naturally

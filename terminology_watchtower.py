@@ -27,6 +27,8 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
+import atomic_io
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -995,21 +997,22 @@ class StatusStore:
 
     def _save(self) -> None:
         ensure_data_dir()
-        tmp = self.path + ".tmp"
         with self._lock:
             data = dict(self._map)
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2, sort_keys=True)
-        os.replace(tmp, self.path)
+        atomic_io.atomic_write_json(
+            self.path,
+            data,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
 
 
 def save_last_scan(summary: ScanSummary) -> str:
     p = last_scan_path()
     ensure_data_dir()
-    tmp = p + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(summary.to_dict(), f, ensure_ascii=False, indent=2)
-    os.replace(tmp, p)
+    atomic_io.atomic_write_json(
+        p, summary.to_dict(), ensure_ascii=False, indent=2)
     return p
 
 

@@ -1405,7 +1405,10 @@ async function sendToTranzor() {{
         // Pair the userscript with the bridge: pass token via one-time URL hash.
         // The userscript stashes it in GM storage and history.replaceState's it away.
         if (BRIDGE && BRIDGE.token) {{
-            openUrl = TRANZOR_BASE + taskPath + '#tzbridge_token=' + encodeURIComponent(BRIDGE.token);
+            openUrl = TRANZOR_BASE + taskPath +
+                '#tzbridge_token=' + encodeURIComponent(BRIDGE.token) +
+                '&tzbridge_port=' + encodeURIComponent(String(BRIDGE.port)) +
+                '&tzbridge_instance=' + encodeURIComponent(BRIDGE.instance_id || '');
         }}
         toast = '✓ Sent ' + rows.length + ' item(s) via bridge (seq=' + br.seq + '). Switching to Tranzor…';
     }} else {{

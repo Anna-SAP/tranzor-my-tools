@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tranzor Bridge
 // @namespace    tranzor-my-tools
-// @version      0.6.1
+// @version      0.6.2
 // @description  Receive Exporter selections and walk through them on the Tranzor Platform.
 // @match        http://tranzor-platform.int.rclabenv.com/*
 // @match        https://tranzor-platform.int.rclabenv.com/*
@@ -272,12 +272,33 @@
     }
 
     function captureTokenFromHash() {
-        const m = location.hash.match(/#tzbridge_token=([A-Za-z0-9_\-\.~%]+)/);
-        if (!m) return false;
-        const token = decodeURIComponent(m[1]);
+        const params = new URLSearchParams(location.hash.replace(/^#/, ''));
+        const token = params.get('tzbridge_token') || '';
         if (!token) return false;
         GM_setValue('bridge_token', token);
-        if (endpoint) endpoint.token = token;
+
+        const port = Number(params.get('tzbridge_port'));
+        const instanceId = params.get('tzbridge_instance') || '';
+        const hasEndpointMetadata = Number.isInteger(port) && PORT_RANGE.includes(port);
+        if (hasEndpointMetadata) {
+            const switchedInstance = (
+                !endpoint ||
+                endpoint.port !== port ||
+                (instanceId && endpoint.instance_id !== instanceId)
+            );
+            endpoint = {
+                port,
+                instance_id: instanceId,
+                token,
+                discoveredAt: Date.now(),
+            };
+            GM_setValue('bridge_endpoint', { port });
+            if (switchedInstance) lastSeq = 0;
+        } else if (endpoint) {
+            // Backward compatibility for reports generated before v0.6.2.
+            endpoint.token = token;
+        }
+
         history.replaceState(null, '', location.pathname + location.search);
         return true;
     }
@@ -286,7 +307,7 @@
     // X-Userscript-Version on every /pull so the my-tools setup wizard can
     // detect outdated installs and prompt for re-install. Keep this in sync
     // with the meta block; any change to either MUST bump the other.
-    const USERSCRIPT_VERSION = '0.6.1';
+    const USERSCRIPT_VERSION = '0.6.2';
 
     async function pullEnvelope() {
         if (!endpoint || !endpoint.token) return null;

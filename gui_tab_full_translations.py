@@ -30,6 +30,8 @@ from pathlib import Path
 from tkinter import ttk, filedialog, messagebox, simpledialog
 from datetime import date, datetime
 
+import atomic_io
+
 try:
     import export_full_translations as _exp
 except Exception:  # pragma: no cover — defensive
@@ -1094,12 +1096,12 @@ class FullTranslationsTab:
         success; on failure shows an error dialog and returns False."""
         try:
             self._presets_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self._presets_path.with_suffix(
-                self._presets_path.suffix + ".tmp")
-            tmp.write_text(
-                json.dumps(self._presets, ensure_ascii=False, indent=2),
-                encoding="utf-8")
-            os.replace(tmp, self._presets_path)
+            atomic_io.atomic_write_json(
+                self._presets_path,
+                self._presets,
+                ensure_ascii=False,
+                indent=2,
+            )
             return True
         except Exception as err:
             try:

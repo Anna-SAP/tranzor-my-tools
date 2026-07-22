@@ -23,6 +23,7 @@ import errno
 import json
 import os
 import secrets
+import socket
 import threading
 import time
 import uuid
@@ -30,13 +31,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Optional, Tuple
 
+import atomic_io
+
 BRIDGE_VERSION = "0.1.0"
 
 # Userscript minimum version. The setup wizard treats any installed userscript
 # below this as "outdated" and prompts a re-install. Bump in lockstep with the
 # @version field in userscript/tranzor_bridge.user.js whenever a server-side
 # protocol change requires a corresponding client update.
-MIN_USERSCRIPT_VERSION = "0.6.0"
+MIN_USERSCRIPT_VERSION = "0.6.2"
 
 BIND_HOST = "127.0.0.1"
 PORT_RANGE = range(48217, 48227)  # 10 candidate ports
@@ -61,6 +64,24 @@ def _port_file() -> Path:
 
 class BridgePortBusy(RuntimeError):
     """All candidate ports already bound; bridge cannot start."""
+
+
+class _BridgeHTTPServer(ThreadingHTTPServer):
+    """HTTP server whose listening port belongs to exactly one instance.
+
+    ``HTTPServer`` enables ``SO_REUSEADDR``. On Windows that permits two live
+    processes to bind the same address and makes Bridge routing ambiguous.
+    Use the platform's exclusive-address option so the next app instance
+    reliably advances to the next port in ``PORT_RANGE``.
+    """
+
+    allow_reuse_address = os.name != "nt"
+
+    def server_bind(self):
+        if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(
+                socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
 
 
 def _version_lt(installed: Optional[str], minimum: str) -> bool:
@@ -151,7 +172,7 @@ class BridgeServer:
         last_err: Optional[OSError] = None
         for port in self.port_range:
             try:
-                srv = ThreadingHTTPServer((BIND_HOST, port), handler_cls)
+                srv = _BridgeHTTPServer((BIND_HOST, port), handler_cls)
             except OSError as e:
                 last_err = e
                 if e.errno in (errno.EADDRINUSE, errno.EACCES, errno.EADDRNOTAVAIL):
@@ -159,7 +180,7 @@ class BridgeServer:
                 raise
             else:
                 self._server = srv
-                self.port = port
+                self.port = int(srv.server_address[1])
                 break
         else:
             raise BridgePortBusy(
@@ -296,7 +317,6 @@ class BridgeServer:
             pass
 
         path = _port_file()
-        tmp = path.with_suffix(".json.tmp")
         payload = {
             "version": BRIDGE_VERSION,
             "port": self.port,
@@ -305,16 +325,17 @@ class BridgeServer:
             "pid": os.getpid(),
             "started_at": time.time(),
         }
-        tmp.write_text(json.dumps(payload), encoding="utf-8")
-        try:
-            os.chmod(tmp, 0o600)
-        except (OSError, NotImplementedError):
-            pass
-        os.replace(tmp, path)
+        atomic_io.atomic_write_json(path, payload, mode=0o600)
 
     def _delete_port_file(self):
+        path = _port_file()
         try:
-            _port_file().unlink()
+            # A later instance may have replaced the shared pointer. An older
+            # instance must not erase the newer registration when it closes.
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if payload.get("instance_id") != self.instance_id:
+                return
+            path.unlink()
         except FileNotFoundError:
             pass
         except Exception:

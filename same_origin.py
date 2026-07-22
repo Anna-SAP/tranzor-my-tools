@@ -34,6 +34,8 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Iterable, Optional
 
+import atomic_io
+
 
 # ---------------------------------------------------------------------------
 # Core products —— 默认核心产品清单（project_id，与 MR 任务的 project_id /
@@ -129,10 +131,8 @@ def save_core_products(items: Iterable[str]) -> list[str]:
         },
         "core_products": norm,
     }
-    tmp = config_path() + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, config_path())
+    atomic_io.atomic_write_json(
+        config_path(), payload, ensure_ascii=False, indent=2)
     return norm
 
 
