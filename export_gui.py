@@ -3264,6 +3264,9 @@ def _show_splash(root):
 
 def main():
     _boot_mark("main_entry")
+    # Must happen before the first window exists, or the taskbar has
+    # already grouped this process under the shared exe-path identity.
+    app_instance.ungroup_taskbar_icon()
     root = tk.Tk()
     _boot_mark("tk_Tk_done")
     try:
