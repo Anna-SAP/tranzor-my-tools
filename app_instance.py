@@ -8,6 +8,7 @@ though a second process and window are alive.
 """
 from __future__ import annotations
 
+import os
 import platform
 from typing import Iterable, Optional
 
@@ -18,6 +19,43 @@ APP_WINDOW_TITLES = (
 )
 CASCADE_STEP_PX = 32
 CASCADE_SLOTS = 6
+TASKBAR_APP_ID_BASE = "Tranzor.TranslationExporter"
+
+
+def taskbar_app_id(pid: Optional[int] = None) -> str:
+    """Per-process AppUserModelID: unique PID suffix keeps instances apart."""
+    return f"{TASKBAR_APP_ID_BASE}.{int(pid if pid is not None else os.getpid())}"
+
+
+def ungroup_taskbar_icon(
+    *,
+    platform_name: Optional[str] = None,
+    pid: Optional[int] = None,
+) -> Optional[str]:
+    """Give this process its own taskbar button on Windows.
+
+    The taskbar groups windows by AppUserModelID (falling back to the exe
+    path), so every instance of the same executable collapses into one
+    icon. Assigning a PID-unique ID before the first window is shown makes
+    Windows treat each instance as a separate application, so the icons
+    tile instead of stacking. Returns the ID that was set, or ``None`` when
+    not on Windows or the shell call failed (grouping then stays as-is).
+    """
+    system = platform_name or platform.system()
+    if system != "Windows":
+        return None
+    app_id = taskbar_app_id(pid)
+    try:
+        import ctypes
+
+        hresult = ctypes.WinDLL("shell32").SetCurrentProcessExplicitAppUserModelID(
+            ctypes.c_wchar_p(app_id)
+        )
+        if hresult != 0:
+            return None
+    except Exception:
+        return None
+    return app_id
 
 
 def _is_app_main_window_title(title: str) -> bool:

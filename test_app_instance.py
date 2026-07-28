@@ -68,6 +68,29 @@ class _FakeRoot:
         return True
 
 
+class TaskbarIdentityTests(unittest.TestCase):
+
+    def test_app_id_is_unique_per_pid(self):
+        self.assertEqual(
+            app_instance.taskbar_app_id(1234),
+            "Tranzor.TranslationExporter.1234",
+        )
+        self.assertNotEqual(
+            app_instance.taskbar_app_id(1234),
+            app_instance.taskbar_app_id(5678),
+        )
+
+    def test_app_id_defaults_to_current_pid(self):
+        import os
+
+        self.assertTrue(
+            app_instance.taskbar_app_id().endswith(f".{os.getpid()}"))
+
+    def test_non_windows_is_a_noop(self):
+        self.assertIsNone(
+            app_instance.ungroup_taskbar_icon(platform_name="Darwin"))
+
+
 class SurfaceTests(unittest.TestCase):
 
     def test_second_windows_instance_gets_short_activation_pulse(self):
