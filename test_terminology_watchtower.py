@@ -68,6 +68,96 @@ class NormalizationTests(unittest.TestCase):
         self.assertIsNone(tw.normalize_severity("urgent"))
 
 
+class KeywordMatchTests(unittest.TestCase):
+
+    def test_empty_keyword_matches_everything(self):
+        self.assertTrue(tw.keyword_match("anything", ""))
+        self.assertTrue(tw.keyword_match("anything", "   "))
+        self.assertTrue(tw.keyword_match("", ""))
+
+    def test_default_is_case_insensitive_substring(self):
+        self.assertTrue(tw.keyword_match("Made for iPhone", "phone"))
+        self.assertTrue(tw.keyword_match("BT Cloud Phone", "PHONE"))
+        self.assertFalse(tw.keyword_match("BT Cloud Phone", "fax"))
+
+    def test_match_case(self):
+        self.assertTrue(tw.keyword_match("IP phone", "phone",
+                                         match_case=True))
+        self.assertFalse(tw.keyword_match("BT Cloud Phone", "phone",
+                                          match_case=True))
+        # Case-sensitive still substring: matches inside "iPhone"? No —
+        # "Phone" appears capitalized inside "iPhone", so it should match.
+        self.assertTrue(tw.keyword_match("Made for iPhone", "Phone",
+                                         match_case=True))
+
+    def test_whole_word(self):
+        # "phone" as a whole word: hits "IP phone", not "iPhone"/"Softphone"
+        self.assertTrue(tw.keyword_match("IP phone", "phone",
+                                         whole_word=True))
+        self.assertFalse(tw.keyword_match("Made for iPhone", "phone",
+                                          whole_word=True))
+        self.assertFalse(tw.keyword_match("BT Cloud Work Softphone", "phone",
+                                          whole_word=True))
+        # Multi-word keyword stays intact
+        self.assertTrue(tw.keyword_match("Avaya IX IP Phone Global",
+                                         "IP phone", whole_word=True))
+
+    def test_whole_word_and_match_case_combined(self):
+        self.assertTrue(tw.keyword_match("IP phone", "phone",
+                                         whole_word=True, match_case=True))
+        self.assertFalse(tw.keyword_match("BT Cloud Phone", "phone",
+                                          whole_word=True, match_case=True))
+        self.assertTrue(tw.keyword_match("BT Cloud Phone", "Phone",
+                                         whole_word=True, match_case=True))
+
+    def test_whole_word_punctuation_edges(self):
+        # Keyword edged with punctuation only anchors on its word-char side
+        self.assertTrue(tw.keyword_match("AT&T Office@Hand Phone", "@Hand",
+                                         whole_word=True))
+        self.assertFalse(tw.keyword_match("AT&T Office@Handy Phone", "@Hand",
+                                          whole_word=True))
+        self.assertTrue(tw.keyword_match("AT&T Office@Hand", "AT&T",
+                                         whole_word=True))
+
+    def test_whole_word_at_string_edges(self):
+        self.assertTrue(tw.keyword_match("phone", "phone", whole_word=True))
+        self.assertTrue(tw.keyword_match("phone adapter", "phone",
+                                         whole_word=True))
+        self.assertTrue(tw.keyword_match("analog phone", "phone",
+                                         whole_word=True))
+
+    def test_whole_word_cjk_keyword_matches_inside_cjk_run(self):
+        # Chinese has no word-delimiting spaces: whole-word must not
+        # anchor on Han ideograph edges, else it matches nothing.
+        self.assertTrue(tw.keyword_match("中文术语表", "中文术语",
+                                         whole_word=True))
+        self.assertTrue(tw.keyword_match("移动电话服务", "电话",
+                                         whole_word=True))
+        self.assertTrue(tw.keyword_match("查找 中文术语 条目", "中文术语",
+                                         whole_word=True))
+
+    def test_whole_word_latin_cjk_boundary(self):
+        # An adjacent ideograph acts as a boundary for a Latin keyword
+        self.assertTrue(tw.keyword_match("RingEX电话服务", "RingEX",
+                                         whole_word=True))
+        self.assertTrue(tw.keyword_match("RingEX电话", "电话",
+                                         whole_word=True))
+        # Latin-glued Latin keyword still blocked
+        self.assertFalse(tw.keyword_match("RingEXpress电话", "RingEX",
+                                          whole_word=True))
+
+    def test_whole_word_keeps_casefold_semantics(self):
+        # Toggling whole_word must not change what "ignore case" means
+        # (casefold handles ß→ss; re.IGNORECASE would not)
+        self.assertTrue(tw.keyword_match("Straße", "strasse"))
+        self.assertTrue(tw.keyword_match("Straße", "strasse",
+                                         whole_word=True))
+        self.assertTrue(tw.keyword_match("Große Halle", "GROSSE",
+                                         whole_word=True))
+        self.assertFalse(tw.keyword_match("Straße", "strasse",
+                                          match_case=True, whole_word=True))
+
+
 class GlossaryImportTests(unittest.TestCase):
 
     def test_import_basic(self):
