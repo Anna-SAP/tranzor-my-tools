@@ -130,6 +130,8 @@ STRINGS = {
         "tw_tt_loading":              "Loading… {n}/{total}",
         "tw_tt_loaded":              "{n} terms loaded.",
         "tw_tt_filter":              "Filter",
+        "tw_tt_match_case":          "Match case",
+        "tw_tt_match_word":          "Whole word",
         "tw_tt_filter_dnt":          "DNT",
         "tw_tt_dnt_any":             "(any)",
         "tw_tt_dnt_yes":             "DNT only",
@@ -313,6 +315,8 @@ STRINGS = {
         "tw_tt_loading":              "加载中… {n}/{total}",
         "tw_tt_loaded":              "已加载 {n} 条术语。",
         "tw_tt_filter":              "过滤",
+        "tw_tt_match_case":          "区分大小写",
+        "tw_tt_match_word":          "全词匹配",
         "tw_tt_filter_dnt":          "DNT",
         "tw_tt_dnt_any":             "（全部）",
         "tw_tt_dnt_yes":             "仅 DNT",
@@ -1863,7 +1867,19 @@ class _TranzorTerminologyDialog(tk.Toplevel):
                  font=(FONT_FAMILY, 10),
                  bg="#0a0a1a", fg="#fff",
                  insertbackground="#fff", relief="flat"
-                 ).pack(side="left", padx=(4, 12), ipady=2)
+                 ).pack(side="left", padx=(4, 8), ipady=2)
+
+        # Precision toggles for the keyword filter (VS Code-style semantics)
+        self.match_case_var = tk.BooleanVar(value=False)
+        self.whole_word_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(frow, text=tab._t("tw_tt_match_case"),
+                        variable=self.match_case_var,
+                        command=self._render_terms
+                        ).pack(side="left", padx=(0, 6))
+        ttk.Checkbutton(frow, text=tab._t("tw_tt_match_word"),
+                        variable=self.whole_word_var,
+                        command=self._render_terms
+                        ).pack(side="left", padx=(0, 12))
 
         # DNT filter — pick "any" / "DNT only" / "Translatable only". Keys
         # are stable identifiers; the display label uses localized strings.
@@ -2000,7 +2016,9 @@ class _TranzorTerminologyDialog(tk.Toplevel):
         Rather than re-adding rows on every keystroke (slow at 2k+ terms),
         we keep the iid map stable and just detach/reattach rows.
         """
-        kw = self.filter_var.get().strip().lower()
+        kw = self.filter_var.get().strip()
+        match_case = bool(self.match_case_var.get())
+        whole_word = bool(self.whole_word_var.get())
         dnt_key = self._dnt_label_to_key.get(self.dnt_var.get(), "any")
         # Initial population
         if not self._iid_by_id and self._all_terms:
@@ -2029,8 +2047,9 @@ class _TranzorTerminologyDialog(tk.Toplevel):
             iid = self._iid_by_id.get(tid)
             if not iid:
                 continue
-            hay = ((t.get("name") or "") + " " + (t.get("scope") or "")).lower()
-            text_ok = (kw in hay) if kw else True
+            hay = (t.get("name") or "") + " " + (t.get("scope") or "")
+            text_ok = tw.keyword_match(hay, kw, match_case=match_case,
+                                       whole_word=whole_word)
             is_dnt = bool(t.get("dnt"))
             if dnt_key == "yes":
                 dnt_ok = is_dnt
