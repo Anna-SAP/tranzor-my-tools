@@ -1869,7 +1869,8 @@ class _TranzorTerminologyDialog(tk.Toplevel):
                  insertbackground="#fff", relief="flat"
                  ).pack(side="left", padx=(4, 8), ipady=2)
 
-        # Precision toggles for the keyword filter (VS Code-style semantics)
+        # Precision toggles: Match case (substring) / Whole word = keyword
+        # equals the complete term name (Excel-style entire-cell match)
         self.match_case_var = tk.BooleanVar(value=False)
         self.whole_word_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(frow, text=tab._t("tw_tt_match_case"),
@@ -2047,9 +2048,12 @@ class _TranzorTerminologyDialog(tk.Toplevel):
             iid = self._iid_by_id.get(tid)
             if not iid:
                 continue
-            hay = (t.get("name") or "") + " " + (t.get("scope") or "")
-            text_ok = tw.keyword_match(hay, kw, match_case=match_case,
-                                       whole_word=whole_word)
+            if whole_word:
+                text_ok = tw.whole_term_match(t.get("name") or "", kw,
+                                              match_case=match_case)
+            else:
+                hay = (t.get("name") or "") + " " + (t.get("scope") or "")
+                text_ok = tw.keyword_match(hay, kw, match_case=match_case)
             is_dnt = bool(t.get("dnt"))
             if dnt_key == "yes":
                 dnt_ok = is_dnt
