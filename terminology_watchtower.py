@@ -230,65 +230,39 @@ def casefold_text(s: str) -> str:
     return s.casefold()
 
 
-# Han ideographs and kana are written without word-delimiting spaces, so
-# whole-word matching treats them as boundaries rather than word characters.
-_CJK_NO_BOUNDARY = (
-    (0x3040, 0x30FF),    # Hiragana + Katakana
-    (0x31F0, 0x31FF),    # Katakana phonetic extensions
-    (0x3400, 0x4DBF),    # CJK Unified Ideographs Extension A
-    (0x4E00, 0x9FFF),    # CJK Unified Ideographs
-    (0xF900, 0xFAFF),    # CJK Compatibility Ideographs
-    (0x20000, 0x3134F),  # CJK Unified Ideographs Extensions B..G
-)
-
-_WORD_CHAR_RE = re.compile(r"\w", re.UNICODE)
-
-
-def _blocks_word_edge(ch: str) -> bool:
-    """True if `ch` glues onto an adjacent word for whole-word purposes:
-    a word character that is not a Han ideograph / kana."""
-    if not _WORD_CHAR_RE.match(ch):
-        return False
-    cp = ord(ch)
-    return not any(lo <= cp <= hi for lo, hi in _CJK_NO_BOUNDARY)
-
-
 def keyword_match(haystack: str, keyword: str, *,
-                  match_case: bool = False,
-                  whole_word: bool = False) -> bool:
+                  match_case: bool = False) -> bool:
     """Substring match used by GUI filter boxes.
 
-    whole_word only requires a word boundary on the sides where the
-    keyword itself starts/ends with a boundary-blocking word character,
-    so "phone" does not match "iPhone" but punctuation-edged keywords
-    like "@Hand" still match "Office@Hand". Han ideographs and kana
-    neither require nor block a boundary: "中文术语" matches inside
-    "中文术语表" and "RingEX" matches whole-word in "RingEX电话".
-    Case-insensitive mode casefolds both sides, identical to the plain
-    substring path, so toggling whole_word never changes case semantics.
+    Both sides are whitespace-normalized so names with double spaces or
+    NBSP still match a plainly-typed keyword — and so the substring mode
+    never hides a row that whole_term_match (which normalizes) shows.
     """
-    keyword = (keyword or "").strip()
+    keyword = normalize_text(keyword)
     if not keyword:
         return True
-    haystack = haystack or ""
-    if not match_case:
-        keyword = keyword.casefold()
-        haystack = haystack.casefold()
-    if not whole_word:
+    haystack = normalize_text(haystack)
+    if match_case:
         return keyword in haystack
-    anchor_left = _blocks_word_edge(keyword[0])
-    anchor_right = _blocks_word_edge(keyword[-1])
-    pos = haystack.find(keyword)
-    while pos >= 0:
-        end = pos + len(keyword)
-        left_ok = (not anchor_left or pos == 0
-                   or not _blocks_word_edge(haystack[pos - 1]))
-        right_ok = (not anchor_right or end == len(haystack)
-                    or not _blocks_word_edge(haystack[end]))
-        if left_ok and right_ok:
-            return True
-        pos = haystack.find(keyword, pos + 1)
-    return False
+    return keyword.casefold() in haystack.casefold()
+
+
+def whole_term_match(name: str, keyword: str, *,
+                     match_case: bool = False) -> bool:
+    """Whole-term filter: the keyword must equal the complete term name
+    (Excel "match entire cell contents" semantics, whitespace-normalized).
+
+    Editor-style word-boundary matching is useless in a terminology
+    picker — nearly every product name contains "Phone" as a standalone
+    word — so "whole word" here means the term itself is the keyword.
+    """
+    keyword = normalize_text(keyword)
+    if not keyword:
+        return True
+    name = normalize_text(name)
+    if match_case:
+        return name == keyword
+    return name.casefold() == keyword.casefold()
 
 
 def normalize_locale(s: Optional[str]) -> str:
