@@ -24,6 +24,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 import zlib
 from pathlib import Path
@@ -36,6 +37,27 @@ try:
     import export_full_translations as _exp
 except Exception:  # pragma: no cover — defensive
     _exp = None
+
+# 连接状态 pill（Connection_Health_Indicator_PRD.md）。三个依赖全部守卫式
+# 导入：缺任何一个都只是没有状态灯，Tab 本身照常工作。
+try:
+    import conn_health as _conn_health
+except Exception:  # pragma: no cover — defensive
+    _conn_health = None
+
+try:
+    import export_translations as _legacy_api
+except Exception:  # pragma: no cover — defensive
+    _legacy_api = None
+
+try:
+    import tranzor_auth as _tranzor_auth
+except Exception:  # pragma: no cover — defensive
+    _tranzor_auth = None
+
+# 连接状态 UI 刷新节拍（ms）。探针本身 30s 一拍；5s 的 UI tick 只读快照，
+# 零 I/O，保证导出中的 wedge 告警最多迟到 5s。
+_CONN_TICK_MS = 5000
 
 
 # Unicode check glyphs used by the products / languages multi-select trees.
@@ -205,6 +227,13 @@ STRINGS = {
         "ft_result_open_file":    "📄 Open file",
         "ft_result_close":        "Close",
         "ft_result_lbl_path":     "Output:",
+        "ft_conn_confirm_title":  "Connection status",
+        "ft_conn_confirm_amber":  "The platform is responding slowly ({latency}). A full export will likely be much slower than usual. Continue?",
+        "ft_conn_confirm_gray":   "Connection status is unknown — current platform load cannot be assessed. Continue?",
+        "ft_conn_confirm_red":    "The platform is congested or unresponsive right now. A full export will very likely hang (this froze the 8/5 morning export for 36+ minutes). Continue anyway?",
+        "ft_conn_dlg_alarm":      "⚠ No HTTP response and no progress for {m} min — the platform may be congested, or this export may be stuck. Requests are still waiting…",
+        "ft_conn_dlg_thread_dead": "⛔ The export worker thread terminated unexpectedly — no further progress will happen. Close this dialog and retry.",
+        "ft_conn_dlg_note_unstable": "Note: the platform was unstable in the last 10 minutes — keep an eye on this export.",
     },
     "zh": {
         "tab_full_translations":  "🌍 全量翻译",
@@ -279,6 +308,13 @@ STRINGS = {
         "ft_result_open_file":    "📄 打开文件",
         "ft_result_close":        "关闭",
         "ft_result_lbl_path":     "输出文件：",
+        "ft_conn_confirm_title":  "连接状态",
+        "ft_conn_confirm_amber":  "平台当前响应缓慢（{latency}）。全量导出预计明显变慢，仍要继续？",
+        "ft_conn_confirm_gray":   "当前连接状态未知，无法评估平台负载。仍要继续？",
+        "ft_conn_confirm_red":    "平台当前拥塞/无响应，全量导出很可能长时间挂起（8/5 上午的导出即因此冻结 36+ 分钟）。仍要继续？",
+        "ft_conn_dlg_alarm":      "⚠ 已 {m} 分钟无任何 HTTP 响应与进度更新——平台可能拥塞，或本次导出已卡住；请求仍在等待…",
+        "ft_conn_dlg_thread_dead": "⛔ 导出工作线程已意外终止——不会再有任何进度。请关闭本窗口后重试。",
+        "ft_conn_dlg_note_unstable": "提示：平台近 10 分钟内出现过不稳定，请留意本次导出。",
     },
 }
 
@@ -368,7 +404,15 @@ class _ExportProgressDialog:
         self.lbl_phase = ttk.Label(
             top, text=self._t("ft_progress_phase_collect"),
             style="Status.TLabel")
-        self.lbl_phase.pack(anchor="w", padx=14, pady=(0, 8))
+        self.lbl_phase.pack(anchor="w", padx=14, pady=(0, 4))
+
+        # Connection status line. The dialog holds a Tk grab (grab_set
+        # below), which makes the header pill non-hoverable for the whole
+        # export — so during an export THIS line is the user's only live
+        # connection indicator (PRD §5).
+        self.lbl_conn_state = tk.Label(
+            top, text="", bg="#1f1f2e", fg="#8888a0", anchor="w")
+        self.lbl_conn_state.pack(anchor="w", padx=14, pady=(0, 6))
 
         # Progress phase frame -------------------------------------------
         self.frame_progress = ttk.Frame(top, style="App.TFrame")
@@ -439,6 +483,15 @@ class _ExportProgressDialog:
         except Exception:
             pass
 
+    def set_conn_state(self, text: str, color: str) -> None:
+        """Update the in-dialog connection status line (Tk thread only)."""
+        if self._closed:
+            return
+        try:
+            self.lbl_conn_state.configure(text=text, fg=color)
+        except Exception:
+            pass
+
     # ---- transitions ----------------------------------------------
     def _stop_progressbar(self) -> None:
         try:
@@ -468,7 +521,13 @@ class _ExportProgressDialog:
         except Exception:
             pass
 
-        # Tear down progress widgets and rebuild as the result view.
+        # Tear down progress widgets and rebuild as the result view. The
+        # conn line is cleared on success; on error it stays — the last
+        # connection state is useful failure context.
+        try:
+            self.lbl_conn_state.configure(text="")
+        except Exception:
+            pass
         try:
             self.frame_progress.pack_forget()
         except Exception:
@@ -685,9 +744,29 @@ class FullTranslationsTab:
         # Guard against <<ComboboxSelected>> firing while we rebuild values.
         self._presets_suppress_combo: bool = False
 
+        # Connection-status pill state (PRD: Connection_Health_Indicator_PRD.md).
+        self._conn_tip = None
+        self._export_thread: threading.Thread | None = None
+        self._export_started_mono: float | None = None
+        self._last_progress_mono: float | None = None
+        self._last_wedge_alarm_mono: float | None = None
+        self._conn_recent_unstable = False
+        self._export_legacy_monitored = True
+        # (wall, mono) 锚点：wall-mono 差值跳变 = 睡眠唤醒/时钟跳变，
+        # 此时重置全部静默基线，别把睡了一觉的 socket 判成 wedge。
+        self._clock_anchor = (time.time(), time.monotonic())
+
         self._build_ui()
         # Populate preset combobox now that widgets exist.
         self._refresh_preset_combo()
+
+        # Health monitor is app-level (other tabs can reuse it later);
+        # the pill repaints on a 5s read-only tick.
+        self._ensure_health_monitor()
+        try:
+            self.parent.after(1000, self._conn_tick)
+        except Exception:
+            pass
 
     # ---- helpers ----------------------------------------------------
     def _t(self, key: str) -> str:
@@ -705,12 +784,35 @@ class FullTranslationsTab:
         outer = ttk.Frame(self.parent, style="App.TFrame")
         outer.pack(fill="both", expand=True, padx=8, pady=8)
 
+        # Header row: title/subtitle on the left, connection pill on the
+        # right. The pill packs side="right" FIRST so it claims the corner
+        # (same ordering trick as the main app header in export_gui).
+        header = ttk.Frame(outer, style="App.TFrame")
+        header.pack(fill="x")
+
+        gui_mod = sys.modules.get(type(self.app).__module__)
+        font_family = getattr(gui_mod, "FONT_FAMILY", "Segoe UI")
+        bg = getattr(self.app, "BG", "#1a1a2e")
+        self.lbl_conn = tk.Label(
+            header, text="", bg=bg,
+            fg=_conn_health.CONN_GRAY if _conn_health else "#8888a0",
+            font=(font_family, 10), cursor="hand2")
+        self.lbl_conn.pack(side="right", anchor="ne", pady=(4, 0))
+        self.lbl_conn.bind("<Button-1>", self._on_conn_click)
+        try:
+            self._conn_tip = gui_mod.Tooltip(self.lbl_conn, "")
+        except Exception:
+            self._conn_tip = None
+
+        head_left = ttk.Frame(header, style="App.TFrame")
+        head_left.pack(side="left", fill="x")
+
         # Title
         self.lbl_title = ttk.Label(
-            outer, text=self._t("ft_title"), style="Title.TLabel")
+            head_left, text=self._t("ft_title"), style="Title.TLabel")
         self.lbl_title.pack(anchor="w")
         self.lbl_sub = ttk.Label(
-            outer, text=self._t("ft_subtitle"), style="Subtitle.TLabel")
+            head_left, text=self._t("ft_subtitle"), style="Subtitle.TLabel")
         self.lbl_sub.pack(anchor="w", pady=(2, 10))
 
         # Top bar: sources + refresh + export buttons
@@ -949,8 +1051,246 @@ class FullTranslationsTab:
                 self.btn_loc_invert.configure(text=self._t("ft_invert_selection"))
             except Exception:
                 pass
+            # Language flips repaint the pill immediately instead of waiting
+            # out the 5s tick.
+            self._conn_repaint()
         except Exception:
             pass
+
+    # ---- connection-status pill (Connection_Health_Indicator_PRD.md) ----
+    def _ensure_health_monitor(self):
+        """App-level HealthMonitor singleton; None when unavailable."""
+        if _conn_health is None:
+            return None
+        mon = getattr(self.app, "health_monitor", None)
+        if mon is None:
+            try:
+                base_url = getattr(_legacy_api, "TRANZOR_URL", None)
+                if not base_url:
+                    return None
+                token_provider = getattr(_tranzor_auth, "get_token", None)
+                mon = _conn_health.HealthMonitor(
+                    base_url, token_provider=token_provider)
+                mon.start()
+                self.app.health_monitor = mon
+            except Exception:
+                return None
+        return mon
+
+    def _conn_tick(self) -> None:
+        # The tick may never break the after() chain — same discipline as
+        # the token pill / bridge watchdog loops in export_gui.
+        try:
+            self._conn_repaint()
+        except Exception:
+            pass
+        finally:
+            try:
+                self.parent.after(_CONN_TICK_MS, self._conn_tick)
+            except Exception:
+                pass
+
+    def _conn_repaint(self) -> None:
+        """One read-only paint of the pill (and the dialog conn line)."""
+        if _conn_health is None or not hasattr(self, "lbl_conn"):
+            return
+        self._check_clock_jump()
+        lang = getattr(self.app, "lang", "en")
+        mon = getattr(self.app, "health_monitor", None)
+        # _progress_dlg survives into the (modal) result view after the run
+        # finishes, so "exporting" needs the _busy flag too — otherwise the
+        # pill would stay in export mode and the probe would stay paused
+        # forever after the first export.
+        exporting = bool(self._busy and self._progress_dlg is not None)
+        if mon is not None:
+            # Idempotent: probing pauses while an export dialog is open —
+            # passive telemetry from real export traffic replaces it.
+            try:
+                mon.set_paused(exporting)
+            except Exception:
+                pass
+        if exporting:
+            view = self._export_conn_view()
+            text, color, tip = _conn_health.format_export_status(
+                view, lang=lang)
+            self._conn_apply(text, color, tip)
+            self._update_dialog_conn(view, text, color)
+        elif mon is not None:
+            display = mon.display()
+            text, color, tip = _conn_health.format_conn_status(
+                display, lang=lang, telemetry=_conn_health.BUS.snapshot())
+            self._conn_apply(text, color, tip)
+
+    def _check_clock_jump(self) -> None:
+        """Detect suspend/resume (wall-vs-mono skew) and reset baselines.
+
+        On Windows ``time.monotonic()`` keeps advancing across S3 sleep, so
+        after a resume every silence age includes the whole nap — without
+        this reset a healthy export wakes up straight into a false red
+        "已 N 分钟无响应" alarm (PRD §8.4).
+        """
+        wall, mono = time.time(), time.monotonic()
+        try:
+            anchor_wall, anchor_mono = self._clock_anchor
+            if abs((wall - anchor_wall) - (mono - anchor_mono)) > 30.0:
+                if self._export_started_mono is not None:
+                    self._export_started_mono = mono
+                if self._last_progress_mono is not None:
+                    self._last_progress_mono = mono
+                self._last_wedge_alarm_mono = None
+                try:
+                    _conn_health.BUS.rebaseline()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        self._clock_anchor = (wall, mono)
+
+    def _conn_apply(self, text: str, color: str, tip: str) -> None:
+        try:
+            self.lbl_conn.configure(text=text, fg=color)
+        except Exception:
+            pass
+        if self._conn_tip is not None and tip:
+            try:
+                self._conn_tip.set_text(tip)
+            except Exception:
+                pass
+
+    def _export_conn_view(self):
+        """Build the channel-B view for the running export."""
+        now = time.monotonic()
+        snap = _conn_health.BUS.snapshot()
+        floor = self._export_started_mono or now
+        # Ages are clamped to the export start so a response/progress line
+        # from BEFORE this run can't mask a dead one.
+        last_resp = max(snap.last_response_mono or floor, floor)
+        last_prog = max(self._last_progress_mono or floor, floor)
+        thread = self._export_thread
+        thread_alive = thread.is_alive() if thread is not None else True
+        oldest_inflight = (
+            (snap.now_mono - snap.oldest_inflight_mono)
+            if snap.oldest_inflight_mono else None)
+        run_retries = [r for r in snap.recent_retries if r[0] >= floor]
+        legacy_monitored = getattr(self, "_export_legacy_monitored", True)
+        state = _conn_health.classify_export(
+            http_silence_s=now - last_resp,
+            progress_silence_s=now - last_prog,
+            thread_alive=thread_alive,
+            oldest_inflight_s=oldest_inflight,
+            legacy_monitored=legacy_monitored)
+        return _conn_health.ExportView(
+            state=state,
+            http_silence_s=now - last_resp,
+            progress_silence_s=now - last_prog,
+            oldest_inflight_s=oldest_inflight,
+            inflight_count=snap.inflight_count,
+            gate_waiting=snap.gate_waiting_count,
+            retry_count=len(run_retries),
+            last_retry_reason=run_retries[-1][1] if run_retries else None,
+            legacy_monitored=legacy_monitored)
+
+    def _update_dialog_conn(self, view, text: str, color: str) -> None:
+        """Mirror the pill into the modal dialog + escalate wedge alarms."""
+        dlg = self._progress_dlg
+        if dlg is None:
+            return
+        try:
+            dlg.set_conn_state(text, color)
+        except Exception:
+            pass
+        if view.state == _conn_health.EXPORT_THREAD_DEAD:
+            # Terminal: the worker is gone, no completion callback will ever
+            # arrive. Unlock the tab (else _busy=True keeps every button dead
+            # and the "close and retry" advice in the alarm is a lie) and
+            # flip the dialog into its error phase, which installs a Close
+            # button. Probing resumes on the next tick once _busy is False.
+            line = self._t("ft_conn_dlg_thread_dead")
+            try:
+                dlg.append_log(line)
+            except Exception:
+                pass
+            try:
+                dlg.show_error(line)
+            except Exception:
+                pass
+            self._last_wedge_alarm_mono = None
+            self._set_busy(False)
+            try:
+                self.lbl_status.configure(
+                    text=f"❌ {line}", foreground="#e94560")
+            except Exception:
+                pass
+            return
+        if view.state != _conn_health.EXPORT_WEDGE:
+            self._last_wedge_alarm_mono = None
+            return
+        now = time.monotonic()
+        last = self._last_wedge_alarm_mono
+        if last is not None and (now - last) < 60.0:
+            return
+        self._last_wedge_alarm_mono = now
+        minutes = max(
+            int(min(view.http_silence_s, view.progress_silence_s) // 60), 1)
+        line = self._t("ft_conn_dlg_alarm").format(m=minutes)
+        try:
+            dlg.append_log(line)
+        except Exception:
+            pass
+
+    def _on_conn_click(self, _event=None) -> None:
+        mon = getattr(self.app, "health_monitor", None)
+        if mon is not None:
+            try:
+                mon.probe_soon()
+            except Exception:
+                pass
+
+    def _preflight_conn_confirm(self) -> bool:
+        """Soft gate before an export: warn on a degraded platform, never
+        hard-block (a stale/wrong red light must not lock the user out)."""
+        # Reset first: every early-return below must not inherit the flag
+        # from a previous run's GREEN* verdict.
+        self._conn_recent_unstable = False
+        if _conn_health is None:
+            return True
+        mon = getattr(self.app, "health_monitor", None)
+        if mon is None:
+            return True
+        try:
+            display = mon.display()
+        except Exception:
+            return True
+        self._conn_recent_unstable = bool(
+            display.state == _conn_health.STATE_GREEN and display.star)
+        if not self._conn_confirm_dialog(display):
+            return False
+        if display.state != _conn_health.STATE_RED:
+            # The confirm can sit open while the state flips RED — never
+            # let a stale snapshot bless a doomed export (PRD §6).
+            try:
+                fresh = mon.display()
+            except Exception:
+                return True
+            if fresh.state == _conn_health.STATE_RED:
+                return self._conn_confirm_dialog(fresh)
+        return True
+
+    def _conn_confirm_dialog(self, display) -> bool:
+        state = display.state
+        if state == _conn_health.STATE_GREEN:
+            return True
+        title = self._t("ft_conn_confirm_title")
+        if state == _conn_health.STATE_RED:
+            return bool(messagebox.askyesno(
+                title, self._t("ft_conn_confirm_red"),
+                default=messagebox.NO, icon="warning"))
+        if state == _conn_health.STATE_AMBER:
+            msg = self._t("ft_conn_confirm_amber").format(
+                latency=_conn_health.format_latency(display.latency_s))
+        else:
+            msg = self._t("ft_conn_confirm_gray")
+        return bool(messagebox.askyesno(title, msg))
 
     # ---- public lifecycle hook --------------------------------------
     def on_first_show(self) -> None:
@@ -1475,6 +1815,11 @@ class FullTranslationsTab:
         if not self._preflight_platform_auth():
             return
 
+        # Connection-status soft gate: warn (never block) when the platform
+        # currently looks congested — see Connection_Health_Indicator_PRD.md §6.
+        if not self._preflight_conn_confirm():
+            return
+
         # Time-of-day in the default name (not just the date) so two same-day
         # exports of different product/locale selections don't both default to
         # the same file and silently overwrite each other. This is an
@@ -1509,6 +1854,8 @@ class FullTranslationsTab:
         # exactly what is happening.
         self._progress_dlg = _ExportProgressDialog(
             self.parent, self._t, title=self._t("ft_progress_title"))
+        self._export_legacy_monitored = "legacy" in effective_sources
+        self._conn_export_started()
 
         t = threading.Thread(
             target=self._run_export,
@@ -1516,10 +1863,41 @@ class FullTranslationsTab:
                   legacy_filter, mr_filter, scan_filter, locales),
             daemon=True,
         )
+        self._export_thread = t
         t.start()
+
+    def _conn_export_started(self) -> None:
+        """Reset channel-B baselines for a fresh export run."""
+        now = time.monotonic()
+        self._export_started_mono = now
+        self._last_progress_mono = now
+        self._last_wedge_alarm_mono = None
+        # Pause the probe NOW, not on the next 5s tick — an in-flight probe
+        # cycle against an already-congested platform is exactly the extra
+        # traffic PRD §3.1 forbids during exports.
+        mon = getattr(self.app, "health_monitor", None)
+        if mon is not None:
+            try:
+                mon.set_paused(True)
+            except Exception:
+                pass
+        dlg = self._progress_dlg
+        if dlg is not None and self._conn_recent_unstable:
+            # GREEN* passed the gate silently; surface the caveat where the
+            # user will actually look during the run (PRD §6).
+            try:
+                dlg.append_log(self._t("ft_conn_dlg_note_unstable"))
+            except Exception:
+                pass
 
     def _dialog_log(self, line: str) -> None:
         """Thread-safe progress callback that fans out to dialog + console."""
+        try:
+            # Progress heartbeat: any callback proves the worker is alive —
+            # this covers the MR/Scan phases that carry no HTTP telemetry.
+            self._last_progress_mono = time.monotonic()
+        except Exception:
+            pass
         try:
             print(line)
         except Exception:
@@ -1640,8 +2018,16 @@ class FullTranslationsTab:
             text=f"⏳ {self._t('ft_status_collecting')}", foreground="#fbbf24")
         self._progress_dlg = _ExportProgressDialog(
             self.parent, self._t, title=self._t("ft_progress_title"))
+        # export_args = (out_path, mode, sources, ...) — keep the coverage
+        # flag accurate for the restarted run.
+        try:
+            self._export_legacy_monitored = "legacy" in (export_args[2] or [])
+        except Exception:
+            self._export_legacy_monitored = True
+        self._conn_export_started()
         t = threading.Thread(
             target=self._run_export, args=export_args, daemon=True)
+        self._export_thread = t
         t.start()
 
     def _on_export_done(self, summary, err) -> None:

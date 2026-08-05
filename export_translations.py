@@ -25,6 +25,13 @@ from datetime import date
 import terminology_highlight as th
 from tranzor_truncation import hydrate_truncated_entries
 
+# 可选的连接健康遥测（GUI「平台状态」pill 的通道 B 数据源）。守卫式导入：
+# CLI 直跑本模块时缺了它零行为变化，遥测永远不能成为导出的硬依赖。
+try:
+    import conn_health as _conn_health
+except Exception:  # pragma: no cover — telemetry must never block exports
+    _conn_health = None
+
 try:
     import requests
 except ImportError:
@@ -92,35 +99,101 @@ def _log_retry(reason, wait, attempt):
 
 
 def _api_get(url, **kwargs):
-    """带并发上限的 GET；重试连接错误和临时 HTTP 服务错误。"""
+    """带并发上限的 GET；重试连接错误和临时 HTTP 服务错误。
+
+    遥测埋点（``_conn_health.BUS``）全部以 try/except 包裹并在 finally 里
+    幂等清理——遥测失败绝不影响请求本身，且在途登记表在任何异常路径下都
+    不残留脏条目（wedge 侦测依赖它的准确性）。
+    """
     kwargs.setdefault("timeout", 30)
     for attempt in range(MAX_RETRIES):
+        gate_token = None
+        req_token = None
         try:
+            if _conn_health is not None:
+                try:
+                    gate_token = _conn_health.BUS.gate_wait_begin()
+                except Exception:
+                    gate_token = None
             # Only the actual socket request holds the permit. Backoff sleeps
             # happen outside the gate so another request can make progress.
             with _HTTP_GATE:
+                if gate_token is not None:
+                    try:
+                        _conn_health.BUS.gate_wait_acquired(gate_token)
+                    except Exception:
+                        pass
+                if _conn_health is not None:
+                    try:
+                        req_token = _conn_health.BUS.request_start(url)
+                    except Exception:
+                        req_token = None
                 resp = _session.get(url, **kwargs)
 
             status = getattr(resp, "status_code", None)
+            if req_token is not None:
+                try:
+                    # 任何 HTTP 响应（含 503）都证明服务器还活着。
+                    _conn_health.BUS.request_end(req_token, status=status)
+                except Exception:
+                    pass
             if (status not in _RETRYABLE_HTTP_STATUSES
                     or attempt >= MAX_RETRIES - 1):
                 return resp
 
             wait = _retry_wait(attempt, resp)
+            retry_after = None
+            try:
+                retry_after = (getattr(resp, "headers", None)
+                               or {}).get("Retry-After")
+            except Exception:
+                pass
             try:
                 resp.close()
             except Exception:
                 pass
             _log_retry(f"HTTP {status} 服务暂时不可用", wait, attempt)
+            if _conn_health is not None:
+                try:
+                    _conn_health.BUS.record_retry(
+                        f"HTTP {status}", wait, retry_after=retry_after)
+                except Exception:
+                    pass
             time.sleep(wait)
         except (requests.exceptions.Timeout,
                 requests.exceptions.ConnectionError) as e:
+            # 该请求的 socket 已经死了——立刻从在途登记表摘除，别让它在
+            # 退避 sleep 期间虚报 oldest_inflight（wedge 侦测靠它说真话）。
+            if _conn_health is not None and req_token is not None:
+                try:
+                    _conn_health.BUS.request_close(req_token)
+                except Exception:
+                    pass
+                req_token = None
             if attempt < MAX_RETRIES - 1:
                 wait = _retry_wait(attempt)
                 _log_retry("请求超时或连接异常", wait, attempt)
+                if _conn_health is not None:
+                    try:
+                        _conn_health.BUS.record_retry(
+                            type(e).__name__, wait)
+                    except Exception:
+                        pass
                 time.sleep(wait)
             else:
                 raise
+        finally:
+            if _conn_health is not None:
+                if gate_token is not None:
+                    try:
+                        _conn_health.BUS.gate_wait_close(gate_token)
+                    except Exception:
+                        pass
+                if req_token is not None:
+                    try:
+                        _conn_health.BUS.request_close(req_token)
+                    except Exception:
+                        pass
 
 
 class _ApiGetSession:
