@@ -11,6 +11,7 @@ import difflib
 import html as html_mod
 import json
 import os
+import random
 import re
 import sys
 import threading
@@ -105,6 +106,13 @@ try:
 except ImportError:
     requests = None
 
+# 可选的连接健康遥测（与 export_translations 同一根 BUS）。守卫式导入：
+# CLI 直跑本模块时缺了它零行为变化，遥测永远不能成为请求的硬依赖。
+try:
+    import conn_health as _conn_health
+except Exception:  # pragma: no cover — telemetry must never block requests
+    _conn_health = None
+
 # ---------------------------------------------------------------------------
 # 配置
 # ---------------------------------------------------------------------------
@@ -114,6 +122,29 @@ MR_API = f"{TRANZOR_URL}/api/v1"
 # HTTP session & retry config
 _session = requests.Session() if requests else None
 MAX_RETRIES = 3
+
+# 进程级并发闸门：本模块的调用方大量使用 4-8 worker 的线程池（甚至嵌套），
+# 而后端是单进程 uvicorn + 10 连接的 DB 池（2026-08-06 排查：/dashboard/
+# overview 一次要跑 ~9 条查询，ingress 在 upstream 饱和时直接回 502/503）。
+# 与 export_translations._HTTP_GATE 同样的结论：真实在途请求数必须在源头
+# 封顶。2 与 Legacy 侧的已验证稳定值保持一致；更强部署可用环境变量调高。
+MAX_HTTP_WORKERS = max(
+    1, int(os.getenv("TRANZOR_MR_HTTP_WORKERS", "2") or "2"))
+_HTTP_GATE = threading.BoundedSemaphore(MAX_HTTP_WORKERS)
+
+# 这些状态通常是网关容量保护、限流或服务临时过载（平台自己从不发这些码，
+# 它们来自 k8s ingress）。旧代码对 HTTP 5xx 一律不重试，raise_for_status
+# 直接把整条数据链炸掉——启动风暴期一个 503 就让轻量清单空盘。现在在单
+# 请求边界退避重试，与 export_translations 的已验证策略对齐。
+_RETRYABLE_HTTP_STATUSES = {429, 500, 502, 503, 504}
+
+# POST 非幂等：502/504 可能发生在服务端已执行之后，重试有二次提交风险。
+# 只重试"确定没被处理"的容量拒绝。
+_RETRYABLE_POST_STATUSES = {429, 503}
+
+# 采信的 Retry-After 上限：服务端（或中间代理）一个 "Retry-After: 600"
+# 不该把 worker 线程按住 10 分钟——超过封顶就当 30s 处理。
+_RETRY_AFTER_CAP_S = 30.0
 
 # 默认 (connect, read) 超时。
 #   connect=10s  —— "连不上"要快速失败（VPN 没开 / 后端宕），不要让用户
@@ -126,42 +157,150 @@ MAX_RETRIES = 3
 _DEFAULT_TIMEOUT = (10, 120)
 
 
-def _api_get(url, **kwargs):
-    """带重试的 GET 请求。
+def _retry_wait(attempt, response=None):
+    """Exponential backoff with jitter, honoring capped numeric Retry-After."""
+    wait = float(2 ** attempt)
+    try:
+        retry_after = (getattr(response, "headers", None) or {}).get(
+            "Retry-After")
+        if retry_after is not None:
+            wait = max(wait, min(float(retry_after), _RETRY_AFTER_CAP_S))
+    except (TypeError, ValueError):
+        pass
+    # Jitter prevents all worker threads from retrying the overloaded service
+    # on the same millisecond.
+    return wait + random.uniform(0.0, 0.5)
 
-    重试策略按异常类型区分（这是相对旧实现的关键改动）：
+
+def _log_retry(reason, wait, attempt):
+    # print 包 try —— 某些控制台是 GBK，emoji/特殊字符会抛
+    # UnicodeEncodeError，绝不能让"日志"反过来弄崩请求。
+    try:
+        print(f"    {reason}，{wait:.1f}s 后重试 "
+              f"({attempt + 1}/{MAX_RETRIES})...")
+    except Exception:
+        pass
+
+
+def _record_retry(reason, wait, retry_after=None):
+    if _conn_health is not None:
+        try:
+            _conn_health.BUS.record_retry(reason, wait, retry_after=retry_after)
+        except Exception:
+            pass
+
+
+def _api_get(url, **kwargs):
+    """带并发上限的 GET；重试连接错误和临时 HTTP 服务错误。
+
+    重试策略按异常类型区分：
 
     - **ReadTimeout**：后端就是慢，原样重试只会让用户多等 N 倍同样的
       时长，体验更差。直接抛出，让上层 UI 显示友好错误，用户可缩小
       日期范围 / 指定项目后再试。
     - **ConnectionError / ConnectTimeout / 其它 Timeout**：通常是网络
       抖动或瞬时拒连，指数退避重试有意义。
+    - **HTTP 429/500/502/503/504**：网关容量保护/临时过载，退避重试；
+      次数耗尽后原样返回响应，调用方的 raise_for_status 语义不变。
+
+    遥测埋点（``_conn_health.BUS``）全部以 try/except 包裹并在 finally 里
+    幂等清理——遥测失败绝不影响请求本身。
     """
     if _session is None:
         raise RuntimeError("requests package not available")
     kwargs.setdefault("timeout", _DEFAULT_TIMEOUT)
     for attempt in range(MAX_RETRIES):
+        gate_token = None
+        req_token = None
         try:
-            return _session.get(url, **kwargs)
+            if _conn_health is not None:
+                try:
+                    gate_token = _conn_health.BUS.gate_wait_begin()
+                except Exception:
+                    gate_token = None
+            # Only the actual socket request holds the permit. Backoff sleeps
+            # happen outside the gate so another request can make progress.
+            with _HTTP_GATE:
+                if gate_token is not None:
+                    try:
+                        _conn_health.BUS.gate_wait_acquired(gate_token)
+                    except Exception:
+                        pass
+                if _conn_health is not None:
+                    try:
+                        req_token = _conn_health.BUS.request_start(url)
+                    except Exception:
+                        req_token = None
+                resp = _session.get(url, **kwargs)
+
+            status = getattr(resp, "status_code", None)
+            if req_token is not None:
+                try:
+                    # 任何 HTTP 响应（含 503）都证明服务器还活着。
+                    _conn_health.BUS.request_end(req_token, status=status)
+                except Exception:
+                    pass
+            if (status not in _RETRYABLE_HTTP_STATUSES
+                    or attempt >= MAX_RETRIES - 1):
+                return resp
+
+            wait = _retry_wait(attempt, resp)
+            retry_after = None
+            try:
+                retry_after = (getattr(resp, "headers", None)
+                               or {}).get("Retry-After")
+            except Exception:
+                pass
+            try:
+                resp.close()
+            except Exception:
+                pass
+            _log_retry(f"HTTP {status} 服务暂时不可用", wait, attempt)
+            _record_retry(f"HTTP {status}", wait, retry_after=retry_after)
+            time.sleep(wait)
         except requests.exceptions.ReadTimeout:
-            # 慢端点——不重试，直接抛。
+            # 慢端点——不重试，直接抛（finally 会清理遥测登记）。
             raise
         except (requests.exceptions.ConnectionError,
                 requests.exceptions.Timeout) as e:
-            # 走到这里的是 ConnectionError / ConnectTimeout / 其它非
-            # ReadTimeout 的 Timeout —— 瞬时网络问题，退避后重试。
-            if attempt < MAX_RETRIES - 1:
-                wait = 2 ** attempt
-                # print 包 try —— 某些控制台是 GBK，emoji/特殊字符会
-                # 抛 UnicodeEncodeError，绝不能让"日志"反过来弄崩请求。
+            # 该请求的 socket 已经死了——立刻从在途登记表摘除，别让它在
+            # 退避 sleep 期间虚报 oldest_inflight。
+            if _conn_health is not None and req_token is not None:
                 try:
-                    print(f"    连接异常，{wait}s 后重试 "
-                          f"({attempt + 1}/{MAX_RETRIES})...")
+                    _conn_health.BUS.request_close(req_token)
                 except Exception:
                     pass
+                req_token = None
+            if attempt < MAX_RETRIES - 1:
+                wait = _retry_wait(attempt)
+                _log_retry("连接异常", wait, attempt)
+                _record_retry(type(e).__name__, wait)
                 time.sleep(wait)
             else:
                 raise
+        finally:
+            if _conn_health is not None:
+                if gate_token is not None:
+                    try:
+                        _conn_health.BUS.gate_wait_close(gate_token)
+                    except Exception:
+                        pass
+                if req_token is not None:
+                    try:
+                        _conn_health.BUS.request_close(req_token)
+                    except Exception:
+                        pass
+
+
+class _ApiGetSession:
+    """Minimal Session facade so full-text hydration shares retry + gating."""
+
+    @staticmethod
+    def get(url, **kwargs):
+        return _api_get(url, **kwargs)
+
+
+_api_get_session = _ApiGetSession()
 
 
 # ---------------------------------------------------------------------------
@@ -1201,12 +1340,13 @@ def fetch_all_legacy_translations_quality(task_id, page_size=200,
             task_id, page_size, target_language, label_types)
 
     # UNS 长文本任务的列表 entry 返回的是 500 字符 preview；导出/质检/同步
-    # 需要 DB 中的完整内容（见 closed bug TRAN-161）。
+    # 需要 DB 中的完整内容（见 closed bug TRAN-161）。经 _api_get facade
+    # 而非裸 _session：全文水合自带 6 并发，必须同样受闸门与 5xx 重试保护。
     hydrate_truncated_entries(
         all_items,
         api_base=LEGACY_API,
         task_id=task_id,
-        session=_session,
+        session=_api_get_session,
     )
     return all_items
 
@@ -2498,21 +2638,64 @@ def write_mr_excel(results_data, filename):
 # 9) 统一保存入口
 # ---------------------------------------------------------------------------
 def _api_post(url, **kwargs):
-    """带重试的 POST 请求"""
+    """带并发上限的 POST；重试连接错误与容量拒绝（429/503）。
+
+    POST 非幂等：500/502/504 可能发生在服务端已执行之后，不自动重试，
+    响应原样返回交调用方判断。
+    """
     if _session is None:
         raise RuntimeError("requests package not available")
     kwargs.setdefault("timeout", 60)
     for attempt in range(MAX_RETRIES):
+        req_token = None
         try:
-            return _session.post(url, **kwargs)
+            with _HTTP_GATE:
+                if _conn_health is not None:
+                    try:
+                        req_token = _conn_health.BUS.request_start(url)
+                    except Exception:
+                        req_token = None
+                resp = _session.post(url, **kwargs)
+
+            status = getattr(resp, "status_code", None)
+            if req_token is not None:
+                try:
+                    _conn_health.BUS.request_end(req_token, status=status)
+                except Exception:
+                    pass
+            if (status not in _RETRYABLE_POST_STATUSES
+                    or attempt >= MAX_RETRIES - 1):
+                return resp
+
+            wait = _retry_wait(attempt, resp)
+            try:
+                resp.close()
+            except Exception:
+                pass
+            _log_retry(f"HTTP {status} 服务暂时不可用", wait, attempt)
+            _record_retry(f"HTTP {status}", wait)
+            time.sleep(wait)
         except (requests.exceptions.Timeout,
                 requests.exceptions.ConnectionError) as e:
+            if _conn_health is not None and req_token is not None:
+                try:
+                    _conn_health.BUS.request_close(req_token)
+                except Exception:
+                    pass
+                req_token = None
             if attempt < MAX_RETRIES - 1:
-                wait = 2 ** attempt
-                print(f"    ⚠ 请求超时，{wait}s 后重试 ({attempt+1}/{MAX_RETRIES})...")
+                wait = _retry_wait(attempt)
+                _log_retry("请求超时或连接异常", wait, attempt)
+                _record_retry(type(e).__name__, wait)
                 time.sleep(wait)
             else:
                 raise
+        finally:
+            if _conn_health is not None and req_token is not None:
+                try:
+                    _conn_health.BUS.request_close(req_token)
+                except Exception:
+                    pass
 
 
 # ---------------------------------------------------------------------------

@@ -73,14 +73,19 @@ _HTTP_GATE = threading.BoundedSemaphore(MAX_HTTP_WORKERS)
 _RETRYABLE_HTTP_STATUSES = {429, 500, 502, 503, 504}
 
 
+# 采信的 Retry-After 上限：服务端（或中间代理）一个 "Retry-After: 600"
+# 不该把 worker 线程按住 10 分钟——超过封顶就当 30s 处理。
+_RETRY_AFTER_CAP_S = 30.0
+
+
 def _retry_wait(attempt, response=None):
-    """Exponential backoff with jitter, honoring numeric Retry-After."""
+    """Exponential backoff with jitter, honoring capped numeric Retry-After."""
     wait = float(2 ** attempt)
     try:
         retry_after = (getattr(response, "headers", None) or {}).get(
             "Retry-After")
         if retry_after is not None:
-            wait = max(wait, float(retry_after))
+            wait = max(wait, min(float(retry_after), _RETRY_AFTER_CAP_S))
     except (TypeError, ValueError):
         pass
     # Jitter prevents all worker threads from retrying the overloaded service

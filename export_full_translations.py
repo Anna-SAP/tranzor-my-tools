@@ -174,7 +174,13 @@ def parse_product(opus_id: str) -> str:
 
 def _log(cb: ProgressCb, msg: str) -> None:
     if cb is None:
-        print(msg)
+        # print 包 try —— 某些控制台/管道是 GBK，✓/⚠ 等字符会抛
+        # UnicodeEncodeError；日志绝不应该中断聚合（尤其是错误分支里
+        # 的日志——否则 502/503 软失败会升级成硬崩溃）。
+        try:
+            print(msg)
+        except Exception:
+            pass
     else:
         try:
             cb(msg)
@@ -495,6 +501,10 @@ class LightInventory:
     def __init__(self) -> None:
         self.products: List[dict] = []
         self.locales: List[str] = []
+        # source -> 错误摘要。某个数据源整体拉取失败（非 401）时记录在此，
+        # GUI 据此区分"平台上确实没有产品"与"清单拉取被 502/503 打断"——
+        # 后者曾伪装成 "0 products" 的绿色成功（2026-08-06 RCA）。
+        self.source_errors: Dict[str, str] = {}
         self._lock = threading.Lock()
 
     # ---- helpers ----------------------------------------------------
@@ -538,13 +548,16 @@ def _make_product_id(source: str, project_id: str) -> str:
 
 def _build_legacy_light(
     progress_cb: ProgressCb,
-) -> Tuple[List[dict], Set[str]]:
+) -> Tuple[List[dict], Set[str], Optional[str]]:
     """Discover legacy products+languages without fetching translation text.
 
     Strategy: enumerate the legacy task list once (paginated). Each task row
     already carries ``project_name`` and ``target_languages``, so we can
     aggregate the project → tasks/languages mapping without ever calling the
     per-task ``/translations`` endpoint.
+
+    Returns ``(products, locales, error)`` — ``error`` is a message when the
+    whole source failed to enumerate (non-401), else None.
     """
     _log(progress_cb, "  [Legacy] 拉取 Completed task 列表（仅 metadata）...")
     try:
@@ -553,7 +566,7 @@ def _build_legacy_light(
         if _is_auth_error(e):
             raise AuthRequiredError(e) from e
         _log(progress_cb, f"  ⚠ [Legacy] 获取 task 列表失败: {e}")
-        return [], set()
+        return [], set(), str(e)
 
     by_project: Dict[str, dict] = {}
     locales: Set[str] = set()
@@ -587,12 +600,12 @@ def _build_legacy_light(
         progress_cb,
         f"  ✓ [Legacy] {len(products)} 个项目 / {len(locales)} 种语言",
     )
-    return products, locales
+    return products, locales, None
 
 
 def _build_mr_light(
     progress_cb: ProgressCb,
-) -> Tuple[List[dict], Set[str]]:
+) -> Tuple[List[dict], Set[str], Optional[str]]:
     """Discover MR Pipeline products+languages via cheap dashboard endpoints.
 
     Two backend calls:
@@ -600,6 +613,9 @@ def _build_mr_light(
       2. /dashboard/overview?project_id=X — total_cases per project (parallel)
 
     Neither call ever loads translation text.
+
+    Returns ``(products, locales, error)``; per-project overview failures are
+    soft (entry_count left None) and do NOT mark the source as failed.
     """
     _log(progress_cb, "  [MR] 拉取 dashboard filters（distinct projects+languages）...")
     try:
@@ -608,7 +624,7 @@ def _build_mr_light(
         if _is_auth_error(e):
             raise AuthRequiredError(e) from e
         _log(progress_cb, f"  ⚠ [MR] 获取 filters 失败: {e}")
-        return [], set()
+        return [], set(), str(e)
 
     project_ids = [str(x) for x in filters.get("project_ids", []) if x]
     locales = set(str(x) for x in filters.get("languages", []) if x)
@@ -628,11 +644,11 @@ def _build_mr_light(
         )
 
     if not products:
-        return products, locales
+        return products, locales, None
 
     # Parallel hydrate of per-project entry_count via /dashboard/overview.
-    # Each call is a single SQL aggregate (count Translation rows for tasks
-    # under that project_id) — typically tens of milliseconds.
+    # ⚠ /dashboard/overview 是后端最重的聚合端点（~9 条查询/次），这里的
+    # 并发只决定排队深度——真实在途数由 export_mr_pipeline._HTTP_GATE 封顶。
     def _fetch_one(pid: str) -> Tuple[str, Optional[int]]:
         try:
             data = _mr.fetch_dashboard_overview(project_id=pid)
@@ -646,7 +662,7 @@ def _build_mr_light(
             _log(progress_cb, f"  ⚠ [MR] overview {pid} 失败: {e}")
             return pid, None
 
-    workers = min(8, len(products))
+    workers = min(4, len(products))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(_fetch_one, p["project_id"]): p for p in products}
         for f in as_completed(futures):
@@ -665,12 +681,12 @@ def _build_mr_light(
         progress_cb,
         f"  ✓ [MR] {len(products)} 个项目 / {len(locales)} 种语言",
     )
-    return products, locales
+    return products, locales, None
 
 
 def _build_scan_light(
     progress_cb: ProgressCb,
-) -> Tuple[List[dict], Set[str]]:
+) -> Tuple[List[dict], Set[str], Optional[str]]:
     """Discover Scan Tasks products (by scan.project_id) without pulling text.
 
     The scan list endpoint is already cheap (no translations joined), so we
@@ -678,6 +694,8 @@ def _build_scan_light(
     are left empty here — Scan tasks don't advertise their target_languages
     at the task level; the UI will simply offer the combined locale list
     from the other sources plus whatever the heavy fetch surfaces later.
+
+    Returns ``(products, locales, error)``.
     """
     _log(progress_cb, "  [Scan] 拉取 Missing Translation Scan task 列表...")
     tasks: List[dict] = []
@@ -695,7 +713,7 @@ def _build_scan_light(
         if _is_auth_error(e):
             raise AuthRequiredError(e) from e
         _log(progress_cb, f"  ⚠ [Scan] 获取 task 列表失败: {e}")
-        return [], set()
+        return [], set(), str(e)
 
     by_project: Dict[str, dict] = {}
     for t in tasks:
@@ -721,7 +739,7 @@ def _build_scan_light(
         progress_cb,
         f"  ✓ [Scan] {len(products)} 个项目",
     )
-    return products, set()
+    return products, set(), None
 
 
 def build_light_inventory(
@@ -744,11 +762,17 @@ def build_light_inventory(
     scan_locales: Set[str] = set()
 
     if SRC_LEGACY in sources:
-        legacy_products, legacy_locales = _build_legacy_light(progress_cb)
+        legacy_products, legacy_locales, err = _build_legacy_light(progress_cb)
+        if err:
+            inv.source_errors[SRC_LEGACY] = err
     if SRC_MR in sources:
-        mr_products, mr_locales = _build_mr_light(progress_cb)
+        mr_products, mr_locales, err = _build_mr_light(progress_cb)
+        if err:
+            inv.source_errors[SRC_MR] = err
     if SRC_SCAN in sources:
-        scan_products, scan_locales = _build_scan_light(progress_cb)
+        scan_products, scan_locales, err = _build_scan_light(progress_cb)
+        if err:
+            inv.source_errors[SRC_SCAN] = err
 
     # Sort: legacy block first (alphabetically), then MR block, then Scan
     legacy_products.sort(key=lambda p: p["project_id"].lower())
@@ -763,10 +787,19 @@ def build_light_inventory(
     inv.locales = sorted(
         legacy_locales | mr_locales | scan_locales | {SOURCE_LOCALE})
 
-    _log(
-        progress_cb,
-        f"\n  ✓ 轻量清单完成：{len(inv.products)} 个产品 · {len(inv.locales)} 种语言",
-    )
+    if inv.source_errors:
+        failed = ", ".join(sorted(inv.source_errors))
+        _log(
+            progress_cb,
+            f"\n  ⚠ 轻量清单不完整：{len(inv.products)} 个产品 · "
+            f"{len(inv.locales)} 种语言（失败数据源: {failed}）",
+        )
+    else:
+        _log(
+            progress_cb,
+            f"\n  ✓ 轻量清单完成：{len(inv.products)} 个产品 · "
+            f"{len(inv.locales)} 种语言",
+        )
     return inv
 
 
@@ -1593,7 +1626,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
 
     if not inv.data:
-        print("⚠ 未聚合到任何数据，跳过写 zip")
+        try:
+            print("⚠ 未聚合到任何数据，跳过写 zip")
+        except Exception:  # piped cp936 stdout cannot encode the glyph
+            pass
         return 1
 
     build_ap_zip(
