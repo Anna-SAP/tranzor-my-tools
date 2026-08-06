@@ -59,6 +59,24 @@ except Exception:  # pragma: no cover — defensive
 # 零 I/O，保证导出中的 wedge 告警最多迟到 5s。
 _CONN_TICK_MS = 5000
 
+# 轻量清单"全源失败"后的自动重试节奏（秒）。502/503 是网关容量保护，
+# 通常几十秒内自愈；单请求层面的 3 次退避（~3-7s 窗口）骑不过一个拥塞
+# 周期，所以在清单层面再给一轮更长的等待。次数耗尽后停手，交还给用户。
+_INV_RETRY_DELAYS_S = (15, 30, 60)
+
+
+def _compact_error(err) -> str:
+    """压缩 requests 风格错误串用于状态栏：砍掉冗长 URL、限长。
+
+    '503 Server Error: Service Temporarily Unavailable for url: http://…'
+    → '503 Server Error: Service Temporarily Unavailable'
+    """
+    s = str(err or "").strip()
+    if not s:
+        return ""
+    s = s.splitlines()[0].split(" for url", 1)[0]
+    return s if len(s) <= 90 else s[:87] + "…"
+
 
 # Unicode check glyphs used by the products / languages multi-select trees.
 CHECK_OFF = "\u2610"  # ☐
@@ -174,6 +192,9 @@ STRINGS = {
         "ft_status_idle":         "Loading inventory…",
         "ft_status_loading":      "Loading product & language inventory…",
         "ft_status_loaded":       "Inventory ready: {p} products · {l} languages",
+        "ft_status_loaded_partial": "⚠ Inventory ready: {p} products · {l} languages — source(s) failed: {srcs} ({err})",
+        "ft_status_inv_retry":    "⚠ Platform temporarily unavailable ({err}) — retrying in {s}s ({n}/{max})",
+        "ft_status_inv_failed":   "❌ Inventory load failed ({err}) — click 'Refresh Inventory' to retry",
         "ft_status_collecting":   "Fetching translations for selection…",
         "ft_status_exporting":    "Writing zip…",
         "ft_status_writing_json": "Writing merged JSON…",
@@ -255,6 +276,9 @@ STRINGS = {
         "ft_status_idle":         "正在加载清单…",
         "ft_status_loading":      "正在加载产品 / 语言清单…",
         "ft_status_loaded":       "清单就绪：{p} 个产品 · {l} 种语言",
+        "ft_status_loaded_partial": "⚠ 清单就绪：{p} 个产品 · {l} 种语言——数据源失败：{srcs}（{err}）",
+        "ft_status_inv_retry":    "⚠ 平台暂时不可用（{err}）——{s}s 后自动重试（{n}/{max}）",
+        "ft_status_inv_failed":   "❌ 清单加载失败（{err}）——请点击「刷新清单」重试",
         "ft_status_collecting":   "正在按选择拉取翻译数据…",
         "ft_status_exporting":    "正在写 zip…",
         "ft_status_writing_json": "正在写合并 JSON…",
@@ -728,6 +752,9 @@ class FullTranslationsTab:
         self._inv_loaded = False      # set True after first successful load
         self._busy = False
         self._first_show_pending = True
+        # 全源失败后的自动重试状态（见 _schedule_inventory_retry）。
+        self._inv_retry_attempt = 0
+        self._inv_retry_after_id = None
         # Full ordered list of product iids ever inserted into prod_tree.
         # Survives detach() so the filter can re-attach matching items, and
         # so _selected_product_ids() can read check state of items hidden
@@ -1660,14 +1687,21 @@ class FullTranslationsTab:
         except Exception:
             return False
 
-    def _on_refresh(self) -> None:
+    def _on_refresh(self, auto: bool = False) -> None:
         """(Re)load the lightweight Product × Language inventory.
 
         Critically: this does NOT touch any /translations endpoint. It only
         hits cheap distinct/aggregate APIs to fill the selector widgets.
+
+        ``auto=True`` 表示这是 502/503 全源失败后的自动重试——保留重试
+        计数；手动刷新（按钮 / 首次显示 / 登录后重试）则重置计数并取消
+        已排定的自动重试。
         """
         if _exp is None or self._busy:
             return
+        if not auto:
+            self._cancel_inventory_retry()
+            self._inv_retry_attempt = 0
         if not self._preflight_platform_auth():
             return
         sources = self._selected_sources()
@@ -1677,18 +1711,19 @@ class FullTranslationsTab:
         self.lbl_status.configure(
             text=f"⏳ {self._t('ft_status_loading')}", foreground="#fbbf24")
         t = threading.Thread(
-            target=self._run_light_refresh, args=(sources,), daemon=True)
+            target=self._run_light_refresh, args=(sources, auto), daemon=True)
         t.start()
 
-    def _run_light_refresh(self, sources) -> None:
+    def _run_light_refresh(self, sources, auto: bool = False) -> None:
         try:
             inv = _exp.build_light_inventory(
                 sources=sources, progress_cb=self._log)
-            self.parent.after(0, self._on_light_refresh_done, inv, None)
+            self.parent.after(0, self._on_light_refresh_done, inv, None, auto)
         except Exception as e:
-            self.parent.after(0, self._on_light_refresh_done, None, str(e))
+            self.parent.after(
+                0, self._on_light_refresh_done, None, str(e), auto)
 
-    def _on_light_refresh_done(self, inv, err) -> None:
+    def _on_light_refresh_done(self, inv, err, auto: bool = False) -> None:
         self._set_busy(False)
         if err:
             # A 401 means the token died between preflight and fetch (rare,
@@ -1701,11 +1736,27 @@ class FullTranslationsTab:
             if is_auth:
                 self.lbl_status.configure(
                     text=self._t("ft_err_auth"), foreground="#e94560")
-                if self._prompt_sign_in():
+                # 自动重试路径绝不弹模态登录框（has_valid_token 是 fail-open
+                # 的本地检查，服务端撤销的 token 会走到这里）——红字停手，
+                # 用户点刷新时才走正常登录流程。
+                if not auto and self._prompt_sign_in():
                     self._on_refresh()
                 return
             self.lbl_status.configure(
                 text=f"❌ {err}", foreground="#e94560")
+            return
+
+        errs = getattr(inv, "source_errors", None) or {}
+        if errs and not inv.products:
+            # 所有被选数据源都整体失败（典型：502/503 风暴）。这不是
+            # "平台上没有产品"，绝不能以绿色 "0 products" 收场（2026-08-06
+            # RCA：空清单以"已加载"身份留存整个会话，面板等同瘫痪）。
+            # 上一份仍然有效的清单/树/勾选原样保留；红字说明原因并安排
+            # 自动重试。首次加载时 _inv_loaded 保持 False，_do_export
+            # 继续拦截。
+            srcs = "/".join(sorted(errs))
+            err_summary = f"{srcs}: {_compact_error(errs[sorted(errs)[0]])}"
+            self._schedule_inventory_retry(err_summary)
             return
 
         self._light_inv = inv
@@ -1735,10 +1786,69 @@ class FullTranslationsTab:
             self.loc_tree.insert(
                 "", "end", iid=loc, values=(CHECK_ON, loc))
 
+        self._inv_retry_attempt = 0
+        self._cancel_inventory_retry()
+        if errs:
+            # 部分数据源失败——清单可用但不完整，黄字点名失败源。
+            srcs = "/".join(sorted(errs))
+            self.lbl_status.configure(
+                text=self._t("ft_status_loaded_partial").format(
+                    p=len(inv.products), l=len(inv.locales), srcs=srcs,
+                    err=_compact_error(errs[sorted(errs)[0]])),
+                foreground="#fbbf24")
+            return
+
         self.lbl_status.configure(
             text=self._t("ft_status_loaded").format(
                 p=len(inv.products), l=len(inv.locales)),
             foreground="#2ecc71")
+
+    # ---- inventory auto-retry (502/503 total failure) ----------------
+    def _cancel_inventory_retry(self) -> None:
+        if self._inv_retry_after_id is not None:
+            try:
+                self.parent.after_cancel(self._inv_retry_after_id)
+            except Exception:
+                pass
+            self._inv_retry_after_id = None
+
+    def _schedule_inventory_retry(self, err_summary: str) -> None:
+        """全源失败后按 _INV_RETRY_DELAYS_S 节奏自动重试；耗尽后停手。"""
+        self._cancel_inventory_retry()
+        if self._inv_retry_attempt >= len(_INV_RETRY_DELAYS_S):
+            self.lbl_status.configure(
+                text=self._t("ft_status_inv_failed").format(err=err_summary),
+                foreground="#e94560")
+            return
+        delay = _INV_RETRY_DELAYS_S[self._inv_retry_attempt]
+        self._inv_retry_attempt += 1
+        self.lbl_status.configure(
+            text=self._t("ft_status_inv_retry").format(
+                err=err_summary, s=delay,
+                n=self._inv_retry_attempt, max=len(_INV_RETRY_DELAYS_S)),
+            foreground="#e94560")
+        self._inv_retry_after_id = self.parent.after(
+            int(delay * 1000), self._auto_retry_refresh)
+
+    def _auto_retry_refresh(self) -> None:
+        self._inv_retry_after_id = None
+        if self._busy:
+            # 面板正忙（例如用户已手动触发刷新/导出）——顺延一个最短
+            # 周期再看，不消耗重试次数。
+            self._inv_retry_after_id = self.parent.after(
+                int(_INV_RETRY_DELAYS_S[0] * 1000), self._auto_retry_refresh)
+            return
+        # 非交互式令牌检查：自动重试绝不能无端弹出模态登录框。令牌已
+        # 过期就停手，红字交还给用户（点刷新会走正常登录流程）。
+        try:
+            if (_tranzor_auth is not None
+                    and not _tranzor_auth.has_valid_token()):
+                self.lbl_status.configure(
+                    text=self._t("ft_err_auth"), foreground="#e94560")
+                return
+        except Exception:
+            pass
+        self._on_refresh(auto=True)
 
     # ---- selection helpers ------------------------------------------
     def _selected_product_ids(self):

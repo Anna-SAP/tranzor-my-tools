@@ -10,13 +10,31 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import requests
+import conn_health as ch
 import export_mr_pipeline as mp
+
+_log_tmp = None
+
+
+def setUpModule():
+    # mp._api_get 现在接入 conn_health 遥测；重试事件会落取证日志。
+    # 测试绝不写用户真实的 ~/.tranzor_exporter/。
+    global _log_tmp
+    _log_tmp = tempfile.TemporaryDirectory()
+    ch.LOG_PATH = Path(_log_tmp.name) / "conn_health.log"
+
+
+def tearDownModule():
+    ch.BUS.reset()
+    _log_tmp.cleanup()
 
 
 class DefaultTimeoutTests(unittest.TestCase):

@@ -303,6 +303,31 @@ class TestApiGetResilience(unittest.TestCase):
         self.assertTrue(responses[0].closed)
         self.assertTrue(responses[1].closed)
 
+    def test_retry_after_is_capped(self):
+        # 服务端一个 "Retry-After: 600" 不该把 worker 线程按住 10 分钟。
+        responses = [
+            _FakeResp({}, status_code=503, headers={"Retry-After": "600"}),
+            _FakeResp({"ok": True}),
+        ]
+
+        class _Session:
+            def __init__(self):
+                self.calls = 0
+
+            def get(self, *_args, **_kwargs):
+                response = responses[self.calls]
+                self.calls += 1
+                return response
+
+        et._session = _Session()
+        et._HTTP_GATE = threading.BoundedSemaphore(1)
+        et.MAX_RETRIES = 3
+        with mock.patch.object(et.random, "uniform", return_value=0.0), \
+                mock.patch.object(et.time, "sleep") as slept:
+            et._api_get("http://example/translations")
+        self.assertEqual([c.args[0] for c in slept.call_args_list],
+                         [et._RETRY_AFTER_CAP_S])
+
     def test_non_retryable_401_returns_immediately(self):
         class _Session:
             def __init__(self):
