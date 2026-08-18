@@ -59,6 +59,8 @@ def _bare_tab():
     pure handler logic. ``_load_tasks`` is stubbed so calling a handler
     records the call instead of hitting the network / Tk tree."""
     tab = gui_tabs.MRPipelineTab.__new__(gui_tabs.MRPipelineTab)
+    tab.env_key = "prod"
+    tab._post_edit_kind = "mr"
     tab._loaded = 0
 
     def _fake_load():
@@ -89,6 +91,19 @@ class InvalidatePostEditCacheTests(unittest.TestCase):
         self.assertIsNone(c.get("mr", ("web/cic", 1111)))
         self.assertTrue(c.get("legacy", "t-1"))
         self.assertTrue(c.get("scan", "s-1"))
+
+    def test_stage_kind_does_not_drop_prod_mr_cache(self):
+        c = tpe.get_cache()
+        c.set("mr", ("common/clw", 2899), False)
+        c.set("mr_stage", ("common/clw", 2899), False)
+
+        tab = _bare_tab()
+        tab.env_key = "stage"
+        tab._post_edit_kind = "mr_stage"
+        tab._invalidate_post_edit_cache()
+
+        self.assertEqual(c.get("mr", ("common/clw", 2899)), False)
+        self.assertIsNone(c.get("mr_stage", ("common/clw", 2899)))
 
     def test_invalidate_is_best_effort(self):
         # Cache housekeeping must never raise out of the handler. Simulate a

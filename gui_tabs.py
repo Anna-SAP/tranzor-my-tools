@@ -80,9 +80,16 @@ class MRPipelineTab:
     # Columns whose cells sort numerically; everything else sorts as text.
     _MR_NUMERIC_COLS = frozenset({"idx", "mr", "src_strings", "avg_score"})
 
-    def __init__(self, parent, app):
+    def __init__(self, parent, app, *, base_url=None, env_key="prod"):
         self.app = app
         self.parent = parent
+        # None / omitted → production. Stage tab passes TRANZOR_STAGE_URL.
+        self.base_url = (base_url or mr_api.TRANZOR_URL).rstrip("/")
+        self.env_key = env_key or "prod"
+        # Isolate the ✏️ cache so a Stage MR# cannot pick up a Prod answer
+        # (or vice versa) — same project+iid routinely exists in both envs.
+        self._post_edit_kind = (
+            "mr" if self.env_key == "prod" else f"mr_{self.env_key}")
         self.mr_page = 0
         self.mr_page_size = 25
         # Extra pages appended below the anchor page via "Load More".
@@ -135,6 +142,13 @@ class MRPipelineTab:
     def _t(self, key):
         return self.app._t(key)
 
+    def _api_kw(self):
+        """Pass ``base_url`` only for non-prod so existing test fakes
+        (which don't accept the kwarg) keep working on the prod tab."""
+        if self.base_url.rstrip("/") != mr_api.TRANZOR_URL.rstrip("/"):
+            return {"base_url": self.base_url}
+        return {}
+
     def _build(self, parent):
         content = ttk.Frame(parent, style="App.TFrame")
         content.pack(fill="both", expand=True, padx=16, pady=8)
@@ -152,6 +166,18 @@ class MRPipelineTab:
         filt.configure(borderwidth=1, relief="solid")
         fi = ttk.Frame(filt, style="Card.TFrame")
         fi.pack(fill="x", padx=12, pady=10)
+
+        # Stage instance: a compact env chip so the two otherwise-identical
+        # panels can't be mistaken for each other.
+        if self.env_key == "stage":
+            self.lbl_mr_env_badge = tk.Label(
+                fi, text="STAGE",
+                font=(FONT_FAMILY, 8, "bold"),
+                bg="#854d0e", fg="#fde68a",
+                padx=6, pady=1)
+            self.lbl_mr_env_badge.pack(anchor="e", pady=(0, 6))
+        else:
+            self.lbl_mr_env_badge = None
 
         # Row 1: Project + Release + Status
         r1 = ttk.Frame(fi, style="Card.TFrame")
@@ -547,7 +573,10 @@ class MRPipelineTab:
         if self.adv_filter is not None:
             self.adv_filter.refresh_text()
 
-        self.lbl_mr_sidebar_title.configure(text=t("mr_sidebar_title"))
+        sidebar_key = (
+            "mr_sidebar_title_stage" if self.env_key == "stage"
+            else "mr_sidebar_title")
+        self.lbl_mr_sidebar_title.configure(text=t(sidebar_key))
         for key in ("total", "completed", "failed", "avg_score"):
             self.mr_stat_labels[key][0].configure(text=t(f"mr_stat_{key}"))
         self.btn_mr_sidebar_refresh.configure(text=t("summary_refresh"))
@@ -574,7 +603,7 @@ class MRPipelineTab:
 
     def _fetch_filters(self):
         try:
-            data = mr_api.fetch_mr_filters()
+            data = mr_api.fetch_mr_filters(**self._api_kw())
             self.parent.after(0, self._on_filters_loaded, data)
         except Exception:
             pass
@@ -608,7 +637,8 @@ class MRPipelineTab:
         pages stays free. Best-effort: never block the search on housekeeping.
         """
         try:
-            _tpe.get_cache().clear_kind("mr")
+            _tpe.get_cache().clear_kind(
+                getattr(self, "_post_edit_kind", "mr"))
         except Exception:
             pass
 
@@ -739,7 +769,7 @@ class MRPipelineTab:
             t["_src_string_count"] = 0
             return
         try:
-            results = mr_api.fetch_mr_results(tid)
+            results = mr_api.fetch_mr_results(tid, **self._api_kw())
             trs = results.get("translations", [])
             t["_translations_count"] = len(trs)
             src = mr_api.distinct_source_string_count(trs)
@@ -786,7 +816,8 @@ class MRPipelineTab:
             # filters so results stay consistent with Project/Release/Status/MR#.
             if task_id_filter:
                 try:
-                    detail = mr_api.fetch_mr_task_detail(task_id_filter)
+                    detail = mr_api.fetch_mr_task_detail(
+                        task_id_filter, **self._api_kw())
                 except Exception:
                     detail = None
                 collected = []
@@ -844,7 +875,8 @@ class MRPipelineTab:
                 # Simple path: no client-side filtering needed
                 total, tasks = mr_api.fetch_mr_tasks(
                     project_id=proj, release=rel, status=status,
-                    limit=self.mr_page_size, offset=base_offset)
+                    limit=self.mr_page_size, offset=base_offset,
+                    **self._api_kw())
                 self.parent.after(0, self._on_tasks_loaded,
                                   total, tasks, total, append, base_offset)
             else:
@@ -863,7 +895,8 @@ class MRPipelineTab:
                 while True:
                     api_total, batch = mr_api.fetch_mr_tasks(
                         project_id=proj, release=rel, status=status,
-                        limit=batch_size, offset=offset)
+                        limit=batch_size, offset=offset,
+                        **self._api_kw())
                     if not batch:
                         break
                     total_scanned += len(batch)
@@ -991,7 +1024,7 @@ class MRPipelineTab:
                 (raw_project, mr_iid) if (raw_project and mr_iid is not None)
                 else None
             )
-            cached = (_tpe.get_cache().get("mr", cache_key)
+            cached = (_tpe.get_cache().get(self._post_edit_kind, cache_key)
                       if cache_key is not None else None)
             display_project = (
                 _tpe.POST_EDIT_PREFIX + raw_project if cached else raw_project
@@ -1070,7 +1103,7 @@ class MRPipelineTab:
                 if src_count is None:
                     src_prefetch_ids.append(task_id)
                 if cache_key is not None and cached is None:
-                    prefetch_items.append(("mr", cache_key))
+                    prefetch_items.append((self._post_edit_kind, cache_key))
                     # Stash mr_iid → iid so the callback (which carries
                     # mr_iid in the key tuple) can find this row again.
                     self._mr_row_iid_by_task[f"mr:{mr_iid}"] = iid
@@ -1297,7 +1330,8 @@ class MRPipelineTab:
                 with self._src_count_lock:
                     count = self._src_count_cache.get(tid)
                 if count is None:
-                    count = mr_api.count_mr_source_strings(tid)
+                    count = mr_api.count_mr_source_strings(
+                        tid, **self._api_kw())
                     with self._src_count_lock:
                         self._src_count_cache[tid] = count
                 try:
@@ -1639,7 +1673,7 @@ class MRPipelineTab:
 
     @staticmethod
     def _build_export_filename(ext, *, mr_iid="", id_tag="", type_tag="",
-                               created="", export_date=""):
+                               created="", export_date="", env_tag=""):
         """Compose the MR Pipeline export filename (HTML / Excel / JSON).
 
         The date segment must identify *which* translation run the file
@@ -1660,6 +1694,8 @@ class MRPipelineTab:
         date_tag = sanitize_for_filename(created) or sanitize_for_filename(export_date)
         mr_tag = sanitize_for_filename(f"MR{mr_iid}") if mr_iid else ""
         parts = ["mr_pipeline"]
+        if env_tag:
+            parts.append(sanitize_for_filename(env_tag))
         if mr_tag:
             parts.append(mr_tag)
         parts.extend(seg for seg in (id_tag, type_tag, date_tag) if seg)
@@ -1730,13 +1766,13 @@ class MRPipelineTab:
                 if not task_id:
                     raise ValueError("请先选择一个翻译任务以导出变更")
                 # 自动关联 MR，汇总该 MR 全部 task 的翻译变更
-                changes = mr_api.detect_mr_changes(task_id)
+                changes = mr_api.detect_mr_changes(task_id, **self._api_kw())
                 results = {"translations": changes, "summary": {}}
                 id_tag = task_id[:8]
                 type_tag = "changes"
             else:
                 if task_id:
-                    results = mr_api.fetch_mr_results(task_id)
+                    results = mr_api.fetch_mr_results(task_id, **self._api_kw())
                     # fetch_mr_results doesn't include MR coordinates
                     # (project_id, mr_id) on the translations it returns,
                     # so the HTML report can't build the right
@@ -1745,7 +1781,8 @@ class MRPipelineTab:
                     # without this, the report falls back to the (wrong
                     # for MR) /static/legacy/tasks/<id> route.
                     try:
-                        detail = mr_api.fetch_mr_task_detail(task_id)
+                        detail = mr_api.fetch_mr_task_detail(
+                            task_id, **self._api_kw())
                         if detail and results.get("translations"):
                             mr_api.enrich_translations_with_task(
                                 results["translations"], detail)
@@ -1762,7 +1799,8 @@ class MRPipelineTab:
                     results = mr_api.collect_all_mr_results(
                         project_id=bf.get("project_id"),
                         release=bf.get("release"),
-                        status=bf.get("status") or "completed")
+                        status=bf.get("status") or "completed",
+                        **self._api_kw())
                     proj_tag = sanitize_for_filename(bf.get("project_id") or "")
                     id_tag = f"all_{proj_tag}" if proj_tag else "all_tasks"
                 type_tag = "all"
@@ -1776,11 +1814,13 @@ class MRPipelineTab:
             # Created time and falls back to today's date.
             filename = self._build_export_filename(
                 ext, mr_iid=mr_iid, id_tag=id_tag, type_tag=type_tag,
-                created=mr_created, export_date=today)
+                created=mr_created, export_date=today,
+                env_tag="" if self.env_key == "prod" else self.env_key)
             script_dir = os.path.dirname(os.path.abspath(__file__))
             filepath = os.path.join(script_dir, filename)
             created_note = f"created {mr_created}, " if mr_created else ""
-            label = (f"MR Pipeline {id_tag} — {type_tag} "
+            env_label = "" if self.env_key == "prod" else f" ({self.env_key})"
+            label = (f"MR Pipeline{env_label} {id_tag} — {type_tag} "
                      f"({created_note}exported {today})")
             # Route the local bridge port + token into the report so its
             # Send-to-Tranzor button can reach the desktop GUI's HTTP bridge.
@@ -1796,7 +1836,8 @@ class MRPipelineTab:
             saved = mr_api.save_mr_file(
                 results, filepath, label, fmt, bridge_info=bridge_info,
                 fill_missing=(export_type != "changes"),
-                advanced_filter_state=adv_state) or filepath
+                advanced_filter_state=adv_state,
+                tranzor_url=self.base_url) or filepath
             basename = os.path.basename(saved)
             self.parent.after(0, lambda b=basename: self.lbl_mr_status_bar.configure(
                 text=self._t("status_saved").format(filename=b)))
@@ -1834,7 +1875,8 @@ class MRPipelineTab:
         try:
             proj = self.mr_project_var.get() or None
             rel = self.mr_release_var.get() or None
-            data = mr_api.fetch_dashboard_overview(project_id=proj, release=rel)
+            data = mr_api.fetch_dashboard_overview(
+                project_id=proj, release=rel, **self._api_kw())
             self.parent.after(0, self._on_overview_loaded, data)
         except Exception as e:
             self.parent.after(0, self._on_overview_error, str(e))
@@ -1865,7 +1907,7 @@ class MRPipelineTab:
 
     def _fetch_recent_projects(self):
         try:
-            recent = mr_api.fetch_recently_added_projects()
+            recent = mr_api.fetch_recently_added_projects(**self._api_kw())
         except Exception:
             recent = []
         self.parent.after(0, self._on_recent_projects_loaded, recent)
