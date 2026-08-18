@@ -170,12 +170,15 @@ def _shared_gitlab_client():
     return _shared_client
 
 
-def _fetch_mr(key) -> bool:
+def _fetch_mr(key, base_url=None) -> bool:
     """Detect whether an MR contains a human post-edit.
 
     ``key`` is ``(project_id, mr_iid)`` so we can drive the BATCH_FIX
     branch lookup (project + source_branch resolved from the MR detail)
     in addition to the single-row dashboard-cases check.
+
+    ``base_url`` selects the platform environment (Stage vs production).
+    GitLab lookup is environment-agnostic; dashboard-cases is not.
 
     Backward-compat: if ``key`` is a bare ``mr_iid``, we fall back to the
     dashboard-cases-only path (old behaviour from PR #72) so any caller
@@ -215,8 +218,10 @@ def _fetch_mr(key) -> bool:
 
     # Path 2: single-row UI fix via dashboard cases.
     import export_mr_pipeline as _mp
+    extra = {"base_url": base_url} if base_url else {}
     try:
-        data = _mp.fetch_dashboard_cases(mr_id=int(mr_iid), mr_limit=1) or {}
+        data = _mp.fetch_dashboard_cases(
+            mr_id=int(mr_iid), mr_limit=1, **extra) or {}
     except Exception:
         return False
     mrs = data.get("mrs") or []
@@ -225,10 +230,17 @@ def _fetch_mr(key) -> bool:
     return has_post_edit_mr_from_cases(mrs[0].get("cases") or [])
 
 
+def _fetch_mr_stage(key) -> bool:
+    """Same as :func:`_fetch_mr` but against the Stage platform host."""
+    import export_mr_pipeline as _mp
+    return _fetch_mr(key, base_url=_mp.TRANZOR_STAGE_URL)
+
+
 _FETCHERS: dict[str, Callable[[Any], bool]] = {
-    "legacy": _fetch_legacy,
-    "scan":   _fetch_scan,
-    "mr":     _fetch_mr,
+    "legacy":    _fetch_legacy,
+    "scan":      _fetch_scan,
+    "mr":        _fetch_mr,
+    "mr_stage":  _fetch_mr_stage,
 }
 
 

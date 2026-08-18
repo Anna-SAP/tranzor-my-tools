@@ -442,12 +442,23 @@ except Exception as _so_e:  # pragma: no cover
 else:
     _so_import_error = None
 
+# 🧪 MR Pipeline (Stage) — same panel as the core MR Pipeline tab, pointed
+# at the Stage platform. Pure-additive, appended last.
+try:
+    import gui_tab_mr_pipeline_stage as _mr_stage_tab_mod
+except Exception as _mr_stage_e:  # pragma: no cover
+    _mr_stage_tab_mod = None
+    _mr_stage_import_error = _mr_stage_e
+else:
+    _mr_stage_import_error = None
+
 _boot_mark("optional_tabs_imported")
 
 # ---------------------------------------------------------------------------
 # Tranzor API config (reuse from export_changes)
 # ---------------------------------------------------------------------------
 TRANZOR_URL = "http://tranzor-platform.int.rclabenv.com"
+TRANZOR_STAGE_URL = "http://tranzor-platform-stage.int.rclabenv.com"
 API = f"{TRANZOR_URL}/api/v1/legacy"
 
 # The platform now requires a Bearer-JWT Authorization header on its API
@@ -457,7 +468,10 @@ API = f"{TRANZOR_URL}/api/v1/legacy"
 # Must run before the first API call (the startup summary load below).
 try:
     from urllib.parse import urlparse as _urlparse
-    tranzor_auth.configure_hosts(_urlparse(TRANZOR_URL).hostname or "")
+    tranzor_auth.configure_hosts(
+        _urlparse(TRANZOR_URL).hostname or "",
+        _urlparse(TRANZOR_STAGE_URL).hostname or "",
+    )
     tranzor_auth.install()
     tranzor_auth.load()
 except Exception as _auth_init_err:  # pragma: no cover - defensive
@@ -551,6 +565,7 @@ STRINGS = {
         # Tab names
         "tab_file_translation": "📁 File Translation",
         "tab_mr_pipeline":     "🔀 MR Pipeline",
+        "tab_mr_pipeline_stage": "🧪 MR Pipeline (Stage)",
         "tab_quality_overview": "📊 Quality Overview",
         # MR Pipeline tab
         "mr_project":       "Project",
@@ -564,6 +579,7 @@ STRINGS = {
         "mr_export":        "📦 Export Selected",
         "mr_load_more":     "⬇ Load More",
         "mr_sidebar_title": "📊 MR Pipeline Stats",
+        "mr_sidebar_title_stage": "📊 Stage MR Pipeline Stats",
         "mr_stat_total":    "Total Tasks",
         "mr_stat_completed":"Completed",
         "mr_stat_failed":   "Failed",
@@ -716,6 +732,7 @@ STRINGS = {
         # Tab names
         "tab_file_translation": "📁 文件翻译",
         "tab_mr_pipeline":     "🔀 MR Pipeline",
+        "tab_mr_pipeline_stage": "🧪 MR Pipeline (Stage)",
         "tab_quality_overview": "📊 质量概览",
         # MR Pipeline tab
         "mr_project":       "项目",
@@ -729,6 +746,7 @@ STRINGS = {
         "mr_export":        "📦 导出选中",
         "mr_load_more":     "⬇ 加载更多",
         "mr_sidebar_title": "📊 MR Pipeline 统计",
+        "mr_sidebar_title_stage": "📊 Stage MR Pipeline 统计",
         "mr_stat_total":    "总任务数",
         "mr_stat_completed":"已完成",
         "mr_stat_failed":   "失败",
@@ -884,6 +902,14 @@ if _ptc_tab_mod is not None:
 if _so_tab_mod is not None:
     try:
         for _lang_code, _extra in _so_tab_mod.STRINGS.items():
+            STRINGS.setdefault(_lang_code, {}).update(_extra)
+    except Exception:
+        pass
+
+# Merge in strings from the optional Stage MR Pipeline tab.
+if _mr_stage_tab_mod is not None:
+    try:
+        for _lang_code, _extra in _mr_stage_tab_mod.STRINGS.items():
             STRINGS.setdefault(_lang_code, {}).update(_extra)
     except Exception:
         pass
@@ -1684,6 +1710,24 @@ class ExportApp:
                 self.so_tab = None
         _boot_mark("tab_same_origin")
 
+        # --- Tab: 🧪 MR Pipeline (Stage) (optional, pure additive) ---
+        # Same UI as the core MR Pipeline tab, pointed at Stage. Appended
+        # last so existing tab indices (MR=1, QA=2, …) do not shift.
+        self.mr_stage_tab = None
+        self._mr_stage_tab_index = None
+        self._mr_stage_tab_initialized = False
+        if _mr_stage_tab_mod is not None:
+            try:
+                tab_mr_stage = ttk.Frame(self.notebook, style="App.TFrame")
+                self.notebook.add(tab_mr_stage, text="")
+                self.mr_stage_tab = _mr_stage_tab_mod.MrPipelineStageTab(
+                    tab_mr_stage, self)
+                self._mr_stage_tab_index = self.notebook.index(tab_mr_stage)
+            except Exception as _e:
+                print(f"[MR Pipeline Stage tab] init failed: {_e}")
+                self.mr_stage_tab = None
+        _boot_mark("tab_mr_pipeline_stage")
+
         # ═══════════════════════════════════════════
         # TAB 1 CONTENTS (File Translation)
         # ═══════════════════════════════════════════
@@ -2139,6 +2183,16 @@ class ExportApp:
                 _register_tab_refresh(self.so_tab, self._so_tab_index)
             except Exception:
                 pass
+        if (self.mr_stage_tab is not None
+                and self._mr_stage_tab_index is not None):
+            try:
+                self.notebook.tab(
+                    self._mr_stage_tab_index,
+                    text=self._t("tab_mr_pipeline_stage"))
+                _register_tab_refresh(
+                    self.mr_stage_tab, self._mr_stage_tab_index)
+            except Exception:
+                pass
 
         # Summary panel texts
         self.lbl_summary_title.configure(text=self._t("summary_title"))
@@ -2539,6 +2593,15 @@ class ExportApp:
                     self.so_tab.on_first_show()
                 except Exception:
                     pass
+            elif (self.mr_stage_tab is not None
+                  and self._mr_stage_tab_index is not None
+                  and tab_idx == self._mr_stage_tab_index
+                  and not self._mr_stage_tab_initialized):
+                self._mr_stage_tab_initialized = True
+                try:
+                    self.mr_stage_tab.on_first_show()
+                except Exception:
+                    pass
 
     # ── Summary panel data loading ──
     def _load_summary_data(self):
@@ -2801,6 +2864,14 @@ class ExportApp:
 
             def _work():
                 ok, msg = tranzor_auth.login(email, pwd, TRANZOR_URL)
+                # Best-effort Stage login with the same LDAP credentials.
+                # Stage has its own JWT secret; a failure here must not
+                # undo the production login the rest of the app depends on.
+                if ok:
+                    try:
+                        tranzor_auth.login(email, pwd, TRANZOR_STAGE_URL)
+                    except Exception:
+                        pass
                 dlg.after(0, _done, ok, msg)
 
             threading.Thread(target=_work, daemon=True).start()

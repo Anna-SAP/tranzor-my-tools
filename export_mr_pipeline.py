@@ -117,7 +117,23 @@ except Exception:  # pragma: no cover — telemetry must never block requests
 # 配置
 # ---------------------------------------------------------------------------
 TRANZOR_URL = "http://tranzor-platform.int.rclabenv.com"
+TRANZOR_STAGE_URL = "http://tranzor-platform-stage.int.rclabenv.com"
 MR_API = f"{TRANZOR_URL}/api/v1"
+
+
+def tranzor_url(base_url=None):
+    """Normalize a platform origin. Default is production."""
+    return (base_url or TRANZOR_URL).rstrip("/")
+
+
+def mr_api_root(base_url=None):
+    """``/api/v1`` root for *base_url*, or production when omitted."""
+    return f"{tranzor_url(base_url)}/api/v1"
+
+
+def _fwd(base_url):
+    """Keyword-only passthrough so existing test fakes stay compatible."""
+    return {"base_url": base_url} if base_url else {}
 
 # HTTP session & retry config
 _session = requests.Session() if requests else None
@@ -306,9 +322,9 @@ _api_get_session = _ApiGetSession()
 # ---------------------------------------------------------------------------
 # 1) Dashboard filters — 供下拉框使用
 # ---------------------------------------------------------------------------
-def fetch_mr_filters():
+def fetch_mr_filters(base_url=None):
     """GET /dashboard/filters → { project_ids: [...], releases: [...] }"""
-    resp = _api_get(f"{MR_API}/dashboard/filters")
+    resp = _api_get(f"{mr_api_root(base_url)}/dashboard/filters")
     resp.raise_for_status()
     data = resp.json()
     return {
@@ -317,7 +333,7 @@ def fetch_mr_filters():
     }
 
 
-def fetch_mr_filters_full():
+def fetch_mr_filters_full(base_url=None):
     """GET /dashboard/filters — full payload incl. languages.
 
     The backend already returns ``languages`` as a distinct-SQL aggregate over
@@ -325,7 +341,7 @@ def fetch_mr_filters_full():
     Translations inventory uses this as the fast path for the Languages panel
     (no per-task result fetching required).
     """
-    resp = _api_get(f"{MR_API}/dashboard/filters")
+    resp = _api_get(f"{mr_api_root(base_url)}/dashboard/filters")
     resp.raise_for_status()
     data = resp.json()
     return {
@@ -335,17 +351,17 @@ def fetch_mr_filters_full():
     }
 
 
-def fetch_languages():
+def fetch_languages(base_url=None):
     """从最近 completed task 的翻译结果中提取所有可用的 target language 列表"""
     try:
-        _, tasks = fetch_mr_tasks(status="completed", limit=10)
+        _, tasks = fetch_mr_tasks(status="completed", limit=10, **_fwd(base_url))
         langs = set()
         for t in tasks:
             tid = t.get("task_id")
             if not tid:
                 continue
             try:
-                results = fetch_mr_results(tid)
+                results = fetch_mr_results(tid, **_fwd(base_url))
                 for tr in results.get("translations", []):
                     lang = tr.get("target_language", "")
                     if lang:
@@ -359,7 +375,7 @@ def fetch_languages():
         return []
 
 
-def fetch_recently_added_projects(max_workers=6):
+def fetch_recently_added_projects(max_workers=6, base_url=None):
     """List every known MR Pipeline project, sorted DESC by the timestamp
     of its earliest task (proxy for when the project was first supported).
 
@@ -374,7 +390,7 @@ def fetch_recently_added_projects(max_workers=6):
         [{"project_id": "...", "first_seen": "2026-04-21T00:54:46"}, ...]
     """
     try:
-        filters = fetch_mr_filters()
+        filters = fetch_mr_filters(**_fwd(base_url))
     except Exception:
         return []
     project_ids = filters.get("project_ids") or []
@@ -384,13 +400,13 @@ def fetch_recently_added_projects(max_workers=6):
     def _oldest_created_at(pid):
         try:
             total, first_page = fetch_mr_tasks(
-                project_id=pid, limit=1, offset=0)
+                project_id=pid, limit=1, offset=0, **_fwd(base_url))
             if not total or not first_page:
                 return pid, None
             if total == 1:
                 return pid, first_page[0].get("created_at")
             _, last_page = fetch_mr_tasks(
-                project_id=pid, limit=1, offset=total - 1)
+                project_id=pid, limit=1, offset=total - 1, **_fwd(base_url))
             if last_page:
                 return pid, last_page[0].get("created_at")
         except Exception:
@@ -417,7 +433,7 @@ def fetch_recently_added_projects(max_workers=6):
 # 2) 任务列表
 # ---------------------------------------------------------------------------
 def fetch_mr_tasks(project_id=None, release=None, status=None,
-                   limit=50, offset=0):
+                   limit=50, offset=0, base_url=None):
     """GET /tasks?... → { total, tasks: [...] }"""
     params = {"limit": limit, "offset": offset}
     if project_id:
@@ -427,7 +443,7 @@ def fetch_mr_tasks(project_id=None, release=None, status=None,
     if status:
         params["status"] = status
 
-    resp = _api_get(f"{MR_API}/tasks", params=params)
+    resp = _api_get(f"{mr_api_root(base_url)}/tasks", params=params)
     resp.raise_for_status()
     data = resp.json()
     return data.get("total", 0), data.get("tasks", [])
@@ -436,9 +452,9 @@ def fetch_mr_tasks(project_id=None, release=None, status=None,
 # ---------------------------------------------------------------------------
 # 3) 任务详情
 # ---------------------------------------------------------------------------
-def fetch_mr_task_detail(task_id):
+def fetch_mr_task_detail(task_id, base_url=None):
     """GET /tasks/{task_id}"""
-    resp = _api_get(f"{MR_API}/tasks/{task_id}")
+    resp = _api_get(f"{mr_api_root(base_url)}/tasks/{task_id}")
     resp.raise_for_status()
     return resp.json()
 
@@ -447,7 +463,7 @@ def fetch_mr_task_detail(task_id):
 # 4) 翻译结果（含评估数据）
 # ---------------------------------------------------------------------------
 def fetch_mr_results(task_id, target_language=None,
-                     min_score=None, max_score=None):
+                     min_score=None, max_score=None, base_url=None):
     """GET /tasks/{task_id}/results → { task_id, translations: [...], summary }"""
     params = {}
     if target_language:
@@ -457,7 +473,8 @@ def fetch_mr_results(task_id, target_language=None,
     if max_score is not None:
         params["max_score"] = max_score
 
-    resp = _api_get(f"{MR_API}/tasks/{task_id}/results", params=params)
+    resp = _api_get(f"{mr_api_root(base_url)}/tasks/{task_id}/results",
+                    params=params)
     resp.raise_for_status()
     return resp.json()
 
@@ -476,7 +493,7 @@ def distinct_source_string_count(translations):
     })
 
 
-def count_mr_source_strings(task_id):
+def count_mr_source_strings(task_id, base_url=None):
     """Distinct en-US source-string count for one MR task.
 
     Fetches ``/tasks/{id}/results`` and counts distinct ``opus_id``. There is
@@ -487,13 +504,13 @@ def count_mr_source_strings(task_id):
     a number without special-casing failures.
     """
     try:
-        results = fetch_mr_results(task_id)
+        results = fetch_mr_results(task_id, **_fwd(base_url))
     except Exception:
         return 0
     return distinct_source_string_count(results.get("translations", []))
 
 
-def fetch_mr_translation_edit_logs(translation_id):
+def fetch_mr_translation_edit_logs(translation_id, base_url=None):
     """GET /dashboard/translations/{translation_id}/edit-logs
 
     Returns a list of edit log entries (newest first) with
@@ -502,7 +519,7 @@ def fetch_mr_translation_edit_logs(translation_id):
     same mechanism File Translation uses via its legacy edit-logs endpoint.
     """
     resp = _api_get(
-        f"{MR_API}/dashboard/translations/{translation_id}/edit-logs")
+        f"{mr_api_root(base_url)}/dashboard/translations/{translation_id}/edit-logs")
     resp.raise_for_status()
     return resp.json() or []
 
@@ -563,7 +580,7 @@ MAX_WORKERS = 4
 
 
 def collect_all_mr_results(progress_callback=None, project_id=None,
-                           release=None, status="completed"):
+                           release=None, status="completed", base_url=None):
     """遍历 MR Pipeline 任务，聚合翻译结果。
 
     Args:
@@ -592,7 +609,8 @@ def collect_all_mr_results(progress_callback=None, project_id=None,
     while True:
         total, batch = fetch_mr_tasks(project_id=project_id, release=release,
                                       status=status,
-                                      limit=batch_size, offset=offset)
+                                      limit=batch_size, offset=offset,
+                                      **_fwd(base_url))
         all_tasks.extend(batch)
         if not batch or offset + batch_size >= total:
             break
@@ -612,7 +630,7 @@ def collect_all_mr_results(progress_callback=None, project_id=None,
         if not tid:
             return []
         try:
-            results = fetch_mr_results(tid)
+            results = fetch_mr_results(tid, **_fwd(base_url))
             trs = results.get("translations", [])
             # Stamp task_id + MR coordinates onto each translation so reports
             # can build the right Tranzor URLs (/static/?project_id=…&mr_id=…
@@ -644,7 +662,7 @@ def collect_all_mr_results(progress_callback=None, project_id=None,
 # ---------------------------------------------------------------------------
 # 4c) 检测同一 MR 下所有 task 之间的翻译变更
 # ---------------------------------------------------------------------------
-def detect_mr_changes(task_id, progress_callback=None):
+def detect_mr_changes(task_id, progress_callback=None, base_url=None):
     """检测给定 task 所属 MR 的全生命周期翻译变更。
 
     三路检测：
@@ -670,7 +688,7 @@ def detect_mr_changes(task_id, progress_callback=None):
 
     # Step 1: 获取当前 task 详情，提取 project_id 和 merge_request_iid
     log("  正在获取任务详情...")
-    detail = fetch_mr_task_detail(task_id)
+    detail = fetch_mr_task_detail(task_id, **_fwd(base_url))
     project_id = detail.get("project_id")
     mr_iid = detail.get("merge_request_iid")
     if not project_id or not mr_iid:
@@ -694,7 +712,8 @@ def detect_mr_changes(task_id, progress_callback=None):
     while True:
         total, batch = fetch_mr_tasks(project_id=project_id,
                                       status="completed",
-                                      limit=batch_size, offset=offset)
+                                      limit=batch_size, offset=offset,
+                                      **_fwd(base_url))
         # 客户端按 mr_iid 过滤（tasks API 不支持 mr_id 参数）
         for t in batch:
             if t.get("merge_request_iid") == mr_iid:
@@ -713,7 +732,8 @@ def detect_mr_changes(task_id, progress_callback=None):
     cases_by_key = {}  # (opus_id, target_language) -> case dict
     try:
         cases_data = fetch_dashboard_cases(
-            project_id=project_id, mr_id=mr_iid, mr_limit=5)
+            project_id=project_id, mr_id=mr_iid, mr_limit=5,
+            **_fwd(base_url))
         for mr_item in cases_data.get("mrs", []):
             if mr_item.get("mr_iid") != mr_iid:
                 continue
@@ -744,7 +764,8 @@ def detect_mr_changes(task_id, progress_callback=None):
             if not tr_id:
                 return k, []
             try:
-                return k, fetch_mr_translation_edit_logs(tr_id)
+                return k, fetch_mr_translation_edit_logs(
+                    tr_id, **_fwd(base_url))
             except Exception as e:
                 log(f"  ⚠ edit-logs 拉取失败 (tr={tr_id}): {e}")
                 return k, []
@@ -877,7 +898,7 @@ def detect_mr_changes(task_id, progress_callback=None):
             if not tid:
                 return tid, []
             try:
-                results = fetch_mr_results(tid)
+                results = fetch_mr_results(tid, **_fwd(base_url))
                 trs = results.get("translations", [])
                 log(f"  [{idx}/{total_count}] Task {tid[:8]}… — {len(trs)} 条翻译")
                 return tid, trs
@@ -1054,7 +1075,7 @@ def detect_mr_changes(task_id, progress_callback=None):
 # 5) Dashboard 概览
 # ---------------------------------------------------------------------------
 def fetch_dashboard_overview(project_id=None, release=None,
-                             start_time=None, end_time=None):
+                             start_time=None, end_time=None, base_url=None):
     """GET /dashboard/overview"""
     params = {}
     if project_id:
@@ -1066,7 +1087,8 @@ def fetch_dashboard_overview(project_id=None, release=None,
     if end_time:
         params["end_time"] = end_time
 
-    resp = _api_get(f"{MR_API}/dashboard/overview", params=params)
+    resp = _api_get(f"{mr_api_root(base_url)}/dashboard/overview",
+                    params=params)
     resp.raise_for_status()
     return resp.json()
 
@@ -1077,7 +1099,8 @@ def fetch_dashboard_overview(project_id=None, release=None,
 def fetch_dashboard_cases(project_id=None, release=None, language=None,
                           min_score=None, max_score=None,
                           start_time=None, end_time=None,
-                          mr_limit=100, mr_offset=0, mr_id=None):
+                          mr_limit=100, mr_offset=0, mr_id=None,
+                          base_url=None):
     """GET /dashboard/cases"""
     params = {"mr_limit": mr_limit, "mr_offset": mr_offset}
     if project_id:
@@ -1097,7 +1120,7 @@ def fetch_dashboard_cases(project_id=None, release=None, language=None,
     if mr_id is not None:
         params["mr_id"] = mr_id
 
-    resp = _api_get(f"{MR_API}/dashboard/cases", params=params)
+    resp = _api_get(f"{mr_api_root(base_url)}/dashboard/cases", params=params)
     resp.raise_for_status()
     return resp.json()
 
@@ -1108,7 +1131,7 @@ def fetch_dashboard_cases(project_id=None, release=None, language=None,
 def fetch_all_dashboard_cases(project_id=None, release=None, language=None,
                               min_score=None, max_score=None,
                               start_time=None, end_time=None,
-                              page_size=100):
+                              page_size=100, base_url=None):
     """Fetch the complete MR-grouped cases dataset for Quality Overview."""
     all_mrs = []
     offset = 0
@@ -1125,6 +1148,7 @@ def fetch_all_dashboard_cases(project_id=None, release=None, language=None,
             end_time=end_time,
             mr_limit=page_size,
             mr_offset=offset,
+            **_fwd(base_url),
         )
         page_mrs = page.get("mrs", [])
         total_mrs = page.get("total_mrs", total_mrs)
@@ -1142,7 +1166,7 @@ def fetch_all_dashboard_cases(project_id=None, release=None, language=None,
 
 def fetch_dashboard_mrs(project_id=None, release=None, language=None,
                         min_score=None, max_score=None,
-                        mr_limit=100, mr_offset=0):
+                        mr_limit=100, mr_offset=0, base_url=None):
     """GET /dashboard/mrs"""
     params = {"mr_limit": mr_limit, "mr_offset": mr_offset}
     if project_id:
@@ -1156,7 +1180,7 @@ def fetch_dashboard_mrs(project_id=None, release=None, language=None,
     if max_score is not None:
         params["max_score"] = max_score
 
-    resp = _api_get(f"{MR_API}/dashboard/mrs", params=params)
+    resp = _api_get(f"{mr_api_root(base_url)}/dashboard/mrs", params=params)
     resp.raise_for_status()
     return resp.json()
 
@@ -1395,7 +1419,7 @@ def _word_diff_text(before, after):
 
 
 def write_mr_html(results_data, filename, label, bridge_info=None,
-                  advanced_filter_state=None):
+                  advanced_filter_state=None, tranzor_url=None):
     """生成 MR 翻译结果 HTML 报告（含 Filter + TMX 导出 + 评估列 + Send to Tranzor）
 
     bridge_info: optional dict from BridgeServer.html_info(); when present, the
@@ -1413,6 +1437,9 @@ def write_mr_html(results_data, filename, label, bridge_info=None,
     translations = results_data.get("translations", [])
     summary = results_data.get("summary", {})
     task_id = results_data.get("task_id", "")
+    # Bind before the big f-string so the parameter name cannot shadow
+    # the module-level ``tranzor_url()`` helper.
+    _tranzor_base = (tranzor_url or TRANZOR_URL).rstrip("/")
 
     # Pre-build the terminology highlight regexes for every locale that
     # appears in this batch. Scans source text for hits first, then fetches
@@ -1883,7 +1910,7 @@ const BRIDGE = {bridge_json};
 // Advanced Filters injected from the desktop GUI (null when none). Shape per
 // field id: {{ logic:'AND'|'OR', conditions:[{{pos,neg,matchWhole,...}}] }}.
 const TF_INITIAL = {tf_initial_json};
-const TRANZOR_BASE = "{TRANZOR_URL}";
+const TRANZOR_BASE = "{_tranzor_base}";
 const REPORT_NAME = "{report_basename}";
 let allSelected = false;
 
@@ -2977,7 +3004,8 @@ def collect_human_revisions(start_time=None, end_time=None,
 
 
 def save_mr_file(results_data, filename, label, fmt, bridge_info=None,
-                 open_after=True, fill_missing=False, advanced_filter_state=None):
+                 open_after=True, fill_missing=False, advanced_filter_state=None,
+                 tranzor_url=None):
     """保存 MR 翻译结果，文件被占用时自动加序号。
 
     advanced_filter_state: optional Advanced Filters state from the GUI panel
@@ -3024,7 +3052,8 @@ def save_mr_file(results_data, filename, label, fmt, bridge_info=None,
             if fmt == "html":
                 write_mr_html(results_data, save_path, label,
                               bridge_info=bridge_info,
-                              advanced_filter_state=advanced_filter_state)
+                              advanced_filter_state=advanced_filter_state,
+                              tranzor_url=tranzor_url)
                 print(f"已导出: {save_path}")
             elif fmt == "json":
                 # 延迟导入避免循环依赖（GUI 启动时 export_json 尚未加载）

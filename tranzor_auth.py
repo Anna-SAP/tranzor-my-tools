@@ -43,12 +43,22 @@ except Exception:  # pragma: no cover - requests should always be present
 AUTH_CONFIG_PATH = os.path.expanduser("~/.tranzor_exporter_auth.json")
 
 # Hosts that should receive the platform bearer token. Seeded with the known
-# int host; ``configure_hosts`` lets the GUI add whatever TRANZOR_URL points
+# int hosts; ``configure_hosts`` lets the GUI add whatever TRANZOR_URL points
 # at so this keeps working if the base URL ever changes.
-PLATFORM_HOSTS = {"tranzor-platform.int.rclabenv.com"}
+PLATFORM_HOSTS = {
+    "tranzor-platform.int.rclabenv.com",
+    "tranzor-platform-stage.int.rclabenv.com",
+}
 
-_token = None      # str | None — the raw JWT
+# Stage JWT secrets are independent of production. Tokens are stored per
+# host; ``_token`` / ``_user`` remain the *primary* (production) pair so
+# the header pill and existing callers stay unchanged.
+STAGE_HOST = "tranzor-platform-stage.int.rclabenv.com"
+
+_token = None      # str | None — the primary (prod) JWT
 _user = None       # dict | None — {email, name, is_language_lead}
+_tokens = {}       # host -> JWT
+_users = {}        # host -> user dict
 _installed = False  # guard so the monkeypatch is applied at most once
 
 
@@ -77,11 +87,31 @@ def get_user():
     return _user
 
 
-def set_token(token, user=None, persist=True):
+def set_token(token, user=None, persist=True, host=None, primary=True):
+    """Store a JWT.
+
+    ``primary=True`` (the default) updates the process-wide ``_token`` /
+    ``_user`` used by the header pill and ``get_token()``. Pass
+    ``primary=False`` when recording a secondary environment (Stage) so
+    a Stage login cannot clobber the production token.
+
+    When ``host`` is set the token is also filed in the per-host map
+    that :func:`apply_auth` consults.
+    """
     global _token, _user
-    _token = token or None
-    if user is not None:
-        _user = user
+    if primary:
+        _token = token or None
+        if user is not None:
+            _user = user
+    if host:
+        h = host.lower()
+        if token:
+            _tokens[h] = token
+            if user is not None:
+                _users[h] = user
+        else:
+            _tokens.pop(h, None)
+            _users.pop(h, None)
     if persist:
         _save()
 
@@ -91,6 +121,8 @@ def clear():
     global _token, _user
     _token = None
     _user = None
+    _tokens.clear()
+    _users.clear()
     try:
         if os.path.isfile(AUTH_CONFIG_PATH):
             os.remove(AUTH_CONFIG_PATH)
@@ -115,9 +147,19 @@ def load():
                 data = json.load(f)
             _token = data.get("token") or None
             _user = data.get("user") or None
+            _tokens.clear()
+            _users.clear()
+            for h, tkn in (data.get("tokens") or {}).items():
+                if h and tkn:
+                    _tokens[str(h).lower()] = tkn
+            for h, usr in (data.get("users") or {}).items():
+                if h and usr:
+                    _users[str(h).lower()] = usr
     except Exception:
         _token = None
         _user = None
+        _tokens.clear()
+        _users.clear()
     return _token
 
 
@@ -125,7 +167,12 @@ def _save():
     try:
         atomic_io.atomic_write_json(
             AUTH_CONFIG_PATH,
-            {"token": _token, "user": _user},
+            {
+                "token": _token,
+                "user": _user,
+                "tokens": dict(_tokens),
+                "users": dict(_users),
+            },
             mode=0o600,
         )
     except Exception:
@@ -201,7 +248,11 @@ def login(email, password, base_url, timeout=15):
         token = data.get("token")
         if not token:
             return False, "Login response contained no token"
-        set_token(token, user=data.get("user"))
+        host = _host_of(base_url)
+        # Stage has its own JWT secret — never let a Stage login replace
+        # the production token the header pill / File Translation tab use.
+        is_primary = host != STAGE_HOST
+        set_token(token, user=data.get("user"), host=host, primary=is_primary)
         return True, "ok"
 
     detail = ""
@@ -224,9 +275,11 @@ def apply_auth(url, headers):
     tests both go through here.
     """
     headers = dict(headers or {})
-    if _token and _host_of(url) in PLATFORM_HOSTS:
-        if not any(str(k).lower() == "authorization" for k in headers):
-            headers["Authorization"] = f"Bearer {_token}"
+    host = _host_of(url)
+    if host in PLATFORM_HOSTS:
+        token = _tokens.get(host) or _token
+        if token and not any(str(k).lower() == "authorization" for k in headers):
+            headers["Authorization"] = f"Bearer {token}"
     return headers
 
 

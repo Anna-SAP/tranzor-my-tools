@@ -35,14 +35,22 @@ class _TAStateMixin:
     def setUp(self):
         self._saved_token = ta._token
         self._saved_user = ta._user
+        self._saved_tokens = dict(ta._tokens)
+        self._saved_users = dict(ta._users)
         self._saved_path = ta.AUTH_CONFIG_PATH
         self._saved_hosts = set(ta.PLATFORM_HOSTS)
         ta._token = None
         ta._user = None
+        ta._tokens.clear()
+        ta._users.clear()
 
     def tearDown(self):
         ta._token = self._saved_token
         ta._user = self._saved_user
+        ta._tokens.clear()
+        ta._tokens.update(self._saved_tokens)
+        ta._users.clear()
+        ta._users.update(self._saved_users)
         ta.AUTH_CONFIG_PATH = self._saved_path
         ta.PLATFORM_HOSTS.clear()
         ta.PLATFORM_HOSTS.update(self._saved_hosts)
@@ -77,6 +85,24 @@ class ApplyAuthTests(_TAStateMixin, unittest.TestCase):
         ta.configure_hosts("new-platform.example.com")
         headers = ta.apply_auth("http://new-platform.example.com/x", None)
         self.assertEqual(headers.get("Authorization"), "Bearer TKN")
+
+    def test_stage_host_is_on_default_allowlist(self):
+        self.assertIn(ta.STAGE_HOST, ta.PLATFORM_HOSTS)
+
+    def test_host_specific_token_beats_primary(self):
+        ta._token = "PROD"
+        ta._tokens[ta.STAGE_HOST] = "STAGE"
+        prod = ta.apply_auth(self.PLAT, None)
+        stage = ta.apply_auth(
+            f"http://{ta.STAGE_HOST}/api/v1/tasks", None)
+        self.assertEqual(prod.get("Authorization"), "Bearer PROD")
+        self.assertEqual(stage.get("Authorization"), "Bearer STAGE")
+
+    def test_stage_falls_back_to_primary_when_no_host_token(self):
+        ta._token = "PROD"
+        headers = ta.apply_auth(
+            f"http://{ta.STAGE_HOST}/api/v1/tasks", None)
+        self.assertEqual(headers.get("Authorization"), "Bearer PROD")
 
 
 class TokenExpiryTests(_TAStateMixin, unittest.TestCase):
@@ -167,6 +193,35 @@ class LoginTests(_TAStateMixin, unittest.TestCase):
             ok, msg = ta.login("x", "pw", "http://platform.example.com")
         self.assertFalse(ok)
         self.assertIn("connection refused", msg)
+
+    def test_stage_login_does_not_clobber_primary_token(self):
+        prod = self._resp(200, {"token": "PROD_JWT",
+                                "user": {"email": "x@ringcentral.com"}})
+        stage = self._resp(200, {"token": "STAGE_JWT",
+                                 "user": {"email": "x@ringcentral.com"}})
+        with mock.patch.object(ta, "requests") as rq:
+            rq.post.side_effect = [prod, stage]
+            ok1, _ = ta.login("x@ringcentral.com", "pw",
+                              "http://tranzor-platform.int.rclabenv.com")
+            ok2, _ = ta.login("x@ringcentral.com", "pw",
+                              "http://tranzor-platform-stage.int.rclabenv.com")
+        self.assertTrue(ok1)
+        self.assertTrue(ok2)
+        self.assertEqual(ta.get_token(), "PROD_JWT")
+        self.assertEqual(ta._tokens[ta.STAGE_HOST], "STAGE_JWT")
+        self.assertEqual(
+            ta._tokens["tranzor-platform.int.rclabenv.com"], "PROD_JWT")
+
+    def test_tokens_by_host_survive_save_load(self):
+        ta.set_token("PROD_JWT", user={"email": "a@x.com"},
+                     host="tranzor-platform.int.rclabenv.com")
+        ta.set_token("STAGE_JWT", user={"email": "a@x.com"},
+                     host=ta.STAGE_HOST, primary=False)
+        ta._token = None
+        ta._tokens.clear()
+        loaded = ta.load()
+        self.assertEqual(loaded, "PROD_JWT")
+        self.assertEqual(ta._tokens[ta.STAGE_HOST], "STAGE_JWT")
 
 
 class InstallTests(_TAStateMixin, unittest.TestCase):

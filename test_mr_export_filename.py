@@ -87,6 +87,15 @@ class CreatedTimeStampTests(unittest.TestCase):
         self.assertFalse(name.startswith("mr_pipeline_MR"))
         self.assertTrue(name.startswith("mr_pipeline_75040f78_"))
 
+    def test_stage_env_tag_disambiguates_from_prod(self):
+        common = dict(mr_iid="53", id_tag="abc12345", type_tag="all",
+                      created="2026-08-18 10:00:00", export_date="2026-08-18")
+        prod = _build(".html", **common)
+        stage = _build(".html", env_tag="stage", **common)
+        self.assertNotEqual(prod, stage)
+        self.assertTrue(stage.startswith("mr_pipeline_stage_"))
+        self.assertTrue(prod.startswith("mr_pipeline_MR53_"))
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
