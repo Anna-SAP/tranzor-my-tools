@@ -32,7 +32,7 @@
 
 **Tranzor Helper** (internally *TranzorExporter*; GitLab repo `annasu-tranzor-helper`) is a **zero-install, zero-dependency desktop application** that acts as a personal **quality-assurance & export cockpit** for the people who run localization on RingCentral's **Tranzor** platform.
 
-Tranzor is RingCentral's in-house localization platform — a browser front-end over an XTM-style translation-management system that produces machine + human translations across ~18 locales. It is owned by another team and ships on a slow release cadence, but a localization reviewer needs **safeguards and exports today**. Tranzor Helper fills that gap: a single double-clickable executable opens one window with **14 tabs** that let a non-technical language professional:
+Tranzor is RingCentral's in-house localization platform — a browser front-end over an XTM-style translation-management system that produces machine + human translations across ~18 locales. It is owned by another team and ships on a slow release cadence, but a localization reviewer needs **safeguards and exports today**. Tranzor Helper fills that gap: a single double-clickable executable opens one window with **16 tabs** that let a non-technical language professional:
 
 - 📤 **export** translations to HTML / Excel / TMX (XTM-compatible) without ever touching a terminal;
 - 🔎 **search** every translation string the platform has ever produced — instantly, offline, from a local index;
@@ -100,7 +100,7 @@ Tranzor Helper parses this key into structured columns so it can give a reviewer
 
 ## Feature tour
 
-The window is a `ttk.Notebook`. The first three tabs are core; the remaining eleven are **optional, lazy-loaded, fail-safe** tabs (a broken tab degrades to a missing tab — it never crashes the app).
+The window is a `ttk.Notebook`. The first three tabs are core; the remaining thirteen are **optional, lazy-loaded, fail-safe** tabs (a broken tab degrades to a missing tab — it never crashes the app).
 
 | Tab | What it does | Why it matters |
 |---|---|---|
@@ -108,6 +108,8 @@ The window is a `ttk.Notebook`. The first three tabs are core; the remaining ele
 | 🔀 **MR Pipeline** | Lists GitLab-MR-triggered translation tasks (project, MR#, release, status, **en-US Strings** count, avg score…) with paging/sorting/filtering and the ✏️ post-edit marker. | The daily view of what the incremental pipeline produced. |
 | 📊 **Quality Overview** | Aggregated quality stats with MR & File sub-tabs; flags human-touched items. | At-a-glance quality posture across both channels. |
 | 🌍 **Full Translations** | Bulk export by **product × language**; lazy inventory load so startup stays fast, heavy fetch only on export. | Whole-product / whole-locale exports without slow startup. |
+| 🧪 **Full Translations (Stage)** | Same product × language exporter, pointed at the **Stage** platform. | Track and export the test-environment full translation corpus. |
+| 🧪 **MR Pipeline (Stage)** | Same MR Pipeline browser, pointed at the **Stage** platform. | Inspect Stage MR translation tasks without mixing them with production. |
 | **Human Revisions** | Aggregates every human-edit record across both channels (default last 30 days). | One place to audit and learn from human corrections. |
 | 🔎 **Scan Tasks** | Lists "Missing Translation Scan" jobs (with the same **en-US Strings** count as MR Pipeline); filter and export coverage results. | Track coverage sweeps separately from the MR pipeline. |
 | 🛡️ **Term Watchtower** | Import an approved glossary, run a **deterministic** (non-LLM) terminology scan, flag every violation with expected-vs-actual + full context, export evidence. | Catch approved-term violations and hand the dev team proof. |
@@ -188,7 +190,7 @@ powershell -File build_windows.ps1          # → dist/TranzorExporter.exe
 annasu-tranzor-helper/
 ├── export_gui.py                 # ① main entry — root window, notebook, boot, auth, bridge
 ├── gui_tabs.py                   # core tabs: MR Pipeline + Quality Overview
-├── gui_tab_*.py                  # 11 optional tabs, one file each (fail-safe)
+├── gui_tab_*.py                  # 13 optional tabs, one file each (fail-safe)
 ├── advanced_filter.py            # shared filter engine (UI + export, kept in sync by tests)
 │
 ├── export_mr_pipeline.py         # ② Tranzor MR-pipeline API client  (mr_api)

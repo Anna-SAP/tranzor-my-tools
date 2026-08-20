@@ -97,6 +97,11 @@ _ALLOW_PARTIAL = os.getenv(
     "TRANZOR_ALLOW_PARTIAL_EXPORT", "").strip().lower() in ("1", "true", "yes")
 
 
+def _fwd(base_url):
+    """Pass ``base_url`` only when set so production test fakes keep working."""
+    return {"base_url": base_url} if base_url else {}
+
+
 class IncompleteExportError(RuntimeError):
     """Raised when one or more source tasks could not be fetched after
     retries, so the aggregated inventory is provably incomplete.
@@ -548,6 +553,7 @@ def _make_product_id(source: str, project_id: str) -> str:
 
 def _build_legacy_light(
     progress_cb: ProgressCb,
+    base_url: Optional[str] = None,
 ) -> Tuple[List[dict], Set[str], Optional[str]]:
     """Discover legacy products+languages without fetching translation text.
 
@@ -561,7 +567,7 @@ def _build_legacy_light(
     """
     _log(progress_cb, "  [Legacy] 拉取 Completed task 列表（仅 metadata）...")
     try:
-        tasks = _legacy.fetch_tasks()
+        tasks = _legacy.fetch_tasks(**_fwd(base_url))
     except Exception as e:
         if _is_auth_error(e):
             raise AuthRequiredError(e) from e
@@ -605,6 +611,7 @@ def _build_legacy_light(
 
 def _build_mr_light(
     progress_cb: ProgressCb,
+    base_url: Optional[str] = None,
 ) -> Tuple[List[dict], Set[str], Optional[str]]:
     """Discover MR Pipeline products+languages via cheap dashboard endpoints.
 
@@ -619,7 +626,7 @@ def _build_mr_light(
     """
     _log(progress_cb, "  [MR] 拉取 dashboard filters（distinct projects+languages）...")
     try:
-        filters = _mr.fetch_mr_filters_full()
+        filters = _mr.fetch_mr_filters_full(**_fwd(base_url))
     except Exception as e:
         if _is_auth_error(e):
             raise AuthRequiredError(e) from e
@@ -651,7 +658,8 @@ def _build_mr_light(
     # 并发只决定排队深度——真实在途数由 export_mr_pipeline._HTTP_GATE 封顶。
     def _fetch_one(pid: str) -> Tuple[str, Optional[int]]:
         try:
-            data = _mr.fetch_dashboard_overview(project_id=pid)
+            data = _mr.fetch_dashboard_overview(
+                project_id=pid, **_fwd(base_url))
             return pid, int(data.get("total_cases") or 0)
         except Exception as e:
             if _is_auth_error(e):
@@ -686,6 +694,7 @@ def _build_mr_light(
 
 def _build_scan_light(
     progress_cb: ProgressCb,
+    base_url: Optional[str] = None,
 ) -> Tuple[List[dict], Set[str], Optional[str]]:
     """Discover Scan Tasks products (by scan.project_id) without pulling text.
 
@@ -704,7 +713,7 @@ def _build_scan_light(
         batch_size = 100
         while True:
             total, batch = _mr.fetch_scan_tasks(
-                limit=batch_size, offset=offset)
+                limit=batch_size, offset=offset, **_fwd(base_url))
             tasks.extend(batch)
             if not batch or offset + batch_size >= total:
                 break
@@ -745,11 +754,15 @@ def _build_scan_light(
 def build_light_inventory(
     sources: Iterable[str] = (SRC_LEGACY, SRC_MR, SRC_SCAN),
     progress_cb: ProgressCb = None,
+    base_url: Optional[str] = None,
 ) -> LightInventory:
     """Build the lightweight Product × Language index for the GUI selector.
 
     This is the **only** function the Full Translations panel calls on init.
     It must NOT touch any /translations endpoint.
+
+    ``base_url`` selects the platform origin (Stage vs production). Omitted
+    / None keeps the production default used by existing callers.
     """
     inv = LightInventory()
     sources = {str(s).lower() for s in sources}
@@ -762,15 +775,18 @@ def build_light_inventory(
     scan_locales: Set[str] = set()
 
     if SRC_LEGACY in sources:
-        legacy_products, legacy_locales, err = _build_legacy_light(progress_cb)
+        legacy_products, legacy_locales, err = _build_legacy_light(
+            progress_cb, base_url=base_url)
         if err:
             inv.source_errors[SRC_LEGACY] = err
     if SRC_MR in sources:
-        mr_products, mr_locales, err = _build_mr_light(progress_cb)
+        mr_products, mr_locales, err = _build_mr_light(
+            progress_cb, base_url=base_url)
         if err:
             inv.source_errors[SRC_MR] = err
     if SRC_SCAN in sources:
-        scan_products, scan_locales, err = _build_scan_light(progress_cb)
+        scan_products, scan_locales, err = _build_scan_light(
+            progress_cb, base_url=base_url)
         if err:
             inv.source_errors[SRC_SCAN] = err
 
@@ -810,6 +826,7 @@ def _collect_from_legacy(
     progress_cb: ProgressCb,
     project_filter: Optional[Set[str]] = None,
     count_cb: ProgressCountCb = None,
+    base_url: Optional[str] = None,
 ) -> int:
     """从 Legacy File Translation API 聚合。
 
@@ -822,7 +839,7 @@ def _collect_from_legacy(
     """
     _log(progress_cb, "  [Legacy] 获取 File Translation task 列表...")
     try:
-        tasks = _legacy.fetch_tasks()
+        tasks = _legacy.fetch_tasks(**_fwd(base_url))
     except Exception as e:
         if _is_auth_error(e):
             raise AuthRequiredError(e) from e
@@ -854,7 +871,9 @@ def _collect_from_legacy(
             return 0
         try:
             entries = _fetch_task_with_retry(
-                _legacy.fetch_all_translations, tid,
+                lambda t, _bu=base_url: _legacy.fetch_all_translations(
+                    t, **_fwd(_bu)),
+                tid,
                 progress_cb=progress_cb, what=f"[Legacy {idx}/{total}]")
         except AuthRequiredError:
             raise  # login problem, not a per-task failure — fail the run loud
@@ -921,6 +940,7 @@ def _collect_from_mr(
     progress_cb: ProgressCb,
     project_filter: Optional[Set[str]] = None,
     count_cb: ProgressCountCb = None,
+    base_url: Optional[str] = None,
 ) -> int:
     """从 MR Pipeline API 聚合。
 
@@ -945,6 +965,7 @@ def _collect_from_mr(
                     status="completed",
                     limit=batch_size,
                     offset=offset,
+                    **_fwd(base_url),
                 )
                 out.extend(batch)
                 # Step by the actual returned count (not the requested limit):
@@ -986,7 +1007,8 @@ def _collect_from_mr(
             return 0
         try:
             results = _fetch_task_with_retry(
-                _mr.fetch_mr_results, tid,
+                lambda t, _bu=base_url: _mr.fetch_mr_results(t, **_fwd(_bu)),
+                tid,
                 progress_cb=progress_cb, what=f"[MR {idx}/{total_tasks}]")
         except AuthRequiredError:
             raise  # login problem, not a per-task failure — fail the run loud
@@ -1069,6 +1091,7 @@ def _collect_from_scan(
     progress_cb: ProgressCb,
     project_filter: Optional[Set[str]] = None,
     count_cb: ProgressCountCb = None,
+    base_url: Optional[str] = None,
 ) -> int:
     """从 Missing Translation Scan API 聚合已完成扫描任务的全部译文。
 
@@ -1091,6 +1114,7 @@ def _collect_from_scan(
                     status="completed",
                     limit=batch_size,
                     offset=offset,
+                    **_fwd(base_url),
                 )
                 out.extend(batch)
                 # Step by actual returned count; dedupe below absorbs drift.
@@ -1128,7 +1152,8 @@ def _collect_from_scan(
             return 0
         try:
             results = _fetch_task_with_retry(
-                _mr.fetch_scan_results, tid,
+                lambda t, _bu=base_url: _mr.fetch_scan_results(t, **_fwd(_bu)),
+                tid,
                 progress_cb=progress_cb, what=f"[Scan {idx}/{total_tasks}]")
         except AuthRequiredError:
             raise  # login problem, not a per-task failure — fail the run loud
@@ -1204,6 +1229,7 @@ def collect_full_translations(
     count_cb: ProgressCountCb = None,
     strict_complete: bool = False,
     track_all_sources: bool = False,
+    base_url: Optional[str] = None,
 ) -> FullTranslationInventory:
     """从指定数据源聚合全量翻译。
 
@@ -1228,6 +1254,9 @@ def collect_full_translations(
         ``inconsistencies_in_new``。代价是内存占用更高，故仅 Merge-to-JSON 路径
         开启；zip / Watchtower 默认 False，行为与内存占用不变。
 
+    base_url: 平台 origin。None / 省略 → 生产环境。Stage 面板传入
+        ``TRANZOR_STAGE_URL``，使 Legacy / MR / Scan 三个源全部打到 Stage。
+
     返回 FullTranslationInventory（其 ``fetch_failures`` 字段列出所有抓取失败的
     任务；非 strict 模式下也会填充）。
     """
@@ -1240,17 +1269,17 @@ def collect_full_translations(
 
     if "legacy" in sources:
         added = _collect_from_legacy(inv, progress_cb, legacy_set,
-                                     count_cb=count_cb)
+                                     count_cb=count_cb, base_url=base_url)
         _log(progress_cb, f"  ✓ [Legacy] 写入 {added} 条")
 
     if "mr" in sources:
         added = _collect_from_mr(inv, progress_cb, mr_set,
-                                 count_cb=count_cb)
+                                 count_cb=count_cb, base_url=base_url)
         _log(progress_cb, f"  ✓ [MR] 写入 {added} 条")
 
     if "scan" in sources:
         added = _collect_from_scan(inv, progress_cb, scan_set,
-                                   count_cb=count_cb)
+                                   count_cb=count_cb, base_url=base_url)
         _log(progress_cb, f"  ✓ [Scan] 写入 {added} 条")
 
     _log(progress_cb, f"\n  ✓ 聚合完成：{len(inv.data)} 个产品 / "
@@ -1614,11 +1643,15 @@ def main(argv: Optional[List[str]] = None) -> int:
                         help="逗号分隔的语言白名单（默认全部）")
     parser.add_argument("--sources", default="legacy,mr,scan",
                         help="数据源，逗号分隔，可选 legacy,mr,scan（默认三者都要）")
+    parser.add_argument("--stage", action="store_true",
+                        help="从 Stage 环境拉取（默认生产）")
     args = parser.parse_args(argv)
 
     sources = _parse_csv(args.sources) or ["legacy", "mr", "scan"]
+    base_url = _mr.TRANZOR_STAGE_URL if args.stage else None
     try:
-        inv = collect_full_translations(sources=sources, progress_cb=print)
+        inv = collect_full_translations(
+            sources=sources, progress_cb=print, base_url=base_url)
     except AuthRequiredError as e:
         # One clear line instead of a two-level chained traceback. (No emoji
         # here: a piped cp936 stdout cannot encode them.)

@@ -12,6 +12,15 @@ Key rules:
 - Windows release builds must use `build_windows.ps1` or `TranzorExporter.spec`.
 - Formal Mac app releases must use `.github/workflows/build-mac.yml`.
 - Agent-opened PRs may be merged to `master` without asking — see "Autonomous PR handling" below for the exact conditions.
+- The repository owner tests as a **product manager via the Windows EXE**, not by running source. After a user-facing change is complete, do **not** stop at local code: open a **non-draft** PR, merge it to `master`, and let GitHub Actions `Build Windows EXE` (push-to-master) produce the testable binary on the rolling `master-latest` release. Do not create Draft PRs for this workflow.
+
+**Ship-to-EXE procedure (agent-opened PRs).** Granted in chat by the owner on 2026-08-20.
+
+1. Finish the change, run the relevant unit tests locally.
+2. Open a real (non-draft) PR against `master`.
+3. Merge it under "Autonomous PR handling" below (squash unless the history is already curated).
+4. Confirm `Build Windows EXE` started on the merge-to-`master` push. That workflow is **not** a PR check — it fires on `push` to `master` (with a docs/userscript `paths-ignore`). If it does not start, trigger `build-windows.yml` with `workflow_dispatch` on `master` rather than asking the owner to click around GitHub.
+5. Tell the owner where to download: the rolling GitHub Release **`master-latest`** (`TranzorExporter.exe`).
 
 ## Autonomous PR handling (agent-opened PRs)
 

@@ -43,8 +43,24 @@ except ImportError:
 # 配置 — 你的 Tranzor 平台地址（就是你浏览器里打开的那个地址）
 # ---------------------------------------------------------------------------
 TRANZOR_URL = "http://tranzor-platform.int.rclabenv.com"
+TRANZOR_STAGE_URL = "http://tranzor-platform-stage.int.rclabenv.com"
 
 API = f"{TRANZOR_URL}/api/v1/legacy"
+
+
+def tranzor_url(base_url=None):
+    """Platform origin. None / omitted → production."""
+    return (base_url or TRANZOR_URL).rstrip("/")
+
+
+def legacy_api_root(base_url=None):
+    """``/api/v1/legacy`` root for *base_url*, or production when omitted."""
+    return f"{tranzor_url(base_url)}/api/v1/legacy"
+
+
+def _fwd(base_url):
+    """Pass ``base_url`` only when set so existing 1-arg test fakes keep working."""
+    return {"base_url": base_url} if base_url else {}
 
 # 共享 HTTP session（连接池复用）
 _session = requests.Session()
@@ -215,10 +231,10 @@ _api_get_session = _ApiGetSession()
 # ---------------------------------------------------------------------------
 # 1) 获取 task 信息
 # ---------------------------------------------------------------------------
-def fetch_task_info(task_id):
+def fetch_task_info(task_id, base_url=None):
     """获取单个 task 的名称"""
     try:
-        resp = _api_get(f"{API}/tasks/{task_id}")
+        resp = _api_get(f"{legacy_api_root(base_url)}/tasks/{task_id}")
         resp.raise_for_status()
         data = resp.json()
         return data.get("task_name", f"Task {task_id}")
@@ -226,7 +242,7 @@ def fetch_task_info(task_id):
         return f"Task {task_id}"
 
 
-def fetch_task_languages(task_id):
+def fetch_task_languages(task_id, base_url=None):
     """返回单个 task 配置或实际存在的目标语言列表。
 
     全量导出要求每个 key 100% 覆盖配置目标语言。源数据稀疏，光靠"观察到的
@@ -242,7 +258,7 @@ def fetch_task_languages(task_id):
     不会让导出失败。
     """
     try:
-        resp = _api_get(f"{API}/tasks/{task_id}")
+        resp = _api_get(f"{legacy_api_root(base_url)}/tasks/{task_id}")
         resp.raise_for_status()
         data = resp.json() or {}
         out = []
@@ -261,15 +277,16 @@ def fetch_task_languages(task_id):
 # ---------------------------------------------------------------------------
 # 2) 获取 task 列表
 # ---------------------------------------------------------------------------
-def fetch_tasks():
+def fetch_tasks(base_url=None):
     """获取所有已完成的 task（分页遍历）"""
     all_tasks = []
     offset = 0
     limit = 200
+    api = legacy_api_root(base_url)
 
     while True:
         params = {"limit": limit, "offset": offset, "status": "Completed"}
-        resp = _api_get(f"{API}/tasks", params=params)
+        resp = _api_get(f"{api}/tasks", params=params)
         resp.raise_for_status()
         data = resp.json()
 
@@ -287,7 +304,7 @@ def fetch_tasks():
 # 3) 获取某个 task 下的全部翻译（不筛选 translation_type）
 #    按目标语言逐语言分页，规避服务端整表分页的漏行 bug
 # ---------------------------------------------------------------------------
-def _fetch_language_translations(task_id, lang, limit=200):
+def _fetch_language_translations(task_id, lang, limit=200, base_url=None):
     """逐语言分页抓取某 task 下某个目标语言的全部非空译文。
 
     ⚠️ 关键：必须按 ``target_language`` 过滤后再分页。
@@ -306,9 +323,10 @@ def _fetch_language_translations(task_id, lang, limit=200):
     """
     out = []
     offset = 0
+    api = legacy_api_root(base_url)
     while True:
         resp = _api_get(
-            f"{API}/tasks/{task_id}/translations",
+            f"{api}/tasks/{task_id}/translations",
             params={"limit": limit, "offset": offset,
                     "target_language": lang},
         )
@@ -338,7 +356,7 @@ def _fetch_language_translations(task_id, lang, limit=200):
     return out
 
 
-def _fetch_all_translations_flat(task_id):
+def _fetch_all_translations_flat(task_id, base_url=None):
     """旧的"整表分页"实现，仅在拿不到 task 目标语言时作为兜底。
 
     ⚠️ 已知会漏行（见 :func:`_fetch_language_translations` 的说明）；正常路径
@@ -348,8 +366,9 @@ def _fetch_all_translations_flat(task_id):
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     limit = 200
+    api = legacy_api_root(base_url)
     probe_resp = _api_get(
-        f"{API}/tasks/{task_id}/translations",
+        f"{api}/tasks/{task_id}/translations",
         params={"limit": 1, "offset": 0},
     )
     probe_resp.raise_for_status()
@@ -361,7 +380,7 @@ def _fetch_all_translations_flat(task_id):
 
     def _fetch_page(offset):
         resp = _api_get(
-            f"{API}/tasks/{task_id}/translations",
+            f"{api}/tasks/{task_id}/translations",
             params={"limit": limit, "offset": offset},
         )
         resp.raise_for_status()
@@ -387,7 +406,7 @@ def _fetch_all_translations_flat(task_id):
     return out
 
 
-def count_legacy_source_strings(task_id):
+def count_legacy_source_strings(task_id, base_url=None):
     """Distinct en-US source-string count for one legacy File Translation task.
 
     Counts distinct ``opus_id`` across the task's translation rows — the same
@@ -407,9 +426,10 @@ def count_legacy_source_strings(task_id):
         ids = set()
         limit = 200
         offset = 0
+        api = legacy_api_root(base_url)
         while True:
             resp = _api_get(
-                f"{API}/tasks/{task_id}/translations",
+                f"{api}/tasks/{task_id}/translations",
                 params={"limit": limit, "offset": offset},
             )
             resp.raise_for_status()
@@ -431,7 +451,7 @@ def count_legacy_source_strings(task_id):
         return 0
 
 
-def _discover_languages(task_id):
+def _discover_languages(task_id, base_url=None):
     """取得逐语言抓取所需的完整语言集合。
 
     优先读取轻量 task detail 的 target_languages 与 available_languages 并集。
@@ -443,13 +463,13 @@ def _discover_languages(task_id):
     (languages, probe_had_entries)；probe 的 503 直接抛出，不再吞错或追加
     limit=1 请求。
     """
-    metadata_languages = set(fetch_task_languages(task_id) or [])
+    metadata_languages = set(fetch_task_languages(task_id, **_fwd(base_url)) or [])
     if metadata_languages:
         return metadata_languages, False
 
     observed = set()
     resp = _api_get(
-        f"{API}/tasks/{task_id}/translations",
+        f"{legacy_api_root(base_url)}/tasks/{task_id}/translations",
         params={"limit": 200, "offset": 0},
     )
     resp.raise_for_status()
@@ -461,7 +481,7 @@ def _discover_languages(task_id):
     return observed, bool(entries)
 
 
-def fetch_all_translations(task_id):
+def fetch_all_translations(task_id, base_url=None):
     """获取某个 task 中所有翻译条目（全量，不筛选类型）。
 
     按目标语言逐语言分页抓取——这是规避服务端整表分页漏行 bug 的关键（详见
@@ -471,7 +491,8 @@ def fetch_all_translations(task_id):
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    languages, probe_had_entries = _discover_languages(task_id)
+    languages, probe_had_entries = _discover_languages(
+        task_id, **_fwd(base_url))
 
     if not languages:
         if not probe_had_entries:
@@ -481,13 +502,16 @@ def fetch_all_translations(task_id):
         # Malformed/legacy payload: rows exist but carry no language. Preserve
         # the historical flat fallback for compatibility.
         print("    [!] 翻译行缺少目标语言，退回整表分页（可能漏行）")
-        all_translations = _fetch_all_translations_flat(task_id)
+        all_translations = _fetch_all_translations_flat(
+            task_id, **_fwd(base_url))
     else:
         all_translations = []
         workers = max(1, min(MAX_PAGE_WORKERS, len(languages)))
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
-                pool.submit(_fetch_language_translations, task_id, lang): lang
+                pool.submit(
+                    _fetch_language_translations, task_id, lang,
+                    200, base_url): lang
                 for lang in sorted(languages)
             }
             for f in as_completed(futures):
@@ -497,7 +521,7 @@ def fetch_all_translations(task_id):
     # 否则导出文件里只有 ~500 字符的 UI 预览（见 closed bug TRAN-161）
     hydrated = hydrate_truncated_entries(
         all_translations,
-        api_base=API,
+        api_base=legacy_api_root(base_url),
         task_id=task_id,
         # Route full-text calls through the same retry/concurrency guard as
         # ordinary translation pages; otherwise nested task/hydrator pools

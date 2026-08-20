@@ -174,8 +174,11 @@ def _configure_product_row_tags(tree):
 STRINGS = {
     "en": {
         "tab_full_translations":  "🌍 Full Translations",
+        "tab_full_translations_stage": "🧪 Full Translations (Stage)",
         "ft_title":               "Full Translation Export (by Product × Language)",
+        "ft_title_stage":         "Stage Full Translation Export (by Product × Language)",
         "ft_subtitle":            "Pick products + languages, then export — heavy data is fetched only on Export.",
+        "ft_subtitle_stage":      "Stage environment — pick products + languages, then export. Heavy data is fetched only on Export.",
         "ft_sources_label":       "Data Sources",
         "ft_src_legacy":          "File Translation (Legacy)",
         "ft_src_mr":              "MR Pipeline",
@@ -258,8 +261,11 @@ STRINGS = {
     },
     "zh": {
         "tab_full_translations":  "🌍 全量翻译",
+        "tab_full_translations_stage": "🧪 全量翻译 (Stage)",
         "ft_title":               "全量翻译导出（按产品 × 按语言）",
+        "ft_title_stage":         "Stage 全量翻译导出（按产品 × 按语言）",
         "ft_subtitle":            "选择产品 + 语言后再导出 — 真正的翻译数据只在点击导出时才拉取。",
+        "ft_subtitle_stage":      "Stage 测试环境 — 选择产品 + 语言后再导出。真正的翻译数据只在点击导出时才拉取。",
         "ft_sources_label":       "数据源",
         "ft_src_legacy":          "File Translation（Legacy）",
         "ft_src_mr":              "MR Pipeline",
@@ -745,9 +751,16 @@ class FullTranslationsTab:
                            pre-filtered by current selection.
     """
 
-    def __init__(self, parent: ttk.Frame, app) -> None:
+    def __init__(self, parent: ttk.Frame, app, *,
+                 base_url=None, env_key="prod") -> None:
         self.parent = parent
         self.app = app
+        # None / omitted → production. Stage tab passes TRANZOR_STAGE_URL.
+        prod_url = ""
+        if _legacy_api is not None:
+            prod_url = getattr(_legacy_api, "TRANZOR_URL", "") or ""
+        self.base_url = (base_url or prod_url).rstrip("/")
+        self.env_key = env_key or "prod"
         self._light_inv = None        # LightInventory or None — only selectors
         self._inv_loaded = False      # set True after first successful load
         self._busy = False
@@ -766,7 +779,11 @@ class FullTranslationsTab:
         # Product-group presets: persisted list of
         # {"name": str, "product_ids": [iid, ...]} dicts, loaded eagerly so
         # the preset combobox can render at build time.
-        self._presets_path: Path = Path.home() / ".tranzor_exporter" / "presets.json"
+        # Stage products differ from production — keep presets isolated.
+        preset_name = (
+            "presets.json" if self.env_key == "prod"
+            else f"presets_{self.env_key}.json")
+        self._presets_path: Path = Path.home() / ".tranzor_exporter" / preset_name
         self._presets: list = self._load_presets()
         # Guard against <<ComboboxSelected>> firing while we rebuild values.
         self._presets_suppress_combo: bool = False
@@ -798,6 +815,38 @@ class FullTranslationsTab:
     # ---- helpers ----------------------------------------------------
     def _t(self, key: str) -> str:
         return self.app._t(key)
+
+    def _is_stage(self) -> bool:
+        return getattr(self, "env_key", "prod") == "stage"
+
+    def _title_key(self) -> str:
+        return "ft_title_stage" if self._is_stage() else "ft_title"
+
+    def _subtitle_key(self) -> str:
+        return "ft_subtitle_stage" if self._is_stage() else "ft_subtitle"
+
+    def _api_kw(self) -> dict:
+        """Pass ``base_url`` only for non-prod so existing test fakes
+        (which don't accept the kwarg) keep working on the prod tab."""
+        base = (getattr(self, "base_url", None) or "").rstrip("/")
+        if not base:
+            return {}
+        prod = "http://tranzor-platform.int.rclabenv.com"
+        if _legacy_api is not None:
+            prod = (getattr(_legacy_api, "TRANZOR_URL", None) or prod).rstrip("/")
+        if base != prod.rstrip("/"):
+            return {"base_url": getattr(self, "base_url")}
+        return {}
+
+    def _monitor_attr(self) -> str:
+        env = getattr(self, "env_key", "prod") or "prod"
+        return "health_monitor" if env == "prod" else f"health_monitor_{env}"
+
+    def _health_monitor(self):
+        app = getattr(self, "app", None)
+        if app is None:
+            return None
+        return getattr(app, self._monitor_attr(), None)
 
     def _log(self, msg: str) -> None:
         # Append to the status label (short) and print (long).
@@ -836,10 +885,10 @@ class FullTranslationsTab:
 
         # Title
         self.lbl_title = ttk.Label(
-            head_left, text=self._t("ft_title"), style="Title.TLabel")
+            head_left, text=self._t(self._title_key()), style="Title.TLabel")
         self.lbl_title.pack(anchor="w")
         self.lbl_sub = ttk.Label(
-            head_left, text=self._t("ft_subtitle"), style="Subtitle.TLabel")
+            head_left, text=self._t(self._subtitle_key()), style="Subtitle.TLabel")
         self.lbl_sub.pack(anchor="w", pady=(2, 10))
 
         # Top bar: sources + refresh + export buttons
@@ -1045,8 +1094,8 @@ class FullTranslationsTab:
     # ---- i18n refresh ----------------------------------------------
     def refresh_text(self) -> None:
         try:
-            self.lbl_title.configure(text=self._t("ft_title"))
-            self.lbl_sub.configure(text=self._t("ft_subtitle"))
+            self.lbl_title.configure(text=self._t(self._title_key()))
+            self.lbl_sub.configure(text=self._t(self._subtitle_key()))
             self.lbl_src.configure(text=self._t("ft_sources_label"))
             self.chk_legacy.configure(text=self._t("ft_src_legacy"))
             self.chk_mr.configure(text=self._t("ft_src_mr"))
@@ -1086,20 +1135,27 @@ class FullTranslationsTab:
 
     # ---- connection-status pill (Connection_Health_Indicator_PRD.md) ----
     def _ensure_health_monitor(self):
-        """App-level HealthMonitor singleton; None when unavailable."""
+        """Per-environment HealthMonitor; None when unavailable.
+
+        Production keeps ``app.health_monitor`` (shared with existing tests).
+        Stage uses ``app.health_monitor_stage`` pointed at the Stage origin
+        so the pill never reports production latency for a Stage export.
+        """
         if _conn_health is None:
             return None
-        mon = getattr(self.app, "health_monitor", None)
+        attr = self._monitor_attr()
+        mon = getattr(self.app, attr, None)
         if mon is None:
             try:
-                base_url = getattr(_legacy_api, "TRANZOR_URL", None)
+                base_url = getattr(self, "base_url", None) or getattr(
+                    _legacy_api, "TRANZOR_URL", None)
                 if not base_url:
                     return None
                 token_provider = getattr(_tranzor_auth, "get_token", None)
                 mon = _conn_health.HealthMonitor(
                     base_url, token_provider=token_provider)
                 mon.start()
-                self.app.health_monitor = mon
+                setattr(self.app, attr, mon)
             except Exception:
                 return None
         return mon
@@ -1123,7 +1179,7 @@ class FullTranslationsTab:
             return
         self._check_clock_jump()
         lang = getattr(self.app, "lang", "en")
-        mon = getattr(self.app, "health_monitor", None)
+        mon = self._health_monitor()
         # _progress_dlg survives into the (modal) result view after the run
         # finishes, so "exporting" needs the _busy flag too — otherwise the
         # pill would stay in export mode and the probe would stay paused
@@ -1266,7 +1322,7 @@ class FullTranslationsTab:
             pass
 
     def _on_conn_click(self, _event=None) -> None:
-        mon = getattr(self.app, "health_monitor", None)
+        mon = self._health_monitor()
         if mon is not None:
             try:
                 mon.probe_soon()
@@ -1281,7 +1337,7 @@ class FullTranslationsTab:
         self._conn_recent_unstable = False
         if _conn_health is None:
             return True
-        mon = getattr(self.app, "health_monitor", None)
+        mon = self._health_monitor()
         if mon is None:
             return True
         try:
@@ -1717,7 +1773,7 @@ class FullTranslationsTab:
     def _run_light_refresh(self, sources, auto: bool = False) -> None:
         try:
             inv = _exp.build_light_inventory(
-                sources=sources, progress_cb=self._log)
+                sources=sources, progress_cb=self._log, **self._api_kw())
             self.parent.after(0, self._on_light_refresh_done, inv, None, auto)
         except Exception as e:
             self.parent.after(
@@ -1936,18 +1992,25 @@ class FullTranslationsTab:
         # aggregate over many sources, so there's no single task Created time;
         # the export instant is the per-run identifier.
         run_stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+        stage = self._is_stage()
         if mode == "json":
-            default_name = f"MergedTranslations_{run_stamp}.json"
+            prefix = "StageMergedTranslations" if stage else "MergedTranslations"
+            default_name = f"{prefix}_{run_stamp}.json"
+            title = ("Save Stage Merged Translations JSON" if stage
+                     else "Save Merged Translations JSON")
             out_path = filedialog.asksaveasfilename(
-                title="Save Merged Translations JSON",
+                title=title,
                 defaultextension=".json",
                 filetypes=[("JSON files", "*.json")],
                 initialfile=default_name,
             )
         else:
-            default_name = f"FullTranslations_{run_stamp}.zip"
+            prefix = "StageFullTranslations" if stage else "FullTranslations"
+            default_name = f"{prefix}_{run_stamp}.zip"
+            title = ("Save Stage Full Translations ZIP" if stage
+                     else "Save Full Translations ZIP")
             out_path = filedialog.asksaveasfilename(
-                title="Save Full Translations ZIP",
+                title=title,
                 defaultextension=".zip",
                 filetypes=[("Zip archives", "*.zip")],
                 initialfile=default_name,
@@ -1985,7 +2048,7 @@ class FullTranslationsTab:
         # Pause the probe NOW, not on the next 5s tick — an in-flight probe
         # cycle against an already-congested platform is exactly the extra
         # traffic PRD §3.1 forbids during exports.
-        mon = getattr(self.app, "health_monitor", None)
+        mon = self._health_monitor()
         if mon is not None:
             try:
                 mon.set_paused(True)
@@ -2044,6 +2107,7 @@ class FullTranslationsTab:
                 # carry _all_sources + inconsistencies_in_new. The zip path
                 # doesn't need it (and skipping keeps its memory footprint low).
                 track_all_sources=(mode == "json"),
+                **self._api_kw(),
             )
             if not heavy_inv.data:
                 self.parent.after(
