@@ -3080,27 +3080,33 @@ def save_mr_file(results_data, filename, label, fmt, bridge_info=None,
 SCAN_API = f"{TRANZOR_URL}/api/v1/missing_translation_scan"
 
 
-def fetch_scan_tasks(project_id=None, status=None, limit=50, offset=0):
+def scan_api_root(base_url=None):
+    """``/api/v1/missing_translation_scan`` root for *base_url*, or production."""
+    return f"{tranzor_url(base_url)}/api/v1/missing_translation_scan"
+
+
+def fetch_scan_tasks(project_id=None, status=None, limit=50, offset=0,
+                     base_url=None):
     """GET /missing_translation_scan/tasks?... → { total, tasks: [...] }"""
     params = {"limit": limit, "offset": offset}
     if project_id:
         params["project_id"] = project_id
     if status:
         params["status"] = status
-    resp = _api_get(f"{SCAN_API}/tasks", params=params)
+    resp = _api_get(f"{scan_api_root(base_url)}/tasks", params=params)
     resp.raise_for_status()
     data = resp.json()
     return data.get("total", 0), data.get("tasks", [])
 
 
-def fetch_scan_task_detail(task_id):
+def fetch_scan_task_detail(task_id, base_url=None):
     """GET /missing_translation_scan/tasks/{task_id}"""
-    resp = _api_get(f"{SCAN_API}/tasks/{task_id}")
+    resp = _api_get(f"{scan_api_root(base_url)}/tasks/{task_id}")
     resp.raise_for_status()
     return resp.json()
 
 
-def fetch_scan_results(task_id):
+def fetch_scan_results(task_id, base_url=None):
     """GET /missing_translation_scan/tasks/{task_id}/results — 分页拉全。
 
     ⚠️ 重要：Tranzor 后端这条接口默认 ``limit=200, max=1000``，**必须分页**。
@@ -3116,9 +3122,10 @@ def fetch_scan_results(task_id):
     all_translations: list = []
     first_resp = None
     offset = 0
+    api = scan_api_root(base_url)
     while True:
         resp = _api_get(
-            f"{SCAN_API}/tasks/{task_id}/results",
+            f"{api}/tasks/{task_id}/results",
             params={"limit": page_size, "offset": offset},
         )
         resp.raise_for_status()
@@ -3140,7 +3147,7 @@ def fetch_scan_results(task_id):
     return first_resp
 
 
-def count_scan_source_strings(task_id):
+def count_scan_source_strings(task_id, base_url=None):
     """Distinct en-US source-string count for one Missing-Translation-Scan task.
 
     Mirrors :func:`count_mr_source_strings` but reads the scan results endpoint
@@ -3149,7 +3156,7 @@ def count_scan_source_strings(task_id):
     callers can render a number without special-casing failures.
     """
     try:
-        results = fetch_scan_results(task_id)
+        results = fetch_scan_results(task_id, **_fwd(base_url))
     except Exception:
         return 0
     return distinct_source_string_count(results.get("translations", []))

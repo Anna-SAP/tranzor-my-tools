@@ -27,6 +27,7 @@ This file records stable background context for work in this workspace.
 - Do not replace the formal Windows build with an ad-hoc PyInstaller command.
 - Formal Mac app builds must use GitHub Actions workflow `.github/workflows/build-mac.yml`.
 - Do not treat a local ad-hoc Mac packaging command as the official release path.
+- The owner tests as a product manager via the Windows EXE. After a user-facing change, open a non-draft PR, merge to `master`, and let `Build Windows EXE` produce `TranzorExporter.exe` on the rolling `master-latest` GitHub Release. Do not leave the change as local-only source.
 
 ### Practical Working Rule
 

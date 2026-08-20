@@ -452,6 +452,16 @@ except Exception as _mr_stage_e:  # pragma: no cover
 else:
     _mr_stage_import_error = None
 
+# 🧪 Full Translations (Stage) — same selector/export panel as the core
+# Full Translations tab, pointed at Stage. Pure-additive, appended last.
+try:
+    import gui_tab_full_translations_stage as _ft_stage_tab_mod
+except Exception as _ft_stage_e:  # pragma: no cover
+    _ft_stage_tab_mod = None
+    _ft_stage_import_error = _ft_stage_e
+else:
+    _ft_stage_import_error = None
+
 _boot_mark("optional_tabs_imported")
 
 # ---------------------------------------------------------------------------
@@ -566,6 +576,7 @@ STRINGS = {
         "tab_file_translation": "📁 File Translation",
         "tab_mr_pipeline":     "🔀 MR Pipeline",
         "tab_mr_pipeline_stage": "🧪 MR Pipeline (Stage)",
+        "tab_full_translations_stage": "🧪 Full Translations (Stage)",
         "tab_quality_overview": "📊 Quality Overview",
         # MR Pipeline tab
         "mr_project":       "Project",
@@ -733,6 +744,7 @@ STRINGS = {
         "tab_file_translation": "📁 文件翻译",
         "tab_mr_pipeline":     "🔀 MR Pipeline",
         "tab_mr_pipeline_stage": "🧪 MR Pipeline (Stage)",
+        "tab_full_translations_stage": "🧪 全量翻译 (Stage)",
         "tab_quality_overview": "📊 质量概览",
         # MR Pipeline tab
         "mr_project":       "项目",
@@ -910,6 +922,14 @@ if _so_tab_mod is not None:
 if _mr_stage_tab_mod is not None:
     try:
         for _lang_code, _extra in _mr_stage_tab_mod.STRINGS.items():
+            STRINGS.setdefault(_lang_code, {}).update(_extra)
+    except Exception:
+        pass
+
+# Merge in strings from the optional Stage Full Translations tab.
+if _ft_stage_tab_mod is not None:
+    try:
+        for _lang_code, _extra in _ft_stage_tab_mod.STRINGS.items():
             STRINGS.setdefault(_lang_code, {}).update(_extra)
     except Exception:
         pass
@@ -1728,6 +1748,24 @@ class ExportApp:
                 self.mr_stage_tab = None
         _boot_mark("tab_mr_pipeline_stage")
 
+        # --- Tab: 🧪 Full Translations (Stage) (optional, pure additive) ---
+        # Same UI as the core Full Translations tab, pointed at Stage.
+        # Appended last so existing tab indices do not shift.
+        self.ft_stage_tab = None
+        self._ft_stage_tab_index = None
+        self._ft_stage_tab_initialized = False
+        if _ft_stage_tab_mod is not None:
+            try:
+                tab_ft_stage = ttk.Frame(self.notebook, style="App.TFrame")
+                self.notebook.add(tab_ft_stage, text="")
+                self.ft_stage_tab = _ft_stage_tab_mod.FullTranslationsStageTab(
+                    tab_ft_stage, self)
+                self._ft_stage_tab_index = self.notebook.index(tab_ft_stage)
+            except Exception as _e:
+                print(f"[Full Translations Stage tab] init failed: {_e}")
+                self.ft_stage_tab = None
+        _boot_mark("tab_full_translations_stage")
+
         # ═══════════════════════════════════════════
         # TAB 1 CONTENTS (File Translation)
         # ═══════════════════════════════════════════
@@ -2193,6 +2231,16 @@ class ExportApp:
                     self.mr_stage_tab, self._mr_stage_tab_index)
             except Exception:
                 pass
+        if (self.ft_stage_tab is not None
+                and self._ft_stage_tab_index is not None):
+            try:
+                self.notebook.tab(
+                    self._ft_stage_tab_index,
+                    text=self._t("tab_full_translations_stage"))
+                _register_tab_refresh(
+                    self.ft_stage_tab, self._ft_stage_tab_index)
+            except Exception:
+                pass
 
         # Summary panel texts
         self.lbl_summary_title.configure(text=self._t("summary_title"))
@@ -2600,6 +2648,15 @@ class ExportApp:
                 self._mr_stage_tab_initialized = True
                 try:
                     self.mr_stage_tab.on_first_show()
+                except Exception:
+                    pass
+            elif (self.ft_stage_tab is not None
+                  and self._ft_stage_tab_index is not None
+                  and tab_idx == self._ft_stage_tab_index
+                  and not self._ft_stage_tab_initialized):
+                self._ft_stage_tab_initialized = True
+                try:
+                    self.ft_stage_tab.on_first_show()
                 except Exception:
                     pass
 
