@@ -432,9 +432,41 @@ def fetch_recently_added_projects(max_workers=6, base_url=None):
 # ---------------------------------------------------------------------------
 # 2) 任务列表
 # ---------------------------------------------------------------------------
-def fetch_mr_tasks(project_id=None, release=None, status=None,
-                   limit=50, offset=0, base_url=None):
-    """GET /tasks?... → { total, tasks: [...] }"""
+def normalize_project_ids(project_id=None, project_ids=None):
+    """Collapse ``project_id`` / ``project_ids`` into a de-duplicated list.
+
+    Empty strings are dropped. ``project_ids`` wins when it is a non-empty
+    sequence; otherwise a single ``project_id`` (string, or a list/tuple
+    passed by accident) is used. Order of first appearance is kept so
+    display / filename / merge stay stable.
+    """
+    raw = []
+    if project_ids:
+        raw = list(project_ids)
+    elif isinstance(project_id, (list, tuple)):
+        raw = list(project_id)
+    elif project_id:
+        raw = [project_id]
+    out = []
+    seen = set()
+    for item in raw:
+        pid = str(item).strip()
+        if not pid or pid in seen:
+            continue
+        seen.add(pid)
+        out.append(pid)
+    return out
+
+
+def _task_recency_key(task):
+    """Sort key matching the /tasks default (newest ``created_at`` first)."""
+    return (str((task or {}).get("created_at") or ""),
+            str((task or {}).get("task_id") or ""))
+
+
+def _fetch_mr_tasks_one(project_id=None, release=None, status=None,
+                        limit=50, offset=0, base_url=None):
+    """GET /tasks for at most one ``project_id``."""
     params = {"limit": limit, "offset": offset}
     if project_id:
         params["project_id"] = project_id
@@ -447,6 +479,72 @@ def fetch_mr_tasks(project_id=None, release=None, status=None,
     resp.raise_for_status()
     data = resp.json()
     return data.get("total", 0), data.get("tasks", [])
+
+
+def _fetch_mr_tasks_many(project_ids, release=None, status=None,
+                         limit=50, offset=0, base_url=None):
+    """Merge several single-project /tasks streams (each newest-first).
+
+    The platform endpoint only accepts one ``project_id``. To keep page N of
+    the union equivalent to a global newest-first list we fetch
+    ``offset + limit`` rows from *each* project (enough to cover the slice
+    even if every row in it came from one project), merge by ``created_at``
+    desc, then slice. ``total`` is the sum of the per-project totals.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    ids = [str(p).strip() for p in (project_ids or []) if str(p).strip()]
+    if not ids:
+        return _fetch_mr_tasks_one(
+            project_id=None, release=release, status=status,
+            limit=limit, offset=offset, base_url=base_url)
+    if len(ids) == 1:
+        return _fetch_mr_tasks_one(
+            project_id=ids[0], release=release, status=status,
+            limit=limit, offset=offset, base_url=base_url)
+
+    need = (offset or 0) + (limit or 50)
+    workers = min(2, len(ids))  # match TRANZOR_MR_HTTP_WORKERS default
+    totals = {}
+    chunks = {}
+
+    def _one(pid):
+        return pid, _fetch_mr_tasks_one(
+            project_id=pid, release=release, status=status,
+            limit=need, offset=0, base_url=base_url)
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futs = [pool.submit(_one, pid) for pid in ids]
+        for fut in as_completed(futs):
+            pid, (total, tasks) = fut.result()
+            totals[pid] = int(total or 0)
+            chunks[pid] = list(tasks or [])
+
+    merged = []
+    for pid in ids:
+        merged.extend(chunks.get(pid) or [])
+    merged.sort(key=_task_recency_key, reverse=True)
+    start = offset or 0
+    return sum(totals.values()), merged[start:start + (limit or 50)]
+
+
+def fetch_mr_tasks(project_id=None, release=None, status=None,
+                   limit=50, offset=0, base_url=None, project_ids=None):
+    """GET /tasks?... → { total, tasks: [...] }
+
+    ``project_ids`` (a list of 2+ ids) fans out to one request per project
+    and merges by ``created_at`` desc. A single id — whether passed via
+    ``project_id`` or a one-element ``project_ids`` — keeps the original
+    one-request path, so existing callers and test fakes are unchanged.
+    """
+    ids = normalize_project_ids(project_id, project_ids)
+    if len(ids) > 1:
+        return _fetch_mr_tasks_many(
+            ids, release=release, status=status,
+            limit=limit, offset=offset, base_url=base_url)
+    return _fetch_mr_tasks_one(
+        project_id=(ids[0] if ids else None), release=release, status=status,
+        limit=limit, offset=offset, base_url=base_url)
 
 
 # ---------------------------------------------------------------------------
@@ -580,16 +678,18 @@ MAX_WORKERS = 4
 
 
 def collect_all_mr_results(progress_callback=None, project_id=None,
-                           release=None, status="completed", base_url=None):
+                           release=None, status="completed", base_url=None,
+                           project_ids=None):
     """遍历 MR Pipeline 任务，聚合翻译结果。
 
     Args:
         progress_callback: 可选回调 (msg: str) 用于输出进度日志
-        project_id / release / status: 透传给 :func:`fetch_mr_tasks`，让
-            「导出全部」**继承 MR Pipeline 面板的基础筛选**（Project / Release /
-            Status）。``None`` 表示不限该维度（旧的全项目行为）。``status``
-            默认 ``"completed"`` —— 只有 completed 任务才有翻译结果；GUI 仅在
-            用户显式选了其它状态时才覆盖。
+        project_id / project_ids / release / status: 透传给
+            :func:`fetch_mr_tasks`，让「导出全部」**继承 MR Pipeline 面板的
+            基础筛选**（Project / Release / Status）。``None`` 表示不限该
+            维度（旧的全项目行为）。``project_ids`` 为多选项目列表。
+            ``status`` 默认 ``"completed"`` —— 只有 completed 任务才有翻译
+            结果；GUI 仅在用户显式选了其它状态时才覆盖。
 
     Returns:
         与 fetch_mr_results 相同的结构: { "translations": [...], "summary": {} }
@@ -598,18 +698,29 @@ def collect_all_mr_results(progress_callback=None, project_id=None,
 
     log = progress_callback or print
 
+    ids = normalize_project_ids(project_id, project_ids)
+    if len(ids) == 1:
+        proj_label = ids[0]
+    elif len(ids) > 1:
+        proj_label = f"{len(ids)} projects"
+    else:
+        proj_label = None
+
     # Step 1: 分页获取匹配筛选的任务（默认 completed）
     _scope = ", ".join(
-        f"{k}={v}" for k, v in (("project", project_id), ("release", release),
+        f"{k}={v}" for k, v in (("project", proj_label), ("release", release),
                                 ("status", status)) if v)
     log(f"  正在获取 MR Pipeline 任务列表（{_scope or '全部'}）...")
     all_tasks = []
     offset = 0
     batch_size = 100
+    task_kw = {"release": release, "status": status, "limit": batch_size}
+    if len(ids) > 1:
+        task_kw["project_ids"] = ids
+    elif ids:
+        task_kw["project_id"] = ids[0]
     while True:
-        total, batch = fetch_mr_tasks(project_id=project_id, release=release,
-                                      status=status,
-                                      limit=batch_size, offset=offset,
+        total, batch = fetch_mr_tasks(offset=offset, **task_kw,
                                       **_fwd(base_url))
         all_tasks.extend(batch)
         if not batch or offset + batch_size >= total:
@@ -1091,6 +1202,47 @@ def fetch_dashboard_overview(project_id=None, release=None,
                     params=params)
     resp.raise_for_status()
     return resp.json()
+
+
+def aggregate_dashboard_overviews(parts):
+    """Merge per-project /dashboard/overview payloads into one stats dict.
+
+    ``total_tasks`` / ``completed_tasks`` / ``failed_tasks`` sum. Average
+    score is weighted by each project's completed count (falls back to the
+    legacy ``completed`` / ``failed`` keys). Missing scores are skipped
+    rather than treated as zero.
+    """
+    total = 0
+    completed = 0
+    failed = 0
+    score_acc = 0.0
+    score_weight = 0
+    for data in parts or []:
+        if not isinstance(data, dict):
+            continue
+        total += int(data.get("total_tasks") or 0)
+        c = int(data.get("completed_tasks", data.get("completed") or 0) or 0)
+        f = int(data.get("failed_tasks", data.get("failed") or 0) or 0)
+        completed += c
+        failed += f
+        avg = data.get("average_score")
+        if avg is None or not c:
+            continue
+        try:
+            score_acc += float(avg) * c
+            score_weight += c
+        except (TypeError, ValueError):
+            continue
+    out = {
+        "total_tasks": total,
+        "completed_tasks": completed,
+        "completed": completed,
+        "failed_tasks": failed,
+        "failed": failed,
+        "average_score": (round(score_acc / score_weight, 2)
+                          if score_weight else None),
+    }
+    return out
 
 
 # ---------------------------------------------------------------------------

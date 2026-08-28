@@ -80,6 +80,102 @@ class DisplayLabelTests(unittest.TestCase):
         self.assertEqual(sc.display_label("", "fr"), "(All)")
 
 
+class CheckedLabelTests(unittest.TestCase):
+    def test_prefixes_checkbox(self):
+        self.assertEqual(sc.checked_label("Fiji/Fiji", False, "en"),
+                         f"{sc.CHECK_OFF} Fiji/Fiji")
+        self.assertEqual(sc.checked_label("Fiji/Fiji", True, "zh"),
+                         f"{sc.CHECK_ON} Fiji/Fiji")
+
+    def test_empty_uses_all_placeholder(self):
+        self.assertEqual(sc.checked_label("", True, "en"),
+                         f"{sc.CHECK_ON} (All)")
+        self.assertEqual(sc.checked_label("", False, "zh"),
+                         f"{sc.CHECK_OFF} （全部）")
+
+
+class FormatSelectionSummaryTests(unittest.TestCase):
+    def test_empty_is_blank(self):
+        self.assertEqual(sc.format_selection_summary([]), "")
+        self.assertEqual(sc.format_selection_summary(None), "")
+        self.assertEqual(sc.format_selection_summary(["", "  "]), "")
+
+    def test_single_is_the_name(self):
+        # Identical to the pre-multi Combobox display so a 1-item
+        # selection doesn't look like a new widget.
+        self.assertEqual(
+            sc.format_selection_summary(["es/express-setup-renaissance"]),
+            "es/express-setup-renaissance")
+
+    def test_multi_is_count_en(self):
+        self.assertEqual(
+            sc.format_selection_summary(["a", "b"], "en"), "2 selected")
+        self.assertEqual(
+            sc.format_selection_summary(["a", "b", "c"], "en"), "3 selected")
+
+    def test_multi_is_count_zh(self):
+        self.assertEqual(
+            sc.format_selection_summary(["a", "b"], "zh"), "已选 2 项")
+
+    def test_unknown_lang_falls_back_to_en(self):
+        self.assertEqual(
+            sc.format_selection_summary(["a", "b"], "fr"), "2 selected")
+
+
+class ToggleSelectedTests(unittest.TestCase):
+    OPTIONS = ["Fiji/Fiji", "web/bui", "common/uns"]
+
+    def test_all_clears(self):
+        self.assertEqual(
+            sc.toggle_selected(self.OPTIONS, ["web/bui", "Fiji/Fiji"], ""),
+            [])
+        self.assertEqual(
+            sc.toggle_selected(self.OPTIONS, ["web/bui"], "   "),
+            [])
+
+    def test_add_preserves_options_order(self):
+        self.assertEqual(
+            sc.toggle_selected(self.OPTIONS, ["common/uns"], "Fiji/Fiji"),
+            ["Fiji/Fiji", "common/uns"])
+
+    def test_remove(self):
+        self.assertEqual(
+            sc.toggle_selected(self.OPTIONS, ["Fiji/Fiji", "web/bui"],
+                               "Fiji/Fiji"),
+            ["web/bui"])
+
+    def test_drops_unknown_and_blanks(self):
+        self.assertEqual(
+            sc.toggle_selected(self.OPTIONS, ["", "gone", "web/bui"],
+                               "common/uns"),
+            ["web/bui", "common/uns"])
+
+    def test_empty_options(self):
+        self.assertEqual(sc.toggle_selected([], ["x"], "x"), [])
+
+
+class AddVisibleTests(unittest.TestCase):
+    OPTIONS = ["Fiji/Fiji", "Fiji/video", "web/bui", "common/uns"]
+
+    def test_unions_visible_keeps_hidden_checks(self):
+        # Search "fiji" then Check visible: both Fiji/* join, web/bui stays.
+        self.assertEqual(
+            sc.add_visible(self.OPTIONS, ["web/bui"],
+                           ["Fiji/Fiji", "Fiji/video"]),
+            ["Fiji/Fiji", "Fiji/video", "web/bui"])
+
+    def test_skips_empty_placeholder(self):
+        self.assertEqual(
+            sc.add_visible(self.OPTIONS, [], ["", "web/bui"]),
+            ["web/bui"])
+
+    def test_idempotent(self):
+        already = ["Fiji/Fiji", "web/bui"]
+        self.assertEqual(
+            sc.add_visible(self.OPTIONS, already, ["Fiji/Fiji"]),
+            already)
+
+
 class ResolveLangTests(unittest.TestCase):
     def test_plain_string(self):
         self.assertEqual(sc._resolve_lang("zh"), "zh")

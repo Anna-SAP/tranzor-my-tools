@@ -23,9 +23,9 @@ class CollectAllFilterPassthroughTests(unittest.TestCase):
         self.calls = []
 
         def fake_tasks(project_id=None, release=None, status=None,
-                       limit=50, offset=0):
+                       limit=50, offset=0, project_ids=None):
             self.calls.append({"project_id": project_id, "release": release,
-                               "status": status})
+                               "status": status, "project_ids": project_ids})
             if offset == 0:
                 return 1, [{"task_id": "t1", "project_id": project_id or "p",
                             "merge_request_iid": "9"}]
@@ -57,6 +57,15 @@ class CollectAllFilterPassthroughTests(unittest.TestCase):
         self.assertEqual(self.calls[0]["project_id"], None)
         self.assertEqual(self.calls[0]["release"], None)
         self.assertEqual(self.calls[0]["status"], "completed")
+        self.assertIsNone(self.calls[0]["project_ids"])
+
+    def test_multi_project_ids_are_forwarded(self):
+        ids = ["common/uns", "web/bui"]
+        mr.collect_all_mr_results(progress_callback=lambda _m: None,
+                                  project_ids=ids, status="completed")
+        self.assertTrue(self.calls)
+        self.assertEqual(self.calls[0]["project_ids"], ids)
+        self.assertIsNone(self.calls[0]["project_id"])
 
 
 if __name__ == "__main__":
