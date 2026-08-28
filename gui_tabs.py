@@ -22,7 +22,7 @@ import advanced_filter
 import llm_qa as llm_qa_module
 from export_gui import FONT_FAMILY, IS_MAC, reveal_in_folder, sanitize_for_filename
 from date_picker import attach_calendar
-from searchable_combobox import attach_search
+from searchable_combobox import attach_search, format_selection_summary
 
 
 def _single_line_title(value):
@@ -137,6 +137,10 @@ class MRPipelineTab:
         # async source-count prefetch can re-apply the user's sort once the
         # numbers land, and so the header redraw shows the ▲/▼ marker.
         self._mr_sort = None
+        # Project dropdown is multi-select. Empty list = no project filter
+        # ("All"), matching the historical empty Combobox value. The
+        # Combobox StringVar is display-only (one name, or "N selected").
+        self._mr_selected_projects = []
         self._build(parent)
 
     def _t(self, key):
@@ -189,9 +193,12 @@ class MRPipelineTab:
         self.cmb_mr_project = ttk.Combobox(r1, textvariable=self.mr_project_var, width=20, state="readonly")
         self.cmb_mr_project.pack(side="left", padx=(4, 12))
         # 项目列表长（上百个仓库路径），原生下拉只能滚动找 —— 换成顶部带
-        # 关键字搜索框的过滤弹窗（选项仍每次现读 values，异步加载无感）。
+        # 关键字搜索框的**多选**过滤弹窗（选项仍每次现读 values，异步加载
+        # 无感）。空选 = 全部项目，与改造前的空占位项同语义。
         attach_search(self.cmb_mr_project, font_family=FONT_FAMILY,
-                      lang=lambda: self.app.lang)
+                      lang=lambda: self.app.lang, multi=True,
+                      get_selected=self._selected_mr_projects,
+                      set_selected=self._set_mr_selected_projects)
 
         self.lbl_mr_release = ttk.Label(r1, text="", style="Card.TLabel", width=8)
         self.lbl_mr_release.pack(side="left")
@@ -549,6 +556,7 @@ class MRPipelineTab:
         """Update all text for current language."""
         t = self._t
         self.lbl_mr_project.configure(text=t("mr_project"))
+        self._sync_mr_project_display()
         self.lbl_mr_release.configure(text=t("mr_release"))
         self.lbl_mr_status.configure(text=t("mr_status"))
         self.lbl_mr_date.configure(text=t("mr_date_range"))
@@ -613,6 +621,10 @@ class MRPipelineTab:
         rels = [""] + data.get("releases", [])
         self.cmb_mr_project.configure(values=pids)
         self.cmb_mr_release.configure(values=rels)
+        valid = {str(p) for p in (data.get("project_ids") or []) if p}
+        self._mr_selected_projects = [
+            p for p in self._selected_mr_projects() if p in valid]
+        self._sync_mr_project_display()
 
     def _invalidate_post_edit_cache(self):
         """Drop the cached ✏️ (post-edit) answers for the MR kind.
@@ -650,7 +662,42 @@ class MRPipelineTab:
         self.mr_page = 0
         self._load_tasks()
 
+    def _selected_mr_projects(self):
+        """Currently checked Project ids. Empty = no project filter."""
+        return [p for p in getattr(self, "_mr_selected_projects", []) if p]
+
+    def _set_mr_selected_projects(self, selected):
+        self._mr_selected_projects = [
+            str(p) for p in (selected or []) if str(p).strip()]
+        self._sync_mr_project_display()
+
+    def _sync_mr_project_display(self):
+        """Push the multi-select summary into the Project Combobox."""
+        lang = "en"
+        try:
+            lang = self.app.lang
+        except Exception:
+            pass
+        try:
+            self.mr_project_var.set(
+                format_selection_summary(self._selected_mr_projects(), lang))
+        except Exception:
+            pass
+
+    def _mr_project_filter_kwargs(self):
+        """Kwargs for fetch_mr_tasks / collect_all_mr_results.
+
+        Zero or one selected project uses the historical ``project_id``
+        argument (so test fakes that don't take ``project_ids`` keep
+        working). Two or more go through ``project_ids``.
+        """
+        projs = self._selected_mr_projects()
+        if len(projs) > 1:
+            return {"project_id": None, "project_ids": projs}
+        return {"project_id": (projs[0] if projs else None)}
+
     def _on_reset(self):
+        self._mr_selected_projects = []
         self.mr_project_var.set("")
         self.mr_release_var.set("")
         self.mr_status_var.set("")
@@ -785,7 +832,10 @@ class MRPipelineTab:
 
     def _fetch_tasks(self):
         try:
-            proj = self.mr_project_var.get() or None
+            projs = self._selected_mr_projects()
+            proj_set = set(projs)
+            proj = projs[0] if len(projs) == 1 else None
+            project_kw = self._mr_project_filter_kwargs()
             rel = self.mr_release_var.get() or None
             status = self.mr_status_var.get() or None
             mr_iid_filter = self.mr_iid_var.get().strip()
@@ -822,7 +872,7 @@ class MRPipelineTab:
                     detail = None
                 collected = []
                 if isinstance(detail, dict) and detail.get("task_id"):
-                    if proj and str(detail.get("project_id", "")) != proj:
+                    if proj_set and str(detail.get("project_id", "")) not in proj_set:
                         detail = None
                 if isinstance(detail, dict) and detail.get("task_id"):
                     if rel and str(detail.get("release", "")) != rel:
@@ -860,8 +910,13 @@ class MRPipelineTab:
 
             matching_jira_mrs = set()
             if jira_filter:
-                matching_jira_mrs = _jira.find_merge_requests(
-                    jira_filter, project_id=proj)
+                if len(projs) > 1:
+                    for pid in projs:
+                        matching_jira_mrs |= _jira.find_merge_requests(
+                            jira_filter, project_id=pid)
+                else:
+                    matching_jira_mrs = _jira.find_merge_requests(
+                        jira_filter, project_id=proj)
                 if not matching_jira_mrs:
                     self.parent.after(
                         0, self._on_tasks_loaded, self.mr_total, [], 0,
@@ -874,9 +929,9 @@ class MRPipelineTab:
             if not need_filter:
                 # Simple path: no client-side filtering needed
                 total, tasks = mr_api.fetch_mr_tasks(
-                    project_id=proj, release=rel, status=status,
+                    release=rel, status=status,
                     limit=self.mr_page_size, offset=base_offset,
-                    **self._api_kw())
+                    **project_kw, **self._api_kw())
                 self.parent.after(0, self._on_tasks_loaded,
                                   total, tasks, total, append, base_offset)
             else:
@@ -894,9 +949,9 @@ class MRPipelineTab:
 
                 while True:
                     api_total, batch = mr_api.fetch_mr_tasks(
-                        project_id=proj, release=rel, status=status,
+                        release=rel, status=status,
                         limit=batch_size, offset=offset,
-                        **self._api_kw())
+                        **project_kw, **self._api_kw())
                     if not batch:
                         break
                     total_scanned += len(batch)
@@ -1740,8 +1795,10 @@ class MRPipelineTab:
         # — is scoped to the same Project / Release / Status the list shows
         # (read here on the main thread). Date is not a list filter, so it is
         # intentionally not inherited.
+        project_kw = self._mr_project_filter_kwargs()
         basic_filters = {
-            "project_id": self.mr_project_var.get() or None,
+            "project_id": project_kw.get("project_id"),
+            "project_ids": project_kw.get("project_ids"),
             "release": self.mr_release_var.get() or None,
             "status": self.mr_status_var.get() or None,
         }
@@ -1796,13 +1853,23 @@ class MRPipelineTab:
                     # "completed" (only completed tasks have results) unless the
                     # user explicitly picked another status.
                     bf = basic_filters or {}
+                    ids = mr_api.normalize_project_ids(
+                        bf.get("project_id"), bf.get("project_ids"))
                     results = mr_api.collect_all_mr_results(
                         project_id=bf.get("project_id"),
+                        project_ids=bf.get("project_ids"),
                         release=bf.get("release"),
                         status=bf.get("status") or "completed",
                         **self._api_kw())
-                    proj_tag = sanitize_for_filename(bf.get("project_id") or "")
-                    id_tag = f"all_{proj_tag}" if proj_tag else "all_tasks"
+                    if not ids:
+                        id_tag = "all_tasks"
+                    elif len(ids) == 1:
+                        proj_tag = sanitize_for_filename(ids[0])
+                        id_tag = f"all_{proj_tag}" if proj_tag else "all_tasks"
+                    else:
+                        joined = sanitize_for_filename("+".join(ids))
+                        id_tag = (f"all_{joined}" if joined
+                                  else f"all_{len(ids)}projects")
                 type_tag = "all"
 
             ext = {"xlsx": ".xlsx", "json": ".json"}.get(fmt, ".html")
@@ -1873,10 +1940,19 @@ class MRPipelineTab:
 
     def _fetch_overview(self):
         try:
-            proj = self.mr_project_var.get() or None
+            projs = self._selected_mr_projects()
             rel = self.mr_release_var.get() or None
-            data = mr_api.fetch_dashboard_overview(
-                project_id=proj, release=rel, **self._api_kw())
+            if len(projs) > 1:
+                parts = [
+                    mr_api.fetch_dashboard_overview(
+                        project_id=pid, release=rel, **self._api_kw())
+                    for pid in projs
+                ]
+                data = mr_api.aggregate_dashboard_overviews(parts)
+            else:
+                data = mr_api.fetch_dashboard_overview(
+                    project_id=(projs[0] if projs else None),
+                    release=rel, **self._api_kw())
             self.parent.after(0, self._on_overview_loaded, data)
         except Exception as e:
             self.parent.after(0, self._on_overview_error, str(e))
