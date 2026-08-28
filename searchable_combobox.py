@@ -24,6 +24,8 @@ MR Pipeline 的 Project 下拉项多且名字长（``CoreLib/RoomsController`` �
     - 关键字过滤后可用「全选当前」勾上所有可见项（不会在无关键字时
       把上百个项目一次性勾上 — 那等价于「全部」却变成 N 次 API）；
     - Done / Esc / 点窗外关闭；每次勾选通过 ``set_selected`` 写回。
+    - 多选弹窗在提示行和列表之间有 Preset 条：芯片一键加载命名组合，
+      Save 原地命名（重名则确认覆盖）；右键芯片可重命名 / 删除。
 
 对外接口：
     - :func:`attach_search` —— 对一个 readonly ``ttk.Combobox`` 启用搜索下拉，
@@ -40,6 +42,8 @@ export_gui，避免 tab ↔ export_gui 的循环依赖）。
 from __future__ import annotations
 
 import tkinter as tk
+
+import project_presets as _pp
 
 # 深色主题取色 —— 与 export_gui 的 BG_CARD / ACCENT_BTN 保持一致（内联，
 # 理由同 date_picker）。
@@ -62,6 +66,28 @@ _MULTI_HINT = {
     "zh": "点击勾选，留空表示全部项目",
 }
 _SELECTED_N = {"en": "{n} selected", "zh": "已选 {n} 项"}
+_SAVE_LABEL = {"en": "Save", "zh": "保存"}
+_CANCEL_LABEL = {"en": "Cancel", "zh": "取消"}
+_REPLACE_LABEL = {"en": "Replace", "zh": "覆盖"}
+_RENAME_LABEL = {"en": "Rename", "zh": "重命名"}
+_DELETE_LABEL = {"en": "Delete", "zh": "删除"}
+_NAME_LABEL = {"en": "Name", "zh": "名称"}
+_REPLACE_PROMPT = {"en": 'Replace "{name}"?', "zh": "覆盖「{name}」？"}
+_LIMIT_HINT = {
+    "en": "Limit {n} groups — delete one first",
+    "zh": "最多 {n} 组，请先删除一组",
+}
+_DUP_HINT = {"en": "Name already used", "zh": "名称已被占用"}
+_EMPTY_PRESETS = {
+    "en": "Save these {n} as a named group",
+    "zh": "把这 {n} 个项目存成一组",
+}
+_EMPTY_PRESETS_NONE = {
+    "en": "Select projects, then Save",
+    "zh": "先勾选项目，再保存",
+}
+
+_MAX_VISIBLE_CHIPS = 4
 
 CHECK_OFF = "\u2610"  # ☐
 CHECK_ON = "\u2611"   # ☑
@@ -110,10 +136,12 @@ def checked_label(option, checked: bool, lang: str = "en") -> str:
     return f"{mark} {display_label(option, lang)}"
 
 
-def format_selection_summary(selected, lang: str = "en") -> str:
+def format_selection_summary(selected, lang: str = "en",
+                             preset_name: str | None = None) -> str:
     """把已选项目压成 Combobox 的单行展示。
 
     - 空 / 全空白 → ``""``（与历史「不过滤」占位一致，界面显示为空）；
+    - 勾选恰好等于某个已存组合 → 显示组合名（``preset_name``）；
     - 单选 → 项目名本身（与改造前单选 Combobox 完全相同）；
     - 多选 → 本地化的 ``N selected`` / ``已选 N 项``（宽度 20 的框装不下
       两个仓库路径，打开下拉才能看具体勾选）。
@@ -121,6 +149,9 @@ def format_selection_summary(selected, lang: str = "en") -> str:
     items = [str(s) for s in (selected or []) if str(s).strip()]
     if not items:
         return ""
+    named = (preset_name or "").strip()
+    if named:
+        return named
     if len(items) == 1:
         return items[0]
     lang = lang if lang in _SELECTED_N else "en"
@@ -185,13 +216,25 @@ class _SearchPopup(tk.Toplevel):
     _open_instance: "_SearchPopup | None" = None  # 全局单例，避免叠开多个
 
     def __init__(self, anchor, *, font_family, get_options, lang="en",
-                 multi=False, get_selected=None, set_selected=None):
+                 multi=False, get_selected=None, set_selected=None,
+                 get_presets=None, save_presets=None):
         super().__init__(anchor.winfo_toplevel())
         self._anchor = anchor
         self._lang = _resolve_lang(lang)
         self._ff = font_family
         self._multi = bool(multi)
         self._set_selected = set_selected
+        self._get_presets = get_presets
+        self._save_presets = save_presets
+        self._presets = []
+        self._form_mode = None
+        self._form_old_name = None
+        self._preset_enabled = bool(self._multi and get_presets is not None)
+        if self._preset_enabled:
+            try:
+                self._presets = list(get_presets() or [])
+            except Exception:
+                self._presets = []
         # 不能叫 ``_options``：会遮蔽 tkinter Misc._options 内部方法，
         # 之后任何 configure() 调用都会炸。
         raw = [str(o) for o in get_options()]
@@ -240,6 +283,9 @@ class _SearchPopup(tk.Toplevel):
             tk.Label(frame, text=_MULTI_HINT[self._lang],
                      font=(self._ff, 8), bg=_POPUP_BG, fg=_FG_MUTED,
                      anchor="w").pack(fill="x", padx=8, pady=(0, 2))
+
+        if self._preset_enabled:
+            self._build_preset_bar(frame)
 
         # ── 过滤列表 + 滚动条 ──
         body = tk.Frame(frame, bg=_POPUP_BG)
@@ -291,7 +337,7 @@ class _SearchPopup(tk.Toplevel):
         self._render_list(initial=True)
         self._place_below_anchor()
 
-        self.bind("<Escape>", lambda _e: self._close())
+        self.bind("<Escape>", self._on_escape)
         # grab_set 后，窗内点击照常派发，窗外点击被重定向到本窗并落在窗体
         # 矩形之外 → 据此关闭（同 date_picker）。
         self.bind("<Button-1>", self._maybe_close_outside, add="+")
@@ -337,9 +383,298 @@ class _SearchPopup(tk.Toplevel):
             except Exception:
                 pass
         try:
-            self._anchor.set(format_selection_summary(ordered, self._lang))
+            match = _pp.matching_name(ordered, self._presets)
+            self._anchor.set(format_selection_summary(
+                ordered, self._lang, preset_name=match))
         except tk.TclError:
             pass
+
+    def _persist_presets(self):
+        if self._save_presets is None:
+            return
+        try:
+            self._save_presets(self._presets)
+        except Exception:
+            pass
+
+    def _on_escape(self, _event=None):
+        if self._form_mode:
+            self._cancel_form()
+            return "break"
+        self._close()
+        return "break"
+
+    # -- Preset bar --------------------------------------------------------
+    def _build_preset_bar(self, parent):
+        wrap = tk.Frame(parent, bg=_POPUP_BG)
+        wrap.pack(fill="x", padx=6, pady=(0, 4))
+        bar = tk.Frame(wrap, bg=_ENTRY_BG, highlightbackground=_BORDER,
+                       highlightthickness=1)
+        bar.pack(fill="x")
+
+        self._chip_bar = tk.Frame(bar, bg=_ENTRY_BG)
+        self._chip_bar.pack(fill="x")
+        self._btn_save = tk.Button(
+            self._chip_bar, text=_SAVE_LABEL[self._lang],
+            command=self._begin_save, font=(self._ff, 8),
+            bg=_BORDER, fg="#ffffff",
+            activebackground=_MULTI_ACTIVE_BG, activeforeground="#ffffff",
+            relief="flat", bd=0, padx=8, pady=1, cursor="hand2")
+        # Pack Save first so the chip row cannot squeeze it off the bar.
+        self._btn_save.pack(side="right", padx=(4, 4), pady=3)
+        self._chip_row = tk.Frame(self._chip_bar, bg=_ENTRY_BG)
+        self._chip_row.pack(side="left", fill="x", expand=True,
+                            padx=(4, 0), pady=3)
+
+        self._form_bar = tk.Frame(bar, bg=_ENTRY_BG)
+        self._form_label = tk.Label(
+            self._form_bar, text=_NAME_LABEL[self._lang],
+            font=(self._ff, 8), bg=_ENTRY_BG, fg=_FG_MUTED)
+        self._form_label.pack(side="left", padx=(6, 4))
+        self._form_var = tk.StringVar()
+        self._form_entry = tk.Entry(
+            self._form_bar, textvariable=self._form_var, font=(self._ff, 9),
+            bg=_POPUP_BG, fg="#ffffff", insertbackground="#ffffff",
+            relief="flat", width=16)
+        self._form_entry.pack(side="left", fill="x", expand=True, ipady=2)
+        self._form_entry.bind("<Return>", lambda _e: self._commit_form() or "break")
+        self._form_entry.bind("<Escape>", lambda _e: self._on_form_escape())
+        self._form_ok = tk.Button(
+            self._form_bar, text=_SAVE_LABEL[self._lang],
+            command=self._commit_form, font=(self._ff, 8),
+            bg=_SELECTED_BG, fg="#ffffff",
+            activebackground="#c73a52", activeforeground="#ffffff",
+            relief="flat", bd=0, padx=8, pady=1, cursor="hand2")
+        self._form_ok.pack(side="right", padx=(4, 4), pady=3)
+        self._form_cancel = tk.Button(
+            self._form_bar, text=_CANCEL_LABEL[self._lang],
+            command=self._cancel_form, font=(self._ff, 8),
+            bg=_ENTRY_BG, fg=_FG_MUTED,
+            activebackground=_MULTI_ACTIVE_BG, activeforeground="#ffffff",
+            relief="flat", bd=0, padx=6, pady=1, cursor="hand2")
+        self._form_cancel.pack(side="right")
+
+        self._render_presets()
+
+    def _show_chip_bar(self):
+        try:
+            self._form_bar.pack_forget()
+        except tk.TclError:
+            pass
+        self._form_mode = None
+        self._form_old_name = None
+        try:
+            if not self._chip_bar.winfo_ismapped():
+                self._chip_bar.pack(fill="x")
+        except tk.TclError:
+            pass
+        self._render_presets()
+
+    def _show_form(self, mode, *, prompt=None, seed="", ok_label=None):
+        self._form_mode = mode
+        try:
+            self._chip_bar.pack_forget()
+        except tk.TclError:
+            pass
+        self._form_label.configure(text=prompt or _NAME_LABEL[self._lang])
+        show_entry = mode in ("save", "rename")
+        try:
+            if show_entry:
+                if not self._form_entry.winfo_ismapped():
+                    self._form_entry.pack(side="left", fill="x", expand=True,
+                                          ipady=2)
+                self._form_var.set(seed)
+            else:
+                self._form_entry.pack_forget()
+        except tk.TclError:
+            pass
+        self._form_ok.configure(
+            text=ok_label or _SAVE_LABEL[self._lang])
+        try:
+            if not self._form_bar.winfo_ismapped():
+                self._form_bar.pack(fill="x")
+        except tk.TclError:
+            pass
+        if show_entry:
+            try:
+                self._form_entry.focus_force()
+                self._form_entry.select_range(0, "end")
+            except tk.TclError:
+                pass
+
+    def _update_save_btn(self):
+        if not self._preset_enabled:
+            return
+        try:
+            self._btn_save.configure(
+                state=("normal" if self._selected else "disabled"))
+        except tk.TclError:
+            pass
+
+    def _chip_text(self, name: str) -> str:
+        s = str(name or "").strip()
+        if len(s) > 16:
+            return s[:15] + "…"
+        return s
+
+    def _render_presets(self):
+        if not self._preset_enabled or self._form_mode:
+            return
+        row = self._chip_row
+        for w in row.winfo_children():
+            w.destroy()
+        self._update_save_btn()
+        presets = list(self._presets)
+        if not presets:
+            n = len(self._selected)
+            msg = (_EMPTY_PRESETS[self._lang].format(n=n) if n
+                   else _EMPTY_PRESETS_NONE[self._lang])
+            tk.Label(row, text=msg, font=(self._ff, 8),
+                     bg=_ENTRY_BG, fg=_FG_MUTED, anchor="w"
+                     ).pack(side="left")
+            return
+        match = _pp.matching_name(self._ordered_selected(), presets)
+        visible = presets[:_MAX_VISIBLE_CHIPS]
+        overflow = presets[_MAX_VISIBLE_CHIPS:]
+        for preset in visible:
+            self._add_chip(row, preset, active=(preset.get("name") == match))
+        if overflow:
+            mb = tk.Menubutton(
+                row, text="▾", font=(self._ff, 8, "bold"),
+                bg=_BORDER, fg="#ffffff",
+                activebackground=_MULTI_ACTIVE_BG, activeforeground="#ffffff",
+                relief="flat", bd=0, padx=6, pady=1, cursor="hand2")
+            menu = tk.Menu(mb, tearoff=0, bg=_POPUP_BG, fg=_FG,
+                           activebackground=_MULTI_ACTIVE_BG,
+                           activeforeground="#ffffff")
+            for preset in overflow:
+                name = preset.get("name") or ""
+                menu.add_command(
+                    label=name,
+                    command=lambda n=name: self._apply_preset(n))
+            mb.configure(menu=menu)
+            mb.pack(side="left", padx=(2, 0))
+
+    def _add_chip(self, parent, preset, active=False):
+        name = preset.get("name") or ""
+        bg = _SELECTED_BG if active else _BORDER
+        btn = tk.Button(
+            parent, text=self._chip_text(name),
+            command=lambda n=name: self._apply_preset(n),
+            font=(self._ff, 8), bg=bg, fg="#ffffff",
+            activebackground=_MULTI_ACTIVE_BG, activeforeground="#ffffff",
+            relief="flat", bd=0, padx=6, pady=1, cursor="hand2")
+        btn.pack(side="left", padx=(0, 3))
+        btn.bind("<Button-3>", lambda e, n=name: self._chip_menu(e, n))
+
+    def _chip_menu(self, event, name):
+        menu = tk.Menu(self, tearoff=0, bg=_POPUP_BG, fg=_FG,
+                       activebackground=_MULTI_ACTIVE_BG,
+                       activeforeground="#ffffff")
+        menu.add_command(label=_RENAME_LABEL[self._lang],
+                         command=lambda: self._begin_rename(name))
+        menu.add_command(label=_DELETE_LABEL[self._lang],
+                         command=lambda: self._delete_named(name))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            try:
+                menu.grab_release()
+            except tk.TclError:
+                pass
+            try:
+                self.grab_set()
+            except tk.TclError:
+                pass
+
+    def _apply_preset(self, name):
+        preset = _pp.find_preset(self._presets, name)
+        if preset is None:
+            return
+        ids = _pp.apply_ids(preset.get("project_ids"), self._all_options)
+        self._selected = set(ids)
+        self._presets = _pp.touch_preset(self._presets, name)
+        self._persist_presets()
+        self._commit_live()
+        try:
+            self._query_var.set("")
+        except tk.TclError:
+            pass
+        self._render_list()
+        self._show_chip_bar()
+
+    def _begin_save(self):
+        if not self._selected:
+            return
+        self._form_old_name = None
+        self._show_form("save")
+
+    def _begin_rename(self, name):
+        self._form_old_name = name
+        self._show_form("rename", prompt=_RENAME_LABEL[self._lang], seed=name)
+
+    def _delete_named(self, name):
+        self._presets = _pp.delete_preset(self._presets, name)
+        self._persist_presets()
+        self._commit_live()
+        self._show_chip_bar()
+
+    def _on_form_escape(self, _event=None):
+        self._cancel_form()
+        return "break"
+
+    def _cancel_form(self):
+        self._show_chip_bar()
+        try:
+            self._entry.focus_force()
+        except tk.TclError:
+            pass
+
+    def _commit_form(self):
+        mode = self._form_mode
+        if mode == "replace":
+            self._finish_upsert(self._form_old_name)
+            return
+        name = (self._form_var.get() or "").strip()
+        if mode == "rename":
+            new, err = _pp.rename_preset(
+                self._presets, self._form_old_name, name)
+            if err == "duplicate":
+                self._form_label.configure(text=_DUP_HINT[self._lang])
+                return
+            if err:
+                return
+            self._presets = new
+            self._persist_presets()
+            self._commit_live()
+            self._show_chip_bar()
+            return
+        if mode != "save":
+            return
+        if _pp.find_preset(self._presets, name) is not None:
+            self._form_old_name = name
+            self._show_form(
+                "replace",
+                prompt=_REPLACE_PROMPT[self._lang].format(name=name),
+                ok_label=_REPLACE_LABEL[self._lang])
+            return
+        self._finish_upsert(name)
+
+    def _finish_upsert(self, name):
+        new, err = _pp.upsert_preset(
+            self._presets, name, self._ordered_selected())
+        if err == "limit":
+            self._show_form(
+                "save",
+                prompt=_LIMIT_HINT[self._lang].format(n=_pp.MAX_PRESETS),
+                seed=name or "")
+            return
+        if err:
+            return
+        self._presets = new
+        self._persist_presets()
+        self._commit_live()
+        self._show_chip_bar()
 
     # -- 渲染 --------------------------------------------------------------
     def _refilter(self):
@@ -455,6 +790,7 @@ class _SearchPopup(tk.Toplevel):
         self._selected = set(new)
         self._commit_live()
         self._render_list(keep_idx=idx, yview=yview)
+        self._render_presets()
 
     def _clear_selected(self):
         self._selected.clear()
@@ -466,6 +802,7 @@ class _SearchPopup(tk.Toplevel):
         except tk.TclError:
             yview, keep = None, 0
         self._render_list(keep_idx=keep, yview=yview)
+        self._render_presets()
 
     def _check_visible(self):
         if not self._keyword() or not self._filtered:
@@ -481,6 +818,7 @@ class _SearchPopup(tk.Toplevel):
         except tk.TclError:
             yview, keep = None, 0
         self._render_list(keep_idx=keep, yview=yview)
+        self._render_presets()
 
     def _pick(self, value: str):
         try:
@@ -551,7 +889,8 @@ class _SearchPopup(tk.Toplevel):
 # 对外便捷封装
 # ---------------------------------------------------------------------------
 def _open_popup(combobox, *, font_family, get_options, lang,
-                multi=False, get_selected=None, set_selected=None):
+                multi=False, get_selected=None, set_selected=None,
+                get_presets=None, save_presets=None):
     """打开（单例）搜索弹窗。已有打开的先关掉，避免叠加。"""
     prev = _SearchPopup._open_instance
     if prev is not None:
@@ -562,13 +901,15 @@ def _open_popup(combobox, *, font_family, get_options, lang,
     popup = _SearchPopup(
         combobox, font_family=font_family, get_options=get_options,
         lang=_resolve_lang(lang), multi=multi,
-        get_selected=get_selected, set_selected=set_selected)
+        get_selected=get_selected, set_selected=set_selected,
+        get_presets=get_presets, save_presets=save_presets)
     _SearchPopup._open_instance = popup
     return popup
 
 
 def attach_search(combobox, *, font_family, lang="en", get_options=None,
-                  multi=False, get_selected=None, set_selected=None):
+                  multi=False, get_selected=None, set_selected=None,
+                  get_presets=None, save_presets=None):
     """对一个 readonly ``ttk.Combobox`` 启用"关键字搜索"下拉。
 
     点击（以及焦点态按 ↓/空格）不再弹原生 popdown，而是弹出顶部带搜索框
@@ -585,6 +926,9 @@ def attach_search(combobox, *, font_family, lang="en", get_options=None,
     get_selected / set_selected
                 : 多选时读写已选项目列表（``list[str]``）。``set_selected``
                   在每次勾选时调用，由调用方负责更新 Combobox 展示文案。
+    get_presets / save_presets
+                : 多选时读写命名项目组合。传入 ``get_presets`` 才会画出
+                  Preset 条；``save_presets(list)`` 在增删改后立刻落盘。
 
     单选时 Combobox 的 textvariable / ``<<ComboboxSelected>>`` 语义保持不变。
     """
@@ -603,7 +947,8 @@ def attach_search(combobox, *, font_family, lang="en", get_options=None,
         _open_popup(combobox, font_family=font_family,
                     get_options=fetch, lang=lang,
                     multi=multi, get_selected=get_selected,
-                    set_selected=set_selected)
+                    set_selected=set_selected,
+                    get_presets=get_presets, save_presets=save_presets)
         return "break"
 
     combobox.bind("<Button-1>", _open)

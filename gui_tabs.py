@@ -23,6 +23,7 @@ import llm_qa as llm_qa_module
 from export_gui import FONT_FAMILY, IS_MAC, reveal_in_folder, sanitize_for_filename
 from date_picker import attach_calendar
 from searchable_combobox import attach_search, format_selection_summary
+import project_presets as _presets
 
 
 def _single_line_title(value):
@@ -198,7 +199,9 @@ class MRPipelineTab:
         attach_search(self.cmb_mr_project, font_family=FONT_FAMILY,
                       lang=lambda: self.app.lang, multi=True,
                       get_selected=self._selected_mr_projects,
-                      set_selected=self._set_mr_selected_projects)
+                      set_selected=self._set_mr_selected_projects,
+                      get_presets=self._load_mr_presets,
+                      save_presets=self._save_mr_presets)
 
         self.lbl_mr_release = ttk.Label(r1, text="", style="Card.TLabel", width=8)
         self.lbl_mr_release.pack(side="left")
@@ -671,6 +674,12 @@ class MRPipelineTab:
             str(p) for p in (selected or []) if str(p).strip()]
         self._sync_mr_project_display()
 
+    def _load_mr_presets(self):
+        return _presets.load_presets(getattr(self, "env_key", "prod"))
+
+    def _save_mr_presets(self, rows):
+        _presets.save_presets(getattr(self, "env_key", "prod"), rows)
+
     def _sync_mr_project_display(self):
         """Push the multi-select summary into the Project Combobox."""
         lang = "en"
@@ -678,9 +687,15 @@ class MRPipelineTab:
             lang = self.app.lang
         except Exception:
             pass
+        selected = self._selected_mr_projects()
+        match = None
+        try:
+            match = _presets.matching_name(selected, self._load_mr_presets())
+        except Exception:
+            match = None
         try:
             self.mr_project_var.set(
-                format_selection_summary(self._selected_mr_projects(), lang))
+                format_selection_summary(selected, lang, preset_name=match))
         except Exception:
             pass
 
