@@ -121,6 +121,21 @@ class FormatSelectionSummaryTests(unittest.TestCase):
         self.assertEqual(
             sc.format_selection_summary(["a", "b"], "fr"), "2 selected")
 
+    def test_matching_preset_name_wins(self):
+        self.assertEqual(
+            sc.format_selection_summary(["a", "b"], "en", preset_name="UNS"),
+            "UNS")
+        # Even a single project shows the group name when it matches.
+        self.assertEqual(
+            sc.format_selection_summary(["common/uns"], "zh",
+                                        preset_name="UNS"),
+            "UNS")
+
+    def test_blank_preset_name_ignored(self):
+        self.assertEqual(
+            sc.format_selection_summary(["a", "b"], "en", preset_name="  "),
+            "2 selected")
+
 
 class ToggleSelectedTests(unittest.TestCase):
     OPTIONS = ["Fiji/Fiji", "web/bui", "common/uns"]

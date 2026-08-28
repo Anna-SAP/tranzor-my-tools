@@ -173,10 +173,13 @@ class _FakeApp:
 def _bare_tab():
     tab = MRPipelineTab.__new__(MRPipelineTab)
     tab.app = _FakeApp()
+    tab.env_key = "prod"
     tab._mr_selected_projects = []
     tab.mr_project_var = _FakeVar()
     tab.cmb_mr_project = _FakeCombo()
     tab.cmb_mr_release = _FakeCombo()
+    tab._load_mr_presets = lambda: []
+    tab._save_mr_presets = lambda _rows: None
     return tab
 
 
@@ -216,6 +219,13 @@ class TabDisplayAndResetTests(unittest.TestCase):
 
         tab._set_mr_selected_projects([])
         self.assertEqual(tab.mr_project_var.value, "")
+
+    def test_display_uses_matching_preset_name(self):
+        tab = _bare_tab()
+        tab._load_mr_presets = lambda: [
+            {"name": "UNS", "project_ids": ["a", "b"], "updated_at": 1}]
+        tab._set_mr_selected_projects(["b", "a"])
+        self.assertEqual(tab.mr_project_var.value, "UNS")
 
     def test_on_reset_clears_selection(self):
         tab = _bare_tab()

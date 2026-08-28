@@ -30,6 +30,7 @@ a = Analysis(
         'gui_tab_full_translations_stage',
         'date_picker',  # 共享深色日历选择组件（日期字段 📅 选择器）
         'searchable_combobox',  # 共享可搜索下拉组件（Project 关键字过滤弹窗）
+        'project_presets',  # 命名项目组合（Preset）读写 ~/.tranzor_exporter_config.json
         'mr_jira',  # MR title → JIRA ID 提取（MR Pipeline 的 JIRA 列）
         'opus_id_monitor',
         'tranzor_checks',

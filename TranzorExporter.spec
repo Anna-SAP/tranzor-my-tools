@@ -89,6 +89,8 @@ a = Analysis(
         'date_picker',
         # 共享可搜索下拉组件（MR Pipeline 的 Project 关键字过滤弹窗）。
         'searchable_combobox',
+        'project_presets',  # 命名项目组合（Preset）读写 ~/.tranzor_exporter_config.json
+
         # MR title → JIRA ID 提取（MR Pipeline 的 JIRA 列）。
         'mr_jira',
         'merge_watchdog',
