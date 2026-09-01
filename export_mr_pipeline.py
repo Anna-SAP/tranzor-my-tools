@@ -3258,7 +3258,44 @@ def fetch_scan_task_detail(task_id, base_url=None):
     return resp.json()
 
 
-def fetch_scan_results(task_id, base_url=None):
+# Backend hard-cap is 1000. Changes export pages at that cap so a 13k-row
+# UNS scan is ~14 round-trips instead of ~69. The ✏️ probe uses a smaller
+# first page so a hit on row 2 doesn't wait for a 1000-row dump.
+SCAN_RESULTS_PAGE_SIZE = 1000
+SCAN_PROBE_PAGE_SIZE = 200
+
+_MR_IID_IN_URL = re.compile(r"/merge_requests/(\d+)(?:/|$|\?)")
+
+# Same human-edit labels File Translation uses. Scan /results does not
+# currently emit ``translation_type``, but we still honour it if a future
+# backend starts tagging PUT-updated rows.
+_SCAN_HUMAN_TYPES = frozenset({"Manual Edit", "LLM Retranslate"})
+
+
+def parse_mr_iid_from_url(url):
+    """Extract a GitLab MR iid from an ``import_mr_url`` / web URL.
+
+    Returns ``None`` when the URL is empty or doesn't contain
+    ``/merge_requests/<iid>``.
+    """
+    if not url:
+        return None
+    m = _MR_IID_IN_URL.search(str(url))
+    return int(m.group(1)) if m else None
+
+
+def fetch_scan_results_page(task_id, limit=SCAN_RESULTS_PAGE_SIZE, offset=0,
+                            base_url=None):
+    """GET one page of ``/missing_translation_scan/tasks/{id}/results``."""
+    resp = _api_get(
+        f"{scan_api_root(base_url)}/tasks/{task_id}/results",
+        params={"limit": int(limit), "offset": int(offset)},
+    )
+    resp.raise_for_status()
+    return resp.json() or {}
+
+
+def fetch_scan_results(task_id, base_url=None, page_size=SCAN_RESULTS_PAGE_SIZE):
     """GET /missing_translation_scan/tasks/{task_id}/results — 分页拉全。
 
     ⚠️ 重要：Tranzor 后端这条接口默认 ``limit=200, max=1000``，**必须分页**。
@@ -3270,18 +3307,13 @@ def fetch_scan_results(task_id, base_url=None):
     凭 ``total`` 决定要不要继续翻页；老调用方拿到的依然是合并后的同一
     结构，对它们完全透明。
     """
-    page_size = 1000  # 后端 hard cap = 1000，能一次拉多少就拉多少
     all_translations: list = []
     first_resp = None
     offset = 0
-    api = scan_api_root(base_url)
+    page_size = max(1, min(int(page_size or SCAN_RESULTS_PAGE_SIZE), 1000))
     while True:
-        resp = _api_get(
-            f"{api}/tasks/{task_id}/results",
-            params={"limit": page_size, "offset": offset},
-        )
-        resp.raise_for_status()
-        data = resp.json() or {}
+        data = fetch_scan_results_page(
+            task_id, limit=page_size, offset=offset, **_fwd(base_url))
         if first_resp is None:
             first_resp = data
         translations = data.get("translations") or []
@@ -3299,14 +3331,58 @@ def fetch_scan_results(task_id, base_url=None):
     return first_resp
 
 
-def count_scan_source_strings(task_id, base_url=None):
-    """Distinct en-US source-string count for one Missing-Translation-Scan task.
+def source_string_count_from_scan_summary(summary):
+    """Best-effort en-US string count from GET /tasks/{id} ``summary``.
 
-    Mirrors :func:`count_mr_source_strings` but reads the scan results endpoint
-    (the scan translation schema is identical to MR's, so distinct ``opus_id``
-    is the same en-US workload signal). Returns 0 on any error / empty task so
-    callers can render a number without special-casing failures.
+    Downloading every scan result row just to count distinct ``opus_id`` is
+    what froze the Scan Tasks list (and starved Changes export) on a
+    13k-row UNS scan. Task detail already reports per-language
+    ``source_items_count``; the largest of those is the number of source
+    strings translated into at least that language — the workload signal
+    the GUI column wants. Falls back to the overall items count, then 0.
     """
+    if not summary:
+        return 0
+    lang_counts = []
+    overall = 0
+    for row in summary:
+        if not isinstance(row, dict):
+            continue
+        raw = row.get("source_items_count")
+        if raw in (None, ""):
+            continue
+        try:
+            n = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if n <= 0:
+            continue
+        dim = row.get("dimension")
+        if dim == "language":
+            lang_counts.append(n)
+        elif dim == "overall":
+            overall = n
+    if lang_counts:
+        return max(lang_counts)
+    return overall
+
+
+def count_scan_source_strings(task_id, base_url=None):
+    """en-US source-string count for one Missing-Translation-Scan task.
+
+    Prefers the cheap task-detail ``summary`` (one small GET) so the GUI
+    column can fill in without downloading every translation row. Falls
+    back to paging ``/results`` and counting distinct ``opus_id`` when
+    the summary is missing (older backend). Returns 0 on any error.
+    """
+    try:
+        detail = fetch_scan_task_detail(task_id, **_fwd(base_url))
+        n = source_string_count_from_scan_summary(
+            (detail or {}).get("summary"))
+        if n:
+            return n
+    except Exception:
+        pass
     try:
         results = fetch_scan_results(task_id, **_fwd(base_url))
     except Exception:
@@ -3314,67 +3390,304 @@ def count_scan_source_strings(task_id, base_url=None):
     return distinct_source_string_count(results.get("translations", []))
 
 
-def detect_scan_changes(task_id, progress_callback=None):
-    """收集某个 Scan 任务的翻译变更记录。
+def scan_row_prev_and_curr(row):
+    """``(prev, curr)`` when a scan result row has a later text change.
 
-    Scan 任务没有 MR 级别的多 task 序列、也没有 cases / edit-logs 子接口。
-    真正记录"变化"的只有 translation 自身的 `iteration_history`：
-    当 `iteration > 1` 时，`iteration_history.iteration_1.translation` 保存了
-    AI 第一轮草稿，最终 `translated_text` 是经过 refinement 的定稿。
-
-    Returns:
-        list[dict]: 字段 shape 与 detect_mr_changes 返回值对齐，方便 save_mr_file
-        自动识别为 changes 模式（通过 `prev_translated_text` 非空触发）。
+    The scan UI's PUT (``UpdateScanTranslation``) and the translator's
+    auto-refine both land in ``iteration_history.iteration_1`` vs the
+    current ``translated_text``. Returns ``None`` when there is no
+    usable before/after pair.
     """
-    log = progress_callback or print
-    log("  正在获取扫描任务详情...")
-    detail = fetch_scan_task_detail(task_id)
+    if not isinstance(row, dict):
+        return None
+    hist = row.get("iteration_history") or {}
+    if not isinstance(hist, dict):
+        return None
+    iter1 = hist.get("iteration_1")
+    if not isinstance(iter1, dict):
+        return None
+    prev = (iter1.get("translation")
+            or iter1.get("translated_text") or "")
+    curr = row.get("translated_text") or ""
+    if not prev or prev == curr:
+        return None
+    return prev, curr
+
+
+def scan_row_has_content_change(row):
+    """True iff this scan result row carries a later translation change."""
+    if not isinstance(row, dict):
+        return False
+    if (row.get("translation_type") or "") in _SCAN_HUMAN_TYPES:
+        return True
+    return scan_row_prev_and_curr(row) is not None
+
+
+def _scan_meta_from_detail(detail, mr_iid=None, mr_link=""):
+    detail = detail or {}
     project_id = detail.get("project_id", "")
     base_ref = detail.get("base_ref", "")
     head_ref = detail.get("head_ref", "")
-    scan_meta = {
-        "mr_link": "",
+    iid = mr_iid if mr_iid is not None else ""
+    return {
+        "mr_link": mr_link or detail.get("import_mr_url") or "",
         "project_id": project_id,
-        "mr_iid": "",
+        "mr_iid": iid,
         "release": f"{base_ref}..{head_ref}" if base_ref or head_ref else "",
         "jira_ticket_id": "",
     }
 
-    log("  正在获取翻译结果...")
-    results = fetch_scan_results(task_id)
-    translations = results.get("translations", [])
 
-    changes = []
-    for t in translations:
-        hist = t.get("iteration_history") or {}
-        if not isinstance(hist, dict):
+def _change_row_from_scan_result(row, *, scan_meta, task_id, detail,
+                                 prev_text, curr_text, change_source):
+    return {
+        **scan_meta,
+        "opus_id": row.get("opus_id", ""),
+        "source_text": row.get("source_text", ""),
+        "target_language": row.get("target_language", ""),
+        "prev_translated_text": prev_text,
+        "translated_text": curr_text,
+        "prev_task_id": "",
+        "task_id": task_id,
+        "prev_task_created": "",
+        "task_created": (detail or {}).get("created_at", ""),
+        "fixed_by": row.get("fixed_by") or "",
+        "fixed_at": row.get("fixed_at") or "",
+        "change_source": change_source,
+        "final_score": row.get("final_score"),
+        "error_category": row.get("error_category"),
+        "reason": row.get("reason"),
+        "iteration": row.get("iteration"),
+        "scan_task_id": task_id,
+    }
+
+
+def scan_import_mr_has_lead_fix(detail):
+    """True iff the scan's GitLab import MR carries a Language Lead fix commit.
+
+    Cheap one-call probe (same fingerprint as MR Pipeline ✏️). ``False``
+    on missing URL / no token / any error — callers fall through to the
+    results-page scan.
+    """
+    project_id = (detail or {}).get("project_id")
+    iid = parse_mr_iid_from_url((detail or {}).get("import_mr_url"))
+    if not project_id or iid is None:
+        return False
+    try:
+        import gitlab_client
+        gl = gitlab_client.GitLabClient()
+        if not gl.has_token():
+            return False
+        return bool(gitlab_client.mr_has_lead_fix_commit(gl, project_id, iid))
+    except Exception:
+        return False
+
+
+def scan_task_has_content_change(task_id, base_url=None):
+    """True iff a scan task has later translation content changes.
+
+    Two cheap-first signals, matching MR Pipeline's ✏️ probe:
+
+    1. GitLab Language Lead fix commit on the scan's import MR
+       (``import_mr_url``) — one round-trip, no results download.
+    2. Paged ``/results`` looking for ``iteration_history`` text drift
+       (or a ``translation_type`` human-edit label). Short-circuits on
+       the first hit so a 13k-row UNS scan lights the badge from page 1
+       instead of downloading every row.
+
+    Returning False still has to finish the remaining pages (to be sure
+    there is no change). Callers that only need a highlight can live
+    with that: tasks *with* changes return almost immediately.
+    """
+    detail = {}
+    try:
+        detail = fetch_scan_task_detail(task_id, **_fwd(base_url)) or {}
+    except Exception:
+        detail = {}
+    if scan_import_mr_has_lead_fix(detail):
+        return True
+
+    offset = 0
+    page_size = SCAN_PROBE_PAGE_SIZE
+    seen = 0
+    while True:
+        try:
+            data = fetch_scan_results_page(
+                task_id, limit=page_size, offset=offset, **_fwd(base_url))
+        except Exception:
+            return False
+        rows = data.get("translations") or []
+        if any(scan_row_has_content_change(t) for t in rows):
+            return True
+        seen += len(rows)
+        total = int(data.get("total") or 0)
+        if not rows or seen >= total or offset > 100_000:
+            return False
+        offset += len(rows)
+
+
+def _collect_scan_gitlab_lead_fix_changes(detail, scan_meta, task_id, seen_keys,
+                                          log):
+    """Best-effort: Language Lead fix commits on the scan's import MR branch."""
+    iid = parse_mr_iid_from_url((detail or {}).get("import_mr_url"))
+    project_id = (detail or {}).get("project_id")
+    if not iid or not project_id:
+        return []
+    try:
+        import gitlab_client
+        gl = gitlab_client.GitLabClient()
+        if not gl.has_token():
+            return []
+        mr_obj = gl.get_merge_request(project_id, iid)
+        source_branch = (mr_obj or {}).get("source_branch") or ""
+        if not source_branch:
+            return []
+        log(f"  正在扫描 import MR#{iid} 源分支 {source_branch} 上的 Lead fix...")
+        fixes = gitlab_client.scan_branch_fix_commits(
+            gl, project_id, source_branch, {}, restrict_to_cases=False)
+    except Exception as e:
+        log(f"  ⚠ 扫描 import MR Lead fix 失败: {e}")
+        return []
+    extra = []
+    mr_link = (detail or {}).get("import_mr_url") or ""
+    meta = {**scan_meta, "mr_iid": iid, "mr_link": mr_link}
+    for (opus_id, lang), rec in (fixes or {}).items():
+        key = (opus_id, lang)
+        if key in seen_keys:
             continue
-        iter1 = hist.get("iteration_1")
-        if not isinstance(iter1, dict):
+        prev_text = rec.get("pre") or ""
+        curr_text = rec.get("post") or ""
+        if not prev_text and not curr_text:
             continue
-        prev_text = (iter1.get("translation")
-                     or iter1.get("translated_text") or "")
-        curr_text = t.get("translated_text", "")
-        if not prev_text or prev_text == curr_text:
+        if prev_text == curr_text:
             continue
-        changes.append({
-            **scan_meta,
-            "opus_id": t.get("opus_id", ""),
-            "source_text": t.get("source_text", ""),
-            "target_language": t.get("target_language", ""),
+        seen_keys.add(key)
+        extra.append({
+            **meta,
+            "opus_id": opus_id,
+            "source_text": "",
+            "target_language": lang,
             "prev_translated_text": prev_text,
             "translated_text": curr_text,
             "prev_task_id": "",
             "task_id": task_id,
             "prev_task_created": "",
-            "task_created": detail.get("created_at", ""),
-            "fixed_by": "",
-            "fixed_at": "",
-            "change_source": "scan-refinement",
-            "final_score": t.get("final_score"),
-            "error_category": t.get("error_category"),
-            "reason": t.get("reason"),
-            "iteration": t.get("iteration"),
+            "task_created": rec.get("committed_at") or "",
+            "fixed_by": rec.get("fixed_by") or "",
+            "fixed_at": rec.get("committed_at") or "",
+            "change_source": "language-lead-fix (gitlab-branch)",
+            "final_score": None,
+            "error_category": None,
+            "reason": rec.get("title") or "",
+            "iteration": None,
+            "scan_task_id": task_id,
         })
-    log(f"  检测到 {len(changes)} 条 refinement 变更")
+    if extra:
+        log(f"  ✓ import MR 源分支 Lead fix {len(extra)} 条")
+    return extra
+
+
+def detect_scan_changes(task_id, progress_callback=None):
+    """收集某个 Scan 任务的后期翻译内容变更。
+
+    两路检测（与 MR Pipeline Changes 对齐：后期内容变更，不只是 AI 草稿）：
+
+    1. ``iteration_history``：scan 结果里 iteration_1 草稿 vs 当前
+       ``translated_text``。覆盖翻译过程中的 refinement，以及扫描页 PUT
+       （``UpdateScanTranslation``）覆写后后端写入 history 的人工修订。
+    2. GitLab Language Lead fix：``create_mr`` 扫描随后 import 出的 MR
+       上，服务账号推送的 ``[Tranzor] Language Lead fix`` 提交。不依赖
+       dashboard/cases（scan import MR 通常没有）。
+
+    分页拉 ``/results``（默认 1000 行/页 = 后端上限，首屏之后 2 路并发），
+    边拉边筛，避免旧实现先把 1 万+ 行 UNS 结果整包下载完、再被 ✏️ /
+    en-US-Strings 预取占满 HTTP 闸门 —— 那会让 GUI 的 Export Selected
+    一直停在 "Exporting..."、按钮灰色不可点。
+
+    Returns:
+        list[dict]: 字段 shape 与 detect_mr_changes 返回值对齐，方便
+        save_mr_file 自动识别为 changes 模式（``prev_translated_text``）。
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    log = progress_callback or print
+    log("  正在获取扫描任务详情...")
+    detail = fetch_scan_task_detail(task_id)
+    iid = parse_mr_iid_from_url(detail.get("import_mr_url"))
+    scan_meta = _scan_meta_from_detail(
+        detail, mr_iid=iid or "",
+        mr_link=detail.get("import_mr_url") or "")
+
+    page_size = SCAN_RESULTS_PAGE_SIZE
+    log("  正在获取翻译结果（分页筛变更）...")
+    first = fetch_scan_results_page(task_id, limit=page_size, offset=0)
+    total = int(first.get("total") or 0)
+    first_rows = first.get("translations") or []
+
+    changes = []
+    seen_keys = set()
+
+    def _consume(rows):
+        added = 0
+        for t in rows or []:
+            pair = scan_row_prev_and_curr(t)
+            if pair is None and (
+                    (t.get("translation_type") or "") not in _SCAN_HUMAN_TYPES):
+                continue
+            if pair is None:
+                # Human-edit label but no history — keep the row so a PUT
+                # is never silently dropped; before-text is unknown.
+                prev_text, curr_text = "", t.get("translated_text") or ""
+                source = "scan-manual-edit"
+            else:
+                prev_text, curr_text = pair
+                source = "scan-refinement"
+            key = (t.get("opus_id", ""), t.get("target_language", ""))
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            changes.append(_change_row_from_scan_result(
+                t, scan_meta=scan_meta, task_id=task_id, detail=detail,
+                prev_text=prev_text, curr_text=curr_text,
+                change_source=source))
+            added += 1
+        return added
+
+    _consume(first_rows)
+    fetched = len(first_rows)
+    log(f"  已扫描 {fetched}/{total or fetched} 条，变更 {len(changes)}")
+
+    offsets = []
+    if total > fetched and first_rows:
+        off = fetched
+        while off < total and off <= 100_000:
+            offsets.append(off)
+            off += page_size
+
+    if offsets:
+        workers = max(1, min(MAX_HTTP_WORKERS, len(offsets)))
+
+        def _page(off):
+            return fetch_scan_results_page(
+                task_id, limit=page_size, offset=off)
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_page, off): off for off in offsets}
+            for fut in as_completed(futures):
+                try:
+                    page = fut.result()
+                except Exception as e:
+                    log(f"  ⚠ 分页获取失败 (offset={futures[fut]}): {e}")
+                    continue
+                batch = page.get("translations") or []
+                _consume(batch)
+                fetched += len(batch)
+                log(f"  已扫描 {min(fetched, total)}/{total} 条，变更 {len(changes)}")
+
+    gitlab_extra = _collect_scan_gitlab_lead_fix_changes(
+        detail, scan_meta, task_id, seen_keys, log)
+    changes.extend(gitlab_extra)
+    log(f"  检测到 {len(changes)} 条翻译变更 "
+        f"(iteration/PUT: {len(changes) - len(gitlab_extra)}，"
+        f"GitLab Lead fix: {len(gitlab_extra)})")
     return changes

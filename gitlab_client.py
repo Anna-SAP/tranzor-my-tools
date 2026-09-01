@@ -930,12 +930,18 @@ def _list_lead_fix_commits(client, project_id, source_branch, *,
 
 
 def scan_branch_fix_commits(client, project_id, source_branch, cases_by_key,
-                            *, lookback_days=_LEAD_FIX_LOOKBACK_DAYS):
+                            *, lookback_days=_LEAD_FIX_LOOKBACK_DAYS,
+                            restrict_to_cases=True):
     """扫描 MR 源分支上 Tranzor 的 Language Lead fix 提交，重建每个
     ``(opus_id, target_language)`` 的 pre/post —— **独立于 fixed_by_lead**。
 
-    仅回填出现在 ``cases_by_key`` 里的 (opus_id, lang)，既避免把无关文件 /
+    默认仅回填出现在 ``cases_by_key`` 里的 (opus_id, lang)，既避免把无关文件 /
     旁支 key 带进报告，也把 blob 拉取限制在本 MR 的翻译单元内。
+
+    ``restrict_to_cases=False`` 放开 UNS 模板路径：Scan Tasks 的 import MR
+    往往没有 dashboard/cases，但仍要把源分支上的 Language Lead fix 收进
+    Changes 报告。非 UNS 的 key-value 文件仍需要 ``cases_by_key`` 才能从
+    diff 里定位 opus_id。
 
     Args:
         client: GitLabClient（或等价 duck-type；需 list_commits /
@@ -978,7 +984,7 @@ def scan_branch_fix_commits(client, project_id, source_branch, cases_by_key,
 
             uns = parse_uns_template_path(path)
             if uns is not None:
-                if uns not in cases_by_key:
+                if restrict_to_cases and uns not in cases_by_key:
                     continue  # 只回填本 MR 已跟踪的单元
                 post = pre = None
                 try:

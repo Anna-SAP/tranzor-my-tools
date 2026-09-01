@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import export_mr_pipeline as mr
@@ -36,48 +37,86 @@ class _FakeResp:
 
 
 class CountScanSourceStringsTests(unittest.TestCase):
-    def test_counts_distinct_opus_ids_not_rows(self):
+    def test_prefers_task_detail_summary(self):
+        # The GUI used to page the entire /results dump just to count
+        # distinct opus_id — a 13k-row UNS scan froze the list and starved
+        # Changes export. Summary is one small GET.
+        summary = [
+            {"dimension": "overall", "source_items_count": 13703},
+            {"dimension": "language", "dimension_key": "fr-CA",
+             "source_items_count": 1132},
+            {"dimension": "language", "dimension_key": "zh-CN",
+             "source_items_count": 737},
+        ]
+        with mock.patch.object(
+            mr, "fetch_scan_task_detail",
+            return_value={"summary": summary},
+        ) as detail, mock.patch.object(
+            mr, "fetch_scan_results",
+        ) as results:
+            self.assertEqual(mr.count_scan_source_strings("t"), 1132)
+        detail.assert_called_once()
+        results.assert_not_called()
+
+    def test_summary_helper_uses_max_language_count(self):
+        self.assertEqual(mr.source_string_count_from_scan_summary([
+            {"dimension": "overall", "source_items_count": 2266},
+            {"dimension": "language", "dimension_key": "fr-CA",
+             "source_items_count": 175},
+            {"dimension": "language", "dimension_key": "zh-CN",
+             "source_items_count": 133},
+        ]), 175)
+
+    def test_summary_helper_falls_back_to_overall(self):
+        self.assertEqual(mr.source_string_count_from_scan_summary([
+            {"dimension": "overall", "source_items_count": 42},
+        ]), 42)
+
+    def test_summary_helper_empty_is_zero(self):
+        self.assertEqual(mr.source_string_count_from_scan_summary(None), 0)
+        self.assertEqual(mr.source_string_count_from_scan_summary([]), 0)
+
+    def test_counts_distinct_opus_ids_not_rows_when_no_summary(self):
         # 2 source strings × 3 languages = 6 rows, but distinct opus_id == 2.
         translations = [
             {"opus_id": "k1", "target_language": lang} for lang in ("de", "fr", "ja")
         ] + [
             {"opus_id": "k2", "target_language": lang} for lang in ("de", "fr", "ja")
         ]
-        mr_ref = mr.fetch_scan_results
-        mr.fetch_scan_results = lambda tid: {"translations": translations}
-        try:
+        with mock.patch.object(
+            mr, "fetch_scan_task_detail", return_value={"summary": []},
+        ), mock.patch.object(
+            mr, "fetch_scan_results",
+            return_value={"translations": translations},
+        ):
             self.assertEqual(mr.count_scan_source_strings("t"), 2)
-        finally:
-            mr.fetch_scan_results = mr_ref
 
     def test_ignores_rows_without_opus_id(self):
         translations = [{"opus_id": "k1"}, {"opus_id": ""}, {"target_language": "de"}]
-        mr_ref = mr.fetch_scan_results
-        mr.fetch_scan_results = lambda tid: {"translations": translations}
-        try:
+        with mock.patch.object(
+            mr, "fetch_scan_task_detail", return_value={},
+        ), mock.patch.object(
+            mr, "fetch_scan_results",
+            return_value={"translations": translations},
+        ):
             self.assertEqual(mr.count_scan_source_strings("t"), 1)
-        finally:
-            mr.fetch_scan_results = mr_ref
 
     def test_empty_task_is_zero(self):
-        mr_ref = mr.fetch_scan_results
-        mr.fetch_scan_results = lambda tid: {"translations": []}
-        try:
+        with mock.patch.object(
+            mr, "fetch_scan_task_detail", return_value={"summary": []},
+        ), mock.patch.object(
+            mr, "fetch_scan_results",
+            return_value={"translations": []},
+        ):
             self.assertEqual(mr.count_scan_source_strings("t"), 0)
-        finally:
-            mr.fetch_scan_results = mr_ref
 
     def test_api_error_degrades_to_zero(self):
-        mr_ref = mr.fetch_scan_results
-
-        def _boom(tid):
-            raise RuntimeError("500")
-
-        mr.fetch_scan_results = _boom
-        try:
+        with mock.patch.object(
+            mr, "fetch_scan_task_detail", side_effect=RuntimeError("500"),
+        ), mock.patch.object(
+            mr, "fetch_scan_results", side_effect=RuntimeError("500"),
+        ):
             self.assertEqual(mr.count_scan_source_strings("t"), 0)
-        finally:
-            mr.fetch_scan_results = mr_ref
 
 
 class CountLegacySourceStringsTests(unittest.TestCase):

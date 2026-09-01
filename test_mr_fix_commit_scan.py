@@ -209,6 +209,21 @@ class TestScanBranchFixCommits(unittest.TestCase):
         self.assertEqual(client.blob_calls, [],
                          "must not fetch blobs for out-of-scope keys")
 
+    def test_restrict_to_cases_false_keeps_uns_without_cases(self):
+        """Scan-task import MRs have no dashboard/cases. UNS Lead-fix
+        commits on that branch must still be collected."""
+        client = FakeClient(
+            commits=[commit("fixsha", title="[Tranzor] Language Lead batch fix: 1")],
+            diffs={"fixsha": [file_diff(UNS_FR_CA)]},
+            blobs={(UNS_FR_CA, "fixsha"): "post", (UNS_FR_CA, "addsha"): "pre"},
+        )
+        out = gitlab_client.scan_branch_fix_commits(
+            client, "common/uns", "br", cases_by_key={},
+            restrict_to_cases=False)
+        self.assertIn(UNS_KEY, out)
+        self.assertEqual(out[UNS_KEY]["pre"], "pre")
+        self.assertEqual(out[UNS_KEY]["post"], "post")
+
     def test_independent_of_fixed_by_lead(self):
         """The scan never reads fixed_by_lead — a case with it NULL is detected
         purely from the branch commit. This is the whole point of P2."""
