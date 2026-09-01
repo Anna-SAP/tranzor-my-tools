@@ -54,7 +54,7 @@ STRINGS = {
         "scan_col_output_mode":  "Output Mode",
         "scan_col_created":      "Created",
         "scan_col_age":          "Age",
-        "scan_post_edit_legend": "✏️ = task contains at least one human-edited translation (post-edit)",
+        "scan_post_edit_legend": "✏️ = later translation content change (post-edit or refined iteration)",
     },
     "zh": {
         "tab_scan_tasks":        "🔎 扫描任务",
@@ -79,7 +79,7 @@ STRINGS = {
         "scan_col_output_mode":  "输出模式",
         "scan_col_created":      "创建时间",
         "scan_col_age":          "距今",
-        "scan_post_edit_legend": "✏️ = 该任务至少有一条经过人工编辑（post-edit）",
+        "scan_post_edit_legend": "✏️ = 该任务后期发生过翻译内容变更（人工修订或迭代精修）",
     },
 }
 
@@ -815,7 +815,16 @@ class ScanTasksTab:
                     adv_state=None, scan_created="", llm_qa=False):
         try:
             if export_type == "changes":
-                changes = mr_api.detect_scan_changes(task_id)
+                def _progress(msg):
+                    # detect_scan_changes logs from this worker thread;
+                    # Tk widgets are not thread-safe.
+                    text = f"{self._t('status_exporting')} {msg}".strip()
+                    self.parent.after(
+                        0, lambda t=text: self.lbl_scan_status_bar.configure(
+                            text=t[:80]))
+
+                changes = mr_api.detect_scan_changes(
+                    task_id, progress_callback=_progress)
                 results = {"translations": changes, "summary": {},
                            "task_id": task_id}
                 type_tag = "changes"

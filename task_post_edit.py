@@ -11,8 +11,15 @@ Per-channel rule:
 
 - File Translation (legacy) — translations whose
   ``translation_type in ("Manual Edit", "LLM Retranslate")``.
-- Scan Tasks — same rule as legacy (the scan results endpoint emits
-  translation entries with the same shape).
+- Scan Tasks — two cheap-first signals, because ``/results`` does **not**
+  emit ``translation_type`` and dumping every row of a 13k-item UNS scan
+  starved the HTTP gate (Changes export sat on "Exporting..." forever):
+
+  1. GitLab Language Lead fix commit on the scan's import MR
+     (``import_mr_url``), same fingerprint as MR Pipeline.
+  2. Paged ``/results`` looking for ``iteration_history`` text drift
+     (and a ``translation_type`` human-edit label if a future backend
+     starts emitting one). Short-circuits on the first hit.
 - MR Pipeline — **two paths in OR**, because Tranzor has two distinct
   human-revision mechanisms that land in different stores:
 
@@ -141,9 +148,21 @@ def _fetch_legacy(task_id: str) -> bool:
 
 
 def _fetch_scan(task_id: str) -> bool:
+    """Detect later translation content changes on a scan task.
+
+    Must not download the full ``/results`` dump up front — on a 13k-row
+    UNS scan that took tens of seconds *per concurrent caller* and, with
+    the process-wide HTTP gate of 2, blocked Changes export from ever
+    finishing. Delegates to
+    :func:`export_mr_pipeline.scan_task_has_content_change`, which
+    probes the import-MR GitLab lead-fix signal first and then pages
+    results, returning on the first iteration_history / human-edit hit.
+    """
     import export_mr_pipeline as _mp
-    results = _mp.fetch_scan_results(task_id) or {}
-    return has_post_edit_scan(results.get("translations") or [])
+    try:
+        return bool(_mp.scan_task_has_content_change(task_id))
+    except Exception:
+        return False
 
 
 _shared_client = None
