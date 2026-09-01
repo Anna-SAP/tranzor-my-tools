@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import export_mr_pipeline as mr_api
 from export_gui import (
     FONT_FAMILY, IS_MAC, format_age_days, reveal_in_folder,
-    sanitize_for_filename,
+    sanitize_for_filename, export_output_dir,
 )
 import task_post_edit as _tpe
 import advanced_filter
@@ -790,6 +790,8 @@ class ScanTasksTab:
             created_col = self._SCAN_COLUMNS.index("created")
             if len(values) > name_col:
                 task_name = str(values[name_col] or "")
+                if task_name.startswith(_tpe.POST_EDIT_PREFIX):
+                    task_name = task_name[len(_tpe.POST_EDIT_PREFIX):]
             if len(values) > created_col:
                 scan_created = str(values[created_col] or "")
         # Send to LLM QA always writes the full-translation JSON audit shape.
@@ -814,22 +816,22 @@ class ScanTasksTab:
     def _run_export(self, task_id, fmt, export_type="changes", task_name="",
                     adv_state=None, scan_created="", llm_qa=False):
         try:
-            if export_type == "changes":
-                def _progress(msg):
-                    # detect_scan_changes logs from this worker thread;
-                    # Tk widgets are not thread-safe.
-                    text = f"{self._t('status_exporting')} {msg}".strip()
-                    self.parent.after(
-                        0, lambda t=text: self.lbl_scan_status_bar.configure(
-                            text=t[:80]))
+            def _progress(msg):
+                # Worker-thread logs; Tk widgets are not thread-safe.
+                text = f"{self._t('status_exporting')} {msg}".strip()
+                self.parent.after(
+                    0, lambda t=text: self.lbl_scan_status_bar.configure(
+                        text=t[:80]))
 
+            if export_type == "changes":
                 changes = mr_api.detect_scan_changes(
                     task_id, progress_callback=_progress)
                 results = {"translations": changes, "summary": {},
                            "task_id": task_id}
                 type_tag = "changes"
             else:
-                results = mr_api.fetch_scan_results(task_id)
+                results = mr_api.fetch_scan_results(
+                    task_id, progress_callback=_progress)
                 type_tag = "all"
 
             id_tag = task_id[:8]
@@ -842,7 +844,7 @@ class ScanTasksTab:
             filename = self._build_export_filename(
                 ext, task_name=task_name, id_tag=id_tag, type_tag=type_tag,
                 created=scan_created, export_date=today)
-            script_dir = os.path.dirname(os.path.abspath(__file__))
+            script_dir = export_output_dir()
             filepath = os.path.join(script_dir, filename)
             created_note = f"created {scan_created}, " if scan_created else ""
             label = (f"Scan Task {id_tag} — {type_tag} "

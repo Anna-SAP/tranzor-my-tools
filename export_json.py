@@ -46,6 +46,30 @@ from collections import OrderedDict
 _SOURCE_LANG = "en-US"
 
 
+def _segment_stable_key(row, key):
+    """Keep UNS segmented units from collapsing onto one JSON key.
+
+    Scan (and some MR) ``/results`` rows for Handlebars emails reuse the
+    *file-level* ``opus_id`` (e.g. ``common.uns.airLeadCaptured__email_html__1210``)
+    across every ``tu_id`` segment, with ``has_seg_units=true``. The QA
+    pivot is last-write-wins on ``(key, lang)``, so 13k segment rows
+    became 191 file keys whose translations were whichever segment
+    happened to arrive last — unusable for LQA.
+
+    When the row is a segment, stamp ``:::seg:::{tu_id}`` (the same
+    shape the UNS segmented-email LQA skill already expects). Rows that
+    already carry ``:::seg:::`` or have no ``tu_id`` are left alone.
+    """
+    if not key or ":::seg:::" in key:
+        return key
+    if not row.get("has_seg_units"):
+        return key
+    tu = row.get("tu_id")
+    if tu in (None, ""):
+        return key
+    return f"{key}:::seg:::{tu}"
+
+
 def _normalize_row(row):
     """归一化一条翻译行 → (key, lang, source_text, translated_text)。
 
@@ -56,6 +80,7 @@ def _normalize_row(row):
         我们取 after 作为最终译文。
     """
     key = row.get("opus_id") or row.get("string_key") or ""
+    key = _segment_stable_key(row, key)
     lang = row.get("target_language") or row.get("language") or ""
     src = row.get("source_text") or ""
     # 优先取 translated_text；其次 after（changes 模式的最终值）
