@@ -179,6 +179,21 @@ def open_in_browser(filepath):
         webbrowser.open(url)
 
 
+def export_output_dir():
+    """Directory where HTML / Excel / JSON exports are written.
+
+    Frozen (Windows EXE) builds unpack to ``%TEMP%\\_MEI*``. Writing next
+    to ``__file__`` there hides the file in a folder Explorer rarely
+    shows — and PyInstaller deletes it when the app exits — so
+    Send-to-LLM-QA looks like it produced nothing. Use the EXE's own
+    folder instead (typically Downloads). Source runs still write next
+    to the ``.py`` files, matching historical behaviour.
+    """
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
 def sanitize_for_filename(name, max_len=40):
     """Coerce a free-form identifier (task name, MR title, …) into a chunk
     that is safe to embed in a filename across Windows / macOS / Linux.
@@ -194,6 +209,11 @@ def sanitize_for_filename(name, max_len=40):
     if not name:
         return ""
     s = str(name).strip()
+    # Treeview may still carry the ✏️ post-edit prefix; it is not a
+    # filesystem-illegal character, so strip it (and the VS16 selector)
+    # before the rest of the cleanup or the filename becomes
+    # ``scan_task_✏️_...``.
+    s = s.replace("✏️", "").replace("\u270f", "").replace("\ufe0f", "")
     # Strip filesystem-illegal characters and ASCII control bytes.
     s = re.sub(r'[<>:"/\\|?*\x00-\x1F]', "-", s)
     # Whitespace → single _ so "iva 260520" becomes "iva_260520".
@@ -3071,7 +3091,7 @@ class ExportApp:
                 else:
                     filename = f"tranzor_all_changes_{run_stamp}{ext}"
 
-            script_dir = os.path.dirname(os.path.abspath(__file__))
+            script_dir = export_output_dir()
             filepath = os.path.join(script_dir, filename)
 
             bridge_info = self._bridge_info_for_export()

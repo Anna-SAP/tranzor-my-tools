@@ -73,6 +73,14 @@ class ScanCreatedTimeStampTests(unittest.TestCase):
         for bad in '<>:"/\\|?*':
             self.assertNotIn(bad, name)
 
+    def test_post_edit_prefix_is_stripped_from_filename(self):
+        name = _build(
+            ".json", task_name="✏️ UNS release_26-3-3 02",
+            id_tag="06f77242", type_tag="all",
+            created="2026-09-01 02:51:08", export_date="2026-09-01")
+        self.assertNotIn("✏️", name)
+        self.assertIn("UNS_release_26-3-3_02", name)
+
     def test_name_tag_omitted_when_no_task_name(self):
         name = _build(
             ".json", task_name="", id_tag="75040f78", type_tag="changes",

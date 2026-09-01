@@ -3295,7 +3295,8 @@ def fetch_scan_results_page(task_id, limit=SCAN_RESULTS_PAGE_SIZE, offset=0,
     return resp.json() or {}
 
 
-def fetch_scan_results(task_id, base_url=None, page_size=SCAN_RESULTS_PAGE_SIZE):
+def fetch_scan_results(task_id, base_url=None, page_size=SCAN_RESULTS_PAGE_SIZE,
+                       progress_callback=None):
     """GET /missing_translation_scan/tasks/{task_id}/results — 分页拉全。
 
     ⚠️ 重要：Tranzor 后端这条接口默认 ``limit=200, max=1000``，**必须分页**。
@@ -3311,6 +3312,7 @@ def fetch_scan_results(task_id, base_url=None, page_size=SCAN_RESULTS_PAGE_SIZE)
     first_resp = None
     offset = 0
     page_size = max(1, min(int(page_size or SCAN_RESULTS_PAGE_SIZE), 1000))
+    log = progress_callback
     while True:
         data = fetch_scan_results_page(
             task_id, limit=page_size, offset=offset, **_fwd(base_url))
@@ -3319,6 +3321,11 @@ def fetch_scan_results(task_id, base_url=None, page_size=SCAN_RESULTS_PAGE_SIZE)
         translations = data.get("translations") or []
         all_translations.extend(translations)
         total = int(data.get("total") or 0)
+        if log:
+            try:
+                log(f"  已获取 {len(all_translations)}/{total or len(all_translations)} 条")
+            except Exception:
+                pass
         # 结束条件：要么这一页空了、要么累计已 ≥ total
         if not translations or len(all_translations) >= total:
             break

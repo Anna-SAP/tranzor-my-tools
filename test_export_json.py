@@ -205,6 +205,56 @@ class TestMrScanRowSchema(unittest.TestCase):
         self.assertEqual(by_key["O.2"]["fr-FR"], "")
 
 
+class TestSegmentStableKeys(unittest.TestCase):
+    """UNS scan /results reuses the file-level opus_id across tu_id segments.
+    The QA pivot must not last-write-wins them into one key."""
+
+    SEG_ROWS = [
+        {"opus_id": "common.uns.airLeadCaptured__email_html__1210",
+         "has_seg_units": True, "tu_id": 2, "target_language": "de-DE",
+         "source_text": "New lead from X", "translated_text": "Neues Lead von X"},
+        {"opus_id": "common.uns.airLeadCaptured__email_html__1210",
+         "has_seg_units": True, "tu_id": 5, "target_language": "de-DE",
+         "source_text": "Hello,", "translated_text": "Hallo,"},
+        {"opus_id": "common.uns.airLeadCaptured__email_html__1210",
+         "has_seg_units": True, "tu_id": 2, "target_language": "zh-CN",
+         "source_text": "New lead from X", "translated_text": "来自 X 的新潜在客户"},
+    ]
+
+    def test_segments_become_distinct_keys(self):
+        entries = ej.build_json_entries(self.SEG_ROWS, fill_missing=True)
+        keys = [e["key"] for e in entries]
+        self.assertEqual(keys, [
+            "common.uns.airLeadCaptured__email_html__1210:::seg:::2",
+            "common.uns.airLeadCaptured__email_html__1210:::seg:::5",
+        ])
+        by_key = _by_key(entries)
+        self.assertEqual(
+            by_key["common.uns.airLeadCaptured__email_html__1210:::seg:::2"]["de-DE"],
+            "Neues Lead von X")
+        self.assertEqual(
+            by_key["common.uns.airLeadCaptured__email_html__1210:::seg:::5"]["de-DE"],
+            "Hallo,")
+        # Same segment, other language, stays on the same key.
+        self.assertEqual(
+            by_key["common.uns.airLeadCaptured__email_html__1210:::seg:::2"]["zh-CN"],
+            "来自 X 的新潜在客户")
+
+    def test_already_segmented_opus_id_is_not_double_stamped(self):
+        rows = [{"opus_id": "common.uns.foo__email_html__1:::seg:::9",
+                 "has_seg_units": True, "tu_id": 9, "target_language": "en-US",
+                 "source_text": "Hi", "translated_text": "Hi"}]
+        entries = ej.build_json_entries(rows)
+        self.assertEqual(entries[0]["key"],
+                         "common.uns.foo__email_html__1:::seg:::9")
+
+    def test_non_segmented_rows_keep_plain_opus_id(self):
+        rows = [{"opus_id": "plain.key", "target_language": "en-US",
+                 "source_text": "A", "translated_text": "A"}]
+        entries = ej.build_json_entries(rows)
+        self.assertEqual(entries[0]["key"], "plain.key")
+
+
 class TestRobustness(unittest.TestCase):
     """Malformed input must be skipped gracefully, not crash the export."""
 

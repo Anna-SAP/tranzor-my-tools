@@ -20,7 +20,10 @@ import advanced_filter
 # Aliased so the ``llm_qa`` boolean flag threaded through the export handlers
 # doesn't shadow the module inside those methods.
 import llm_qa as llm_qa_module
-from export_gui import FONT_FAMILY, IS_MAC, reveal_in_folder, sanitize_for_filename
+from export_gui import (
+    FONT_FAMILY, IS_MAC, reveal_in_folder, sanitize_for_filename,
+    export_output_dir,
+)
 from date_picker import attach_calendar
 from searchable_combobox import attach_search, format_selection_summary
 import project_presets as _presets
@@ -1898,7 +1901,7 @@ class MRPipelineTab:
                 ext, mr_iid=mr_iid, id_tag=id_tag, type_tag=type_tag,
                 created=mr_created, export_date=today,
                 env_tag="" if self.env_key == "prod" else self.env_key)
-            script_dir = os.path.dirname(os.path.abspath(__file__))
+            script_dir = export_output_dir()
             filepath = os.path.join(script_dir, filename)
             created_note = f"created {mr_created}, " if mr_created else ""
             env_label = "" if self.env_key == "prod" else f" ({self.env_key})"
@@ -2805,7 +2808,7 @@ class QualityOverviewTab:
             today = date.today().isoformat()
             tab_label = "MR" if self._active_tab == "mr" else "File"
             filename = f"quality_overview_{tab_label}_{today}{ext}"
-            script_dir = os.path.dirname(os.path.abspath(__file__))
+            script_dir = export_output_dir()
             filepath = os.path.join(script_dir, filename)
             label = f"Quality Overview — {tab_label} (exported {today})"
             qa.save_quality_file(self.aggregated, filepath, label, fmt)
