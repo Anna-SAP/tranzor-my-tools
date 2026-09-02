@@ -340,6 +340,17 @@ class MRPipelineTab:
             bg="#7c5cff", fg="#fff", padx=14, pady=4, state="disabled")
         self.btn_mr_llm_qa.pack(side="left", padx=(8, 0))
 
+        # Source-only XLSX: unique Key / en-US Value / companion JSON
+        # filename, one sheet named "{JIRA} MR!{iid}". Independent of the
+        # Export Type / Output Format radios (always source xlsx).
+        self.btn_mr_source_xlsx = self.app._create_button(
+            action, text=self._t("mr_source_xlsx"),
+            command=self._on_export_source_xlsx,
+            style_name="InfoSmall",
+            font=(FONT_FAMILY, 10, "bold"),
+            bg="#0891b2", fg="#fff", padx=14, pady=4, state="disabled")
+        self.btn_mr_source_xlsx.pack(side="left", padx=(8, 0))
+
         # Export Type selector (mirrors File Translation panel)
         self.lbl_mr_export_type = ttk.Label(action, text="", style="Card.TLabel")
         self.lbl_mr_export_type.pack(side="left", padx=(16, 4))
@@ -572,6 +583,7 @@ class MRPipelineTab:
         self.btn_mr_reset.configure(text=t("mr_reset"))
         self.btn_mr_export.configure(text=t("mr_export"))
         self.btn_mr_llm_qa.configure(text=llm_qa_module.button_label(self.app.lang))
+        self.btn_mr_source_xlsx.configure(text=t("mr_source_xlsx"))
         self.btn_mr_load_more.configure(text=t("mr_load_more"))
         self.lbl_mr_export_type.configure(text=t("export_type_label"))
         self.rb_mr_changes.configure(text=t("export_type_changes"))
@@ -804,18 +816,28 @@ class MRPipelineTab:
             self._loading_anim_id = None
         self.mr_loading_overlay.place_forget()
 
-    def _set_controls_enabled(self, enabled):
-        state = "normal" if enabled else "disabled"
+    def _mr_export_buttons(self):
+        return (self.btn_mr_export, self.btn_mr_llm_qa, self.btn_mr_source_xlsx)
+
+    def _set_mr_export_buttons_enabled(self, enabled):
         if IS_MAC:
             flag = ["!disabled"] if enabled else ["disabled"]
-            self.btn_mr_export.state(flag)
-            self.btn_mr_llm_qa.state(flag)
+            for btn in self._mr_export_buttons():
+                btn.state(flag)
+        else:
+            state = "normal" if enabled else "disabled"
+            for btn in self._mr_export_buttons():
+                btn.configure(state=state)
+
+    def _set_controls_enabled(self, enabled):
+        self._set_mr_export_buttons_enabled(enabled)
+        if IS_MAC:
+            flag = ["!disabled"] if enabled else ["disabled"]
             self.btn_mr_prev.state(flag)
             self.btn_mr_next.state(flag)
             self.btn_mr_load_more.state(flag)
         else:
-            self.btn_mr_export.configure(state=state)
-            self.btn_mr_llm_qa.configure(state=state)
+            state = "normal" if enabled else "disabled"
             self.btn_mr_prev.configure(state=state)
             self.btn_mr_next.configure(state=state)
             self.btn_mr_load_more.configure(state=state)
@@ -1248,14 +1270,11 @@ class MRPipelineTab:
             self.btn_mr_prev.state(["!disabled"] if has_prev else ["disabled"])
             self.btn_mr_next.state(["!disabled"] if has_next else ["disabled"])
             self.btn_mr_load_more.state(["!disabled"] if has_more else ["disabled"])
-            self.btn_mr_export.state(["!disabled"] if has_rows else ["disabled"])
-            self.btn_mr_llm_qa.state(["!disabled"] if has_rows else ["disabled"])
         else:
             self.btn_mr_prev.configure(state="normal" if has_prev else "disabled")
             self.btn_mr_next.configure(state="normal" if has_next else "disabled")
             self.btn_mr_load_more.configure(state="normal" if has_more else "disabled")
-            self.btn_mr_export.configure(state="normal" if has_rows else "disabled")
-            self.btn_mr_llm_qa.configure(state="normal" if has_rows else "disabled")
+        self._set_mr_export_buttons_enabled(has_rows)
         self.lbl_mr_status_bar.configure(text=self._t("status_ready"))
 
         # Re-apply the "✏️ only" view filter to the freshly rendered rows
@@ -1365,12 +1384,7 @@ class MRPipelineTab:
         """Reflect the filtered view in the export button + status bar."""
         visible = self.mr_tree.get_children("")
         has_rows = bool(visible)
-        if IS_MAC:
-            self.btn_mr_export.state(["!disabled"] if has_rows else ["disabled"])
-            self.btn_mr_llm_qa.state(["!disabled"] if has_rows else ["disabled"])
-        else:
-            self.btn_mr_export.configure(state="normal" if has_rows else "disabled")
-            self.btn_mr_llm_qa.configure(state="normal" if has_rows else "disabled")
+        self._set_mr_export_buttons_enabled(has_rows)
         if self.mr_post_edit_only_var.get():
             self.lbl_mr_status_bar.configure(
                 text=self._t("mr_post_edit_filter_status").format(n=len(visible)))
@@ -1774,6 +1788,31 @@ class MRPipelineTab:
         parts.extend(seg for seg in (id_tag, type_tag, date_tag) if seg)
         return "_".join(parts) + ext
 
+    def _mr_row_export_meta(self, iid):
+        """Read task_id / MR# / JIRA / Created from a visible tree row."""
+        tags = self.mr_tree.item(iid, "tags")
+        task_id = tags[0] if tags else None
+        values = self.mr_tree.item(iid, "values")
+        mr_iid = ""
+        jira = ""
+        created = ""
+        if values:
+            mr_col = self._MR_COLUMNS.index("mr")
+            jira_col = self._MR_COLUMNS.index("jira")
+            created_col = self._MR_COLUMNS.index("created")
+            if len(values) > mr_col:
+                mr_iid = str(values[mr_col] or "")
+            if len(values) > jira_col:
+                jira = str(values[jira_col] or "")
+            if len(values) > created_col:
+                created = str(values[created_col] or "")
+        return {
+            "task_id": task_id,
+            "mr_iid": mr_iid,
+            "jira": jira,
+            "created": created,
+        }
+
     def _on_export(self, llm_qa=False):
         """Export the selected MR (or all rows when nothing is selected).
 
@@ -1785,21 +1824,13 @@ class MRPipelineTab:
         mr_iid = ""
         mr_created = ""
         if sel:
-            tags = self.mr_tree.item(sel[0], "tags")
-            task_id = tags[0] if tags else None
             # Pull MR# and the task's Created time straight from the visible
             # row (no extra HTTP round-trip) so the export filename can be
-            # stamped with both — see _build_export_filename. Indices are
-            # resolved from _MR_COLUMNS so a future column reshuffle can't
-            # silently point these reads at the wrong cell.
-            values = self.mr_tree.item(sel[0], "values")
-            if values:
-                mr_col = self._MR_COLUMNS.index("mr")
-                created_col = self._MR_COLUMNS.index("created")
-                if len(values) > mr_col:
-                    mr_iid = str(values[mr_col] or "")
-                if len(values) > created_col:
-                    mr_created = str(values[created_col] or "")
+            # stamped with both — see _build_export_filename.
+            meta = self._mr_row_export_meta(sel[0])
+            task_id = meta.get("task_id")
+            mr_iid = meta.get("mr_iid") or ""
+            mr_created = meta.get("created") or ""
         else:
             task_id = None  # Export all tasks
         # Send to LLM QA always writes the full-translation JSON audit shape.
@@ -1820,18 +1851,95 @@ class MRPipelineTab:
             "release": self.mr_release_var.get() or None,
             "status": self.mr_status_var.get() or None,
         }
-        if IS_MAC:
-            self.btn_mr_export.state(["disabled"])
-            self.btn_mr_llm_qa.state(["disabled"])
-        else:
-            self.btn_mr_export.configure(state="disabled")
-            self.btn_mr_llm_qa.configure(state="disabled")
+        self._set_mr_export_buttons_enabled(False)
         self.lbl_mr_status_bar.configure(text=self._t("status_exporting"))
         threading.Thread(target=self._run_export,
                          args=(task_id, fmt, export_type, mr_iid, adv_state,
                                basic_filters, mr_created),
                          kwargs={"llm_qa": llm_qa},
                          daemon=True).start()
+
+    def _on_export_source_xlsx(self):
+        """Export unique source strings of the selected MR as a 3-column XLSX.
+
+        Sheet title is ``{JIRA} MR!{iid}`` (e.g. ``BUG-352 MR!4103``). Columns
+        are Key / en-US Value / task name, where task name is the companion
+        All-Translations JSON filename. Requires a selected row — unlike
+        Export Selected this never dumps the whole pipeline.
+        """
+        sel = self.mr_tree.selection()
+        if not sel:
+            self.lbl_mr_status_bar.configure(
+                text=self._t("mr_source_xlsx_need_selection"))
+            return
+        meta = self._mr_row_export_meta(sel[0])
+        if not meta.get("task_id"):
+            self.lbl_mr_status_bar.configure(
+                text=self._t("mr_source_xlsx_need_selection"))
+            return
+        adv_state = self.adv_filter.get_state() if self.adv_filter else None
+        self._set_mr_export_buttons_enabled(False)
+        self.lbl_mr_status_bar.configure(text=self._t("status_exporting"))
+        threading.Thread(
+            target=self._run_export_source_xlsx,
+            args=(meta, adv_state),
+            daemon=True,
+        ).start()
+
+    def _run_export_source_xlsx(self, meta, adv_state=None):
+        try:
+            import export_json
+            task_id = meta["task_id"]
+            results = mr_api.fetch_mr_results(task_id, **self._api_kw())
+            if adv_state is not None:
+                try:
+                    if not advanced_filter.is_empty(adv_state):
+                        results = {
+                            **results,
+                            "translations": advanced_filter.filter_translations(
+                                results.get("translations") or [], adv_state),
+                        }
+                except Exception:
+                    pass
+            today = date.today().isoformat()
+            env_tag = "" if self.env_key == "prod" else self.env_key
+            json_name = self._build_export_filename(
+                ".json",
+                mr_iid=meta.get("mr_iid") or "",
+                id_tag=str(task_id)[:8],
+                type_tag="all",
+                created=meta.get("created") or "",
+                export_date=today,
+                env_tag=env_tag,
+            )
+            xlsx_name = self._build_export_filename(
+                ".xlsx",
+                mr_iid=meta.get("mr_iid") or "",
+                id_tag=str(task_id)[:8],
+                type_tag="source",
+                created=meta.get("created") or "",
+                export_date=today,
+                env_tag=env_tag,
+            )
+            rows = export_json.source_rows_from_payload(
+                results, task_name=json_name)
+            title = export_json.sheet_title_for_mr(
+                meta.get("jira") or "", meta.get("mr_iid") or "")
+            filepath = os.path.join(export_output_dir(), xlsx_name)
+            saved = export_json.save_source_xlsx(
+                [{"title": title, "rows": rows}], filepath)
+            if not saved:
+                raise RuntimeError("openpyxl is required to write XLSX")
+            basename = os.path.basename(saved)
+            self.parent.after(0, lambda b=basename: self.lbl_mr_status_bar.configure(
+                text=self._t("status_saved").format(filename=b)))
+            self.parent.after(0, lambda p=saved: reveal_in_folder(p))
+        except Exception as e:
+            msg = str(e)[:50]
+            self.parent.after(0, lambda m=msg: self.lbl_mr_status_bar.configure(
+                text=f"❌ {m}"))
+        finally:
+            self.parent.after(0, lambda: self._set_mr_export_buttons_enabled(True))
 
     def _run_export(self, task_id, fmt, export_type="changes", mr_iid="",
                     adv_state=None, basic_filters=None, mr_created="",
@@ -1939,14 +2047,7 @@ class MRPipelineTab:
         except Exception as e:
             self.parent.after(0, lambda: self.lbl_mr_status_bar.configure(text=f"❌ {str(e)[:50]}"))
         finally:
-            def _restore():
-                if IS_MAC:
-                    self.btn_mr_export.state(["!disabled"])
-                    self.btn_mr_llm_qa.state(["!disabled"])
-                else:
-                    self.btn_mr_export.configure(state="normal")
-                    self.btn_mr_llm_qa.configure(state="normal")
-            self.parent.after(0, _restore)
+            self.parent.after(0, lambda: self._set_mr_export_buttons_enabled(True))
 
     def _load_overview(self):
         if not self.mr_overview_loading:

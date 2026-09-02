@@ -608,6 +608,8 @@ STRINGS = {
         "mr_search":        "🔍 Search",
         "mr_reset":         "Reset",
         "mr_export":        "📦 Export Selected",
+        "mr_source_xlsx":   "📄 Export Source XLSX",
+        "mr_source_xlsx_need_selection": "Select an MR row first to export source XLSX",
         "mr_load_more":     "⬇ Load More",
         "mr_sidebar_title": "📊 MR Pipeline Stats",
         "mr_sidebar_title_stage": "📊 Stage MR Pipeline Stats",
@@ -776,6 +778,8 @@ STRINGS = {
         "mr_search":        "🔍 查询",
         "mr_reset":         "重置",
         "mr_export":        "📦 导出选中",
+        "mr_source_xlsx":   "📄 导出源数据 XLSX",
+        "mr_source_xlsx_need_selection": "请先选择一个翻译任务以导出源数据 XLSX",
         "mr_load_more":     "⬇ 加载更多",
         "mr_sidebar_title": "📊 MR Pipeline 统计",
         "mr_sidebar_title_stage": "📊 Stage MR Pipeline 统计",
@@ -1461,6 +1465,14 @@ class ExportApp:
                              padding=(14, 4))
             style.map("SuccessSmall.TButton",
                       background=[("active", "#27ae60"), ("disabled", "#555555")],
+                      foreground=[("disabled", "#999999")])
+
+            style.configure("InfoSmall.TButton",
+                             background="#0891b2", foreground="#ffffff",
+                             font=(FONT_FAMILY, 10, "bold"),
+                             padding=(14, 4))
+            style.map("InfoSmall.TButton",
+                      background=[("active", "#0e7490"), ("disabled", "#555555")],
                       foreground=[("disabled", "#999999")])
 
             style.configure("SecondarySmall.TButton",
