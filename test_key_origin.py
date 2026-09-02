@@ -173,6 +173,16 @@ class CollapseAndRecommendTests(unittest.TestCase):
         rec = ko.pick_recommended(tasks)
         self.assertEqual(rec.task_id, "file1")
 
+    def test_recommended_prefers_scan_over_file(self):
+        tasks = ko.collapse_entries_to_tasks([
+            _entry("k", "file1", source_type="file", mr=None,
+                   created="2026-09-01T00:00:00Z", project=""),
+            _entry("k", "scan1", source_type="scan", mr=None,
+                   created="2026-08-01T00:00:00Z", project="common/uns"),
+        ])
+        rec = ko.pick_recommended(tasks)
+        self.assertEqual(rec.task_id, "scan1")
+
 
 class UrlTests(unittest.TestCase):
 
@@ -198,6 +208,17 @@ class UrlTests(unittest.TestCase):
         self.assertEqual(
             url,
             "http://tranzor-platform.int.rclabenv.com/static/legacy/tasks/265")
+
+    def test_scan_task_link(self):
+        url = ko.tranzor_origin_url(
+            base_url="http://tranzor-platform.int.rclabenv.com",
+            source_type="scan",
+            project_id="common/uns",
+            task_id="scan-abc-123",
+        )
+        self.assertEqual(
+            url,
+            "http://tranzor-platform.int.rclabenv.com/static/scans/scan-abc-123")
 
 
 class LocateKeysTests(unittest.TestCase):
@@ -261,6 +282,42 @@ class LocateKeysTests(unittest.TestCase):
         rec = payload["results"][0]["recommended"]
         self.assertEqual(rec.task_id, "t-fuzzy")
         self.assertEqual(payload["results"][0]["match_mode"], "fuzzy")
+
+    def test_all_falls_back_to_scan(self):
+        def search_fn(**kwargs):
+            if kwargs.get("source_type") == "scan":
+                return {
+                    "total": 1,
+                    "entries": [_entry(
+                        "k", "scan-1", source_type="scan", mr=None,
+                        project="common/uns")],
+                }
+            return {"total": 0, "entries": []}
+
+        payload = ko.locate_keys(
+            "k", search_fn, source_type="all", fallback_file=False)
+        rec = payload["results"][0]["recommended"]
+        self.assertEqual(rec.task_id, "scan-1")
+        self.assertEqual(payload["results"][0]["source_type_used"], "scan")
+        self.assertIn("/static/scans/scan-1", payload["groups"][0]["url"])
+
+    def test_scan_channel_skips_mr_and_file(self):
+        calls = []
+
+        def search_fn(**kwargs):
+            calls.append(kwargs.get("source_type"))
+            if kwargs.get("source_type") == "scan":
+                return {
+                    "total": 1,
+                    "entries": [_entry(
+                        "k", "scan-9", source_type="scan", mr=None,
+                        project="common/uns")],
+                }
+            return {"total": 1, "entries": [_entry("k", "mr-should-not-win")]}
+
+        payload = ko.locate_keys("k", search_fn, source_type="scan")
+        self.assertEqual(calls, ["scan"])
+        self.assertEqual(payload["results"][0]["recommended"].task_id, "scan-9")
 
     def test_file_fallback_after_mr_miss(self):
         def search_fn(**kwargs):
@@ -342,6 +399,88 @@ class SearchTranslationsClientTests(unittest.TestCase):
         self.assertEqual(captured["params"]["match_mode"], "exact")
         self.assertEqual(captured["params"]["source_type"], "mr")
         self.assertEqual(captured["params"]["limit"], 200)
+
+    def test_scan_source_type_does_not_hit_translations_search(self):
+        import export_mr_pipeline as mr_api
+
+        def boom(*_a, **_k):
+            raise AssertionError("translations/search must not be called")
+
+        with mock.patch.object(mr_api, "_api_get", boom), \
+             mock.patch.object(mr_api, "search_scan_translations",
+                               return_value={"total": 0, "entries": []}) as scan:
+            out = mr_api.search_translations(
+                opus_id="RingCentral.uns.hash.key",
+                source_type="scan")
+        scan.assert_called_once()
+        self.assertEqual(out["total"], 0)
+
+
+class OpusIdMatchTests(unittest.TestCase):
+
+    def test_exact_and_seg_suffix(self):
+        self.assertTrue(ko.opus_id_matches("common.uns.foo", "common.uns.foo"))
+        self.assertTrue(ko.opus_id_matches(
+            "common.uns.foo:::seg:::10", "common.uns.foo"))
+        self.assertFalse(ko.opus_id_matches("common.uns.foo", "common.uns.bar"))
+
+    def test_fuzzy_substring(self):
+        self.assertTrue(ko.opus_id_matches(
+            "RingCentral.uns.hash.sharedLineGroupLoginInfo__email_subject__7710",
+            "sharedLineGroupLoginInfo", "fuzzy"))
+
+
+class SearchScanTranslationsTests(unittest.TestCase):
+
+    def test_live_fanout_filters_exact_and_stamps_scan(self):
+        import export_mr_pipeline as mr_api
+
+        tasks = [
+            {"task_id": "scan-a", "project_id": "common/uns",
+             "task_name": "uns scan", "created_at": "2026-09-01T00:00:00Z"},
+        ]
+
+        def page(task_id, limit=200, offset=0, base_url=None, search=None):
+            self.assertEqual(search, "common.uns.foo")
+            return {"total": 2, "translations": [
+                {"opus_id": "common.uns.foo", "target_language": "de-DE",
+                 "source_text": "Hello"},
+                {"opus_id": "common.uns.foobar", "target_language": "de-DE",
+                 "source_text": "noise"},
+            ]}
+
+        with mock.patch.object(mr_api, "_scan_index_entries", return_value=[]), \
+             mock.patch.object(mr_api, "_list_recent_scan_tasks",
+                               return_value=tasks), \
+             mock.patch.object(mr_api, "fetch_scan_results_page", side_effect=page):
+            out = mr_api.search_scan_translations(
+                opus_id="common.uns.foo", match_mode="exact")
+        self.assertEqual(out["total"], 1)
+        row = out["entries"][0]
+        self.assertEqual(row["task_id"], "scan-a")
+        self.assertEqual(row["source_type"], "scan")
+        self.assertEqual(row["opus_id"], "common.uns.foo")
+
+    def test_index_hit_skips_live_fanout(self):
+        import export_mr_pipeline as mr_api
+
+        indexed = [{
+            "opus_id": "common.uns.foo",
+            "task_id": "scan-idx",
+            "task_name": "Scan common/uns",
+            "project_id": "common/uns",
+            "source_type": "scan",
+            "created_at": "2026-08-01T00:00:00Z",
+            "target_language": "de-DE",
+            "source_text": "Hi",
+            "mr_iid": None,
+        }]
+        with mock.patch.object(mr_api, "_scan_index_entries",
+                               return_value=indexed), \
+             mock.patch.object(mr_api, "_list_recent_scan_tasks") as live:
+            out = mr_api.search_scan_translations(opus_id="common.uns.foo")
+        live.assert_not_called()
+        self.assertEqual(out["entries"][0]["task_id"], "scan-idx")
 
 
 if __name__ == "__main__":
