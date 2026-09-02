@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections import OrderedDict
 
 
@@ -257,3 +258,185 @@ def save_json_file(payload, filename, all_languages=None, fill_missing=False):
             save_path = f"{base}_{attempt_num}{ext}"
             print(f"  文件被占用，尝试保存为: {save_path}")
     return None
+
+
+# ---------------------------------------------------------------------------
+# Source-only XLSX (Key / en-US Value / task name)
+# ---------------------------------------------------------------------------
+# One row per unique string key (UNS email segments stay distinct via
+# ``:::seg:::{tu_id}`` — see ``_segment_stable_key``). This is the companion
+# to the QA JSON export: same keys and en-US values, no target locales.
+
+SOURCE_XLSX_HEADERS = ("Key", "en-US Value", "task name")
+
+_EXCEL_SHEET_INVALID = re.compile(r'[:\\/?*\[\]]')
+_EXCEL_SHEET_MAX = 31
+_EMPTY_SHEET_MARKERS = frozenset({
+    "", "—", "-", "–", "−", "…", "...", "n/a", "N/A", "None", "null",
+})
+
+
+def source_rows_from_payload(payload, task_name=""):
+    """Unique ``(Key, en-US Value, task name)`` triples from a JSON payload.
+
+    Reuses :func:`build_json_entries` so UNS segmented units keep the
+    ``:::seg:::{tu_id}`` key shape and en-US falls back to ``source_text``.
+    ``task_name`` is repeated on every row (typically the companion JSON
+    filename, e.g. ``mr_pipeline_MR4100_bd6bba88_all_2026-08-31_08-03-01.json``).
+    """
+    if isinstance(payload, dict):
+        rows = payload.get("translations") or []
+    else:
+        rows = payload or []
+    entries = build_json_entries(rows, fill_missing=False)
+    label = str(task_name or "")
+    return [
+        (entry.get("key") or "", entry.get(_SOURCE_LANG) or "", label)
+        for entry in entries
+    ]
+
+
+def sheet_title_for_mr(jira_id, mr_iid):
+    """Excel tab title matching the Delta Analysis workbook, e.g. ``BUG-352 MR!4103``.
+
+    Empty / placeholder JIRA (``—``, ``…``) drops the ticket so the sheet is
+    just ``MR!{iid}``. Both missing → ``Source``.
+    """
+    jira = str(jira_id or "").strip()
+    if jira in _EMPTY_SHEET_MARKERS:
+        jira = ""
+    mr = str(mr_iid or "").strip()
+    if mr.upper().startswith("MR"):
+        mr = mr[2:].lstrip("#!")
+    else:
+        mr = mr.lstrip("#!")
+    if mr in _EMPTY_SHEET_MARKERS:
+        mr = ""
+    if jira and mr:
+        return f"{jira} MR!{mr}"
+    if mr:
+        return f"MR!{mr}"
+    if jira:
+        return jira
+    return "Source"
+
+
+def sanitize_excel_sheet_title(name, used=None):
+    """Make ``name`` a legal, unique Excel sheet title (max 31 chars).
+
+    Excel rejects ``: \\ / ? * [ ]``, leading/trailing ``'``, and treats
+    names as case-insensitive. ``!`` is legal and required for the
+    ``BUG-352 MR!4103`` convention. ``used`` is updated in place.
+    """
+    if used is None:
+        used = set()
+    text = str(name or "").strip()
+    text = _EXCEL_SHEET_INVALID.sub("-", text)
+    text = text.strip("'") or "Source"
+    text = text[:_EXCEL_SHEET_MAX]
+    used_lower = {item.lower() for item in used}
+    candidate = text
+    n = 1
+    while candidate.lower() in used_lower:
+        suffix = f" ({n})"
+        candidate = text[:_EXCEL_SHEET_MAX - len(suffix)] + suffix
+        n += 1
+    used.add(candidate)
+    return candidate
+
+
+def write_source_xlsx(sheets, filename):
+    """Write a source-only workbook.
+
+    ``sheets`` is an iterable of ``{"title": str, "rows": [(key, en_us, task_name), ...]}``.
+    Each sheet gets a header row ``Key | en-US Value | task name``.
+    """
+    try:
+        from openpyxl import Workbook
+        from openpyxl.styles import Alignment, Font, PatternFill
+        from openpyxl.utils import get_column_letter
+    except ImportError:
+        print("错误: 缺少 openpyxl 包，请先运行: pip install openpyxl")
+        return None
+
+    wb = Workbook()
+    header_fill = PatternFill(
+        start_color="4472C4", end_color="4472C4", fill_type="solid")
+    header_font = Font(bold=True, color="FFFFFF", size=11)
+    wrap = Alignment(wrap_text=True, vertical="top")
+    used_titles = set()
+    first = True
+
+    for sheet in sheets or []:
+        title = sanitize_excel_sheet_title(
+            (sheet or {}).get("title") or "Source", used_titles)
+        rows = (sheet or {}).get("rows") or []
+        if first:
+            ws = wb.active
+            ws.title = title
+            first = False
+        else:
+            ws = wb.create_sheet(title)
+
+        for col_i, header in enumerate(SOURCE_XLSX_HEADERS, 1):
+            cell = ws.cell(row=1, column=col_i, value=header)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+
+        for row_i, triple in enumerate(rows, 2):
+            if isinstance(triple, dict):
+                key = triple.get("key") or triple.get("Key") or ""
+                en_us = (
+                    triple.get("en-US Value")
+                    or triple.get("en-US")
+                    or ""
+                )
+                task = (
+                    triple.get("task name")
+                    or triple.get("task_name")
+                    or ""
+                )
+            elif isinstance(triple, (tuple, list)) and len(triple) >= 3:
+                key, en_us, task = triple[0], triple[1], triple[2]
+            else:
+                continue
+            ws.cell(row=row_i, column=1, value=key)
+            value_cell = ws.cell(row=row_i, column=2, value=en_us)
+            value_cell.alignment = wrap
+            ws.cell(row=row_i, column=3, value=task)
+
+        ws.column_dimensions[get_column_letter(1)].width = 55
+        ws.column_dimensions[get_column_letter(2)].width = 80
+        ws.column_dimensions[get_column_letter(3)].width = 55
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = f"A1:C{max(1, 1 + len(rows))}"
+
+    if first:
+        # No sheets were supplied — keep a blank default tab with headers.
+        ws = wb.active
+        ws.title = sanitize_excel_sheet_title("Source", used_titles)
+        for col_i, header in enumerate(SOURCE_XLSX_HEADERS, 1):
+            cell = ws.cell(row=1, column=col_i, value=header)
+            cell.fill = header_fill
+            cell.font = header_font
+
+    wb.save(filename)
+    print(f"已导出: {filename}")
+    return filename
+
+
+def save_source_xlsx(sheets, filename):
+    """Write a source XLSX, retrying with a numeric suffix if the file is locked."""
+    base, ext = os.path.splitext(filename)
+    save_path = filename
+    for attempt in range(100):
+        try:
+            written = write_source_xlsx(sheets, save_path)
+            return written
+        except PermissionError:
+            attempt_num = attempt + 1
+            save_path = f"{base}_{attempt_num}{ext}"
+            print(f"  文件被占用，尝试保存为: {save_path}")
+    return None
+
