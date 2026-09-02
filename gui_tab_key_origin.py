@@ -2,7 +2,7 @@
 Key Origin —— GUI Tab
 =====================
 把粘贴进来的字符串 Key（或 UNS 模板路径）反查到源头 MR Pipeline /
-File Translation 任务，打开 Tranzor 页面做 Language Lead 后期修订。
+File Translation / Scan Task 任务，打开 Tranzor 页面做 Language Lead 后期修订。
 
 用于 Bug Fix 通道尚未覆盖的产品（目前 ``common/uns`` 显示 Unsupported）。
 
@@ -25,12 +25,14 @@ STRINGS = {
         "ko_hint": (
             "Paste string keys (one per line) — including UNS "
             "`:::seg:::` pipeline ids and uns-app/*.hbs paths. "
-            "The panel finds the MR Pipeline task that originally "
-            "translated them, so you can Language-Lead-fix products "
-            "whose Bug Fix channel is still Unsupported (e.g. common/uns)."),
+            "The panel finds the MR Pipeline / File Translation / Scan "
+            "task that originally translated them, so you can "
+            "Language-Lead-fix products whose Bug Fix channel is still "
+            "Unsupported (e.g. common/uns)."),
         "ko_source": "Channel",
         "ko_source_mr": "MR Pipeline",
         "ko_source_file": "File Translation",
+        "ko_source_scan": "Scan Tasks",
         "ko_source_all": "All",
         "ko_locate": "🔎 Locate origin",
         "ko_clear": "Clear",
@@ -49,6 +51,7 @@ STRINGS = {
         "ko_col_match": "Match",
         "ko_group_mr": "{project}  ·  MR#{mr}   ({n} keys)",
         "ko_group_file": "File task {short}…   ({n} keys)",
+        "ko_group_scan": "Scan {project}  ·  {short}…   ({n} keys)",
         "ko_group_missing": "Not found   ({n} keys)",
         "ko_locating": "Looking up {n} key(s)…",
         "ko_need_keys": "Paste at least one key.",
@@ -67,11 +70,12 @@ STRINGS = {
         "ko_hint": (
             "粘贴字符串 Key（每行一条），支持 UNS 的 `:::seg:::` 分段 id "
             "以及 uns-app/*.hbs 路径。面板会找到当初译出这些 Key 的 "
-            "MR Pipeline 任务，便于在 Bug Fix 通道尚不支持的产品"
-            "（如 common/uns）上改走 Language Lead 后期修订。"),
+            "MR Pipeline / 文件翻译 / 扫描任务，便于在 Bug Fix 通道尚不"
+            "支持的产品（如 common/uns）上改走 Language Lead 后期修订。"),
         "ko_source": "通道",
         "ko_source_mr": "MR Pipeline",
         "ko_source_file": "文件翻译",
+        "ko_source_scan": "扫描任务",
         "ko_source_all": "全部",
         "ko_locate": "🔎 查找源头",
         "ko_clear": "清空",
@@ -89,6 +93,7 @@ STRINGS = {
         "ko_col_match": "匹配",
         "ko_group_mr": "{project}  ·  MR#{mr}   ({n} 条 Key)",
         "ko_group_file": "文件任务 {short}…   ({n} 条 Key)",
+        "ko_group_scan": "扫描 {project}  ·  {short}…   ({n} 条 Key)",
         "ko_group_missing": "未找到   ({n} 条 Key)",
         "ko_locating": "正在查找 {n} 条 Key…",
         "ko_need_keys": "请至少粘贴一条 Key。",
@@ -162,8 +167,8 @@ class KeyOriginTab:
         self.lbl_source.pack(side="left")
         self.var_source = tk.StringVar(value="mr")
         self.cmb_source = ttk.Combobox(
-            bar, textvariable=self.var_source, state="readonly", width=16,
-            values=["mr", "file", "all"])
+            bar, textvariable=self.var_source, state="readonly", width=18,
+            values=["mr", "file", "scan", "all"])
         self.cmb_source.pack(side="left", padx=(6, 0))
 
         self.btn_locate = self.app._create_button(
@@ -231,11 +236,12 @@ class KeyOriginTab:
         labels = {
             "mr": t("ko_source_mr"),
             "file": t("ko_source_file"),
+            "scan": t("ko_source_scan"),
             "all": t("ko_source_all"),
         }
         raw = self._source_raw()
         self.cmb_source.configure(values=[
-            labels["mr"], labels["file"], labels["all"]])
+            labels["mr"], labels["file"], labels["scan"], labels["all"]])
         self.var_source.set(labels.get(raw, labels["mr"]))
         self.tree.heading("#0", text=t("ko_col_group"))
         self.tree.heading("project", text=t("ko_col_project"))
@@ -250,14 +256,18 @@ class KeyOriginTab:
         mapping = {
             self._t("ko_source_mr"): "mr",
             self._t("ko_source_file"): "file",
+            self._t("ko_source_scan"): "scan",
             self._t("ko_source_all"): "all",
             "mr": "mr",
             "file": "file",
+            "scan": "scan",
             "all": "all",
             "MR Pipeline": "mr",
             "File Translation": "file",
+            "Scan Tasks": "scan",
             "All": "all",
             "文件翻译": "file",
+            "扫描任务": "scan",
             "全部": "all",
         }
         return mapping.get(val, "mr")
@@ -407,6 +417,11 @@ class KeyOriginTab:
                     project=rec.project_id or "",
                     mr=rec.mr_iid,
                     n=len(keys))
+            elif rec and rec.source_type == "scan":
+                short = (rec.task_id if rec else "")[:8]
+                label = self._t("ko_group_scan").format(
+                    project=rec.project_id or "scan",
+                    short=short, n=len(keys))
             else:
                 short = (rec.task_id if rec else "")[:8]
                 label = self._t("ko_group_file").format(

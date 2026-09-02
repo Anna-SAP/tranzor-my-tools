@@ -616,9 +616,14 @@ def search_translations(opus_id=None, source_text=None, translated_text=None,
 
     Used by the Key Origin panel to map a pasted Key back to the MR
     Pipeline (or File Translation) task that produced it. ``match_mode``
-    is ``exact`` or ``fuzzy``; ``source_type`` is ``mr``, ``file``, or
-    ``all``. Limit is capped at 200 by the platform.
+    is ``exact`` or ``fuzzy``; ``source_type`` is ``mr``, ``file``,
+    ``all``, or ``scan``. Scan is not on this endpoint — it fans out
+    over completed Missing-Translation-Scan tasks.
     """
+    if (source_type or "") == "scan":
+        return search_scan_translations(
+            opus_id=opus_id, match_mode=match_mode,
+            limit=limit, offset=offset, **_fwd(base_url))
     params = {
         "match_mode": match_mode or "exact",
         "limit": max(1, min(int(limit or 50), 200)),
@@ -3322,14 +3327,195 @@ def parse_mr_iid_from_url(url):
 
 
 def fetch_scan_results_page(task_id, limit=SCAN_RESULTS_PAGE_SIZE, offset=0,
-                            base_url=None):
+                            base_url=None, search=None):
     """GET one page of ``/missing_translation_scan/tasks/{id}/results``."""
+    params = {"limit": int(limit), "offset": int(offset)}
+    if search:
+        params["search"] = search
     resp = _api_get(
         f"{scan_api_root(base_url)}/tasks/{task_id}/results",
-        params={"limit": int(limit), "offset": int(offset)},
+        params=params,
     )
     resp.raise_for_status()
     return resp.json() or {}
+
+
+# Newest completed scan tasks to probe when locating a Key. The scan
+# results API is per-task (no global search), so this is a hard cap on
+# fan-out. 40 tasks at HTTP-gate width 2 is typically < 30s.
+SCAN_ORIGIN_MAX_TASKS = 40
+SCAN_ORIGIN_HIT_PAGE = 200
+
+
+def _scan_index_entries(opus_id, match_mode="exact"):
+    """Fast path: local opus_index.db rows with ``source_kind='scan'``."""
+    q = (opus_id or "").strip()
+    if not q:
+        return []
+    try:
+        import opus_id_monitor as om
+        om.init_db()
+        with om._connect() as conn:
+            if (match_mode or "exact") == "exact":
+                cur = conn.execute(
+                    """
+                    SELECT opus_id, task_id, project_id, target_language,
+                           source_text, task_created_at
+                    FROM opus_index
+                    WHERE source_kind = 'scan'
+                      AND (opus_id = ? OR opus_id LIKE ?)
+                    """,
+                    (q, q + ":::seg:::%"),
+                )
+            else:
+                like = ("%" + q.replace("\\", "\\\\")
+                        .replace("%", "\\%").replace("_", "\\_") + "%")
+                cur = conn.execute(
+                    """
+                    SELECT opus_id, task_id, project_id, target_language,
+                           source_text, task_created_at
+                    FROM opus_index
+                    WHERE source_kind = 'scan'
+                      AND opus_id LIKE ? ESCAPE '\\'
+                    """,
+                    (like,),
+                )
+            rows = [dict(r) for r in cur.fetchall()]
+    except Exception:
+        return []
+    entries = []
+    for r in rows:
+        tid = str(r.get("task_id") or "").strip()
+        if not tid:
+            continue
+        proj = str(r.get("project_id") or "")
+        entries.append({
+            "opus_id": r.get("opus_id") or "",
+            "task_id": tid,
+            "task_name": f"Scan {proj}".strip() if proj else f"Scan {tid[:8]}",
+            "project_id": proj,
+            "mr_iid": None,
+            "created_at": r.get("task_created_at") or "",
+            "source_type": "scan",
+            "source_text": r.get("source_text") or "",
+            "target_language": r.get("target_language") or "",
+        })
+    return entries
+
+
+def _list_recent_scan_tasks(max_tasks=SCAN_ORIGIN_MAX_TASKS, base_url=None):
+    """Newest completed scan tasks, capped for Key Origin fan-out."""
+    collected = []
+    offset = 0
+    page = 50
+    cap = max(1, int(max_tasks))
+    while len(collected) < cap:
+        take = min(page, cap - len(collected))
+        try:
+            total, batch = fetch_scan_tasks(
+                status="completed", limit=take, offset=offset,
+                **_fwd(base_url))
+        except Exception:
+            break
+        if not batch:
+            break
+        collected.extend(batch)
+        offset += len(batch)
+        try:
+            if offset >= int(total or 0):
+                break
+        except (TypeError, ValueError):
+            break
+    return collected[:cap]
+
+
+def search_scan_translations(opus_id=None, match_mode="exact",
+                             limit=50, offset=0, base_url=None,
+                             max_tasks=SCAN_ORIGIN_MAX_TASKS):
+    """Locate a Key inside completed Missing-Translation-Scan tasks.
+
+    The platform has no global scan search. Try the local opus_index
+    first (instant when the OPUS ID Monitor has been synced); otherwise
+    probe the newest completed scan tasks with ``?search=``.
+    """
+    import key_origin as _ko
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    q = (opus_id or "").strip()
+    mode = match_mode or "exact"
+    lim = max(1, min(int(limit or 50), 200))
+    off = max(0, int(offset or 0))
+    empty = {"total": 0, "limit": lim, "offset": off, "entries": []}
+    if not q:
+        return empty
+
+    indexed = _scan_index_entries(q, match_mode=mode)
+    if indexed:
+        return {
+            "total": len(indexed),
+            "limit": lim,
+            "offset": off,
+            "entries": indexed[off:off + lim],
+        }
+
+    tasks = _list_recent_scan_tasks(max_tasks=max_tasks, **_fwd(base_url))
+    if not tasks:
+        return empty
+
+    entries = []
+
+    def _probe(task):
+        tid = str(task.get("task_id") or task.get("id") or "").strip()
+        if not tid:
+            return []
+        try:
+            data = fetch_scan_results_page(
+                tid, limit=SCAN_ORIGIN_HIT_PAGE, offset=0,
+                search=q, **_fwd(base_url))
+        except Exception:
+            return []
+        hits = []
+        proj = str(task.get("project_id") or "")
+        name = task.get("task_name") or (
+            f"Scan {proj}".strip() if proj else f"Scan {tid[:8]}")
+        created = task.get("created_at") or ""
+        if hasattr(created, "isoformat"):
+            created = created.isoformat()
+        created = str(created)
+        for tr in data.get("translations") or []:
+            oid = tr.get("opus_id") or ""
+            if not _ko.opus_id_matches(oid, q, mode):
+                continue
+            hits.append({
+                "opus_id": oid,
+                "task_id": tid,
+                "task_name": name,
+                "project_id": proj,
+                "mr_iid": None,
+                "created_at": created,
+                "source_type": "scan",
+                "source_text": tr.get("source_text") or "",
+                "target_language": tr.get("target_language") or "",
+            })
+        return hits
+
+    workers = min(4, max(1, len(tasks)))
+    with ThreadPoolExecutor(max_workers=workers,
+                            thread_name_prefix="scan-origin") as pool:
+        futs = [pool.submit(_probe, t) for t in tasks]
+        for fut in as_completed(futs):
+            try:
+                entries.extend(fut.result() or [])
+            except Exception:
+                continue
+
+    entries.sort(key=lambda e: str(e.get("created_at") or ""), reverse=True)
+    return {
+        "total": len(entries),
+        "limit": lim,
+        "offset": off,
+        "entries": entries[off:off + lim],
+    }
 
 
 def fetch_scan_results(task_id, base_url=None, page_size=SCAN_RESULTS_PAGE_SIZE,

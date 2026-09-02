@@ -3,8 +3,8 @@ Key Origin —— 把字符串 Key 反查到源头翻译任务
 ==============================================
 
 Bug Fix 通道尚未覆盖的产品（目前 ``common/uns``）无法直接开 bug-fix 任务。
-Language Lead 的绕行办法是：找到这些 Key **当初是在哪一次 MR Pipeline
-（或 File Translation）任务里译出来的**，再打开那次任务做后期修订。
+Language Lead 的绕行办法是：找到这些 Key **当初是在哪一次 MR Pipeline /
+File Translation / Scan Task 任务里译出来的**，再打开那次任务做后期修订。
 
 本模块是无 Tk 依赖的纯逻辑层：解析粘贴进来的 Key / 路径、调用注入的
 ``search_fn``（默认包一层 ``GET /api/v1/translations/search``）、把命中
@@ -217,14 +217,20 @@ def collapse_entries_to_tasks(entries: Iterable[dict]) -> list[OriginTask]:
 
 
 def pick_recommended(tasks: Iterable[OriginTask]) -> OriginTask | None:
-    """Prefer the newest MR-pipeline task; fall back to the newest of any kind."""
+    """Prefer the newest MR-pipeline task; then scan; then any other kind."""
     rows = list(tasks or [])
     if not rows:
         return None
-    mr_rows = [t for t in rows if (t.source_type or "") == "mr"]
-    pool = mr_rows or rows
+    for kind in ("mr", "scan"):
+        pool = [t for t in rows if (t.source_type or "") == kind]
+        if pool:
+            return sorted(
+                pool,
+                key=lambda t: _created_sort_key(t.created_at),
+                reverse=True,
+            )[0]
     return sorted(
-        pool,
+        rows,
         key=lambda t: _created_sort_key(t.created_at),
         reverse=True,
     )[0]
@@ -242,12 +248,48 @@ def tranzor_origin_url(
     origin = (base_url or "").rstrip("/")
     if not origin:
         origin = "http://tranzor-platform.int.rclabenv.com"
-    if (source_type or "mr") == "mr" and project_id and mr_iid not in (None, ""):
+    kind = source_type or "mr"
+    if kind == "mr" and project_id and mr_iid not in (None, ""):
         query = urlencode({"project_id": project_id, "mr_id": mr_iid})
         return f"{origin}/static/?{query}"
+    if kind == "scan" and task_id:
+        return f"{origin}/static/scans/{task_id}"
     if task_id:
         return f"{origin}/static/legacy/tasks/{task_id}"
     return f"{origin}/static/"
+
+
+def opus_id_matches(stored: str, query: str, match_mode: str = "exact") -> bool:
+    """Whether a stored opus_id satisfies an exact / fuzzy lookup query."""
+    stored_s = str(stored or "")
+    query_s = str(query or "").strip()
+    if not query_s:
+        return False
+    if match_mode != "exact":
+        return query_s.lower() in stored_s.lower()
+    if stored_s == query_s:
+        return True
+    try:
+        stored_base, _ = split_pipeline_key(stored_s)
+        query_base, _ = split_pipeline_key(query_s)
+    except ValueError:
+        return False
+    return stored_base == query_base
+
+
+def _channels_to_try(source_type: str, fallback_file: bool) -> list[str]:
+    """Which ``source_type`` values ``_search_one`` should walk.
+
+    ``all`` is the platform's combined MR+File search, then Scan (which
+    lives on a different API). MR still optionally falls back to File.
+    """
+    st = (source_type or "mr").strip() or "mr"
+    if st == "all":
+        return ["all", "scan"]
+    channels = [st]
+    if fallback_file and st == "mr":
+        channels.append("file")
+    return channels
 
 
 def _collect_entries(
@@ -291,12 +333,10 @@ def _search_one(
     page_size: int,
     max_pages: int,
 ) -> dict:
-    """Exact first, then fuzzy; optional File-Translation fallback."""
+    """Exact first, then fuzzy; optional File fallback; Scan on All/Scan."""
     tried: list[tuple[str, str]] = []
     last_error = None
-    types_to_try = [source_type]
-    if fallback_file and source_type == "mr":
-        types_to_try.append("file")
+    types_to_try = _channels_to_try(source_type, fallback_file)
 
     for stype in types_to_try:
         for mode in ("exact", "fuzzy"):
@@ -365,6 +405,8 @@ def group_origin_results(results: Iterable[dict], *, base_url: str = "") -> list
             continue
         if rec.source_type == "mr" and rec.project_id and rec.mr_iid not in (None, ""):
             gkey = ("mr", rec.project_id, int(rec.mr_iid))
+        elif rec.source_type == "scan":
+            gkey = ("scan", rec.project_id or "", rec.task_id)
         else:
             gkey = (rec.source_type or "file", rec.task_id, None)
         group = groups.get(gkey)
@@ -468,6 +510,9 @@ def format_origin_report(payload: dict) -> str:
         label = group.get("task_name") or ""
         if rec and rec.source_type == "mr" and rec.project_id and rec.mr_iid:
             label = f"{rec.project_id} MR#{rec.mr_iid}"
+        elif rec and rec.source_type == "scan":
+            proj = rec.project_id or "scan"
+            label = f"Scan {proj} {rec.task_id[:8]}"
         url = group.get("url") or ""
         for query in group.get("keys") or []:
             lines.append(
