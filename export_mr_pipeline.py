@@ -608,6 +608,43 @@ def count_mr_source_strings(task_id, base_url=None):
     return distinct_source_string_count(results.get("translations", []))
 
 
+def search_translations(opus_id=None, source_text=None, translated_text=None,
+                        target_language=None, source_type="mr",
+                        match_mode="exact", limit=50, offset=0,
+                        product_line=None, mr_iid=None, base_url=None):
+    """GET /translations/search — locate translations by opus_id / text.
+
+    Used by the Key Origin panel to map a pasted Key back to the MR
+    Pipeline (or File Translation) task that produced it. ``match_mode``
+    is ``exact`` or ``fuzzy``; ``source_type`` is ``mr``, ``file``, or
+    ``all``. Limit is capped at 200 by the platform.
+    """
+    params = {
+        "match_mode": match_mode or "exact",
+        "limit": max(1, min(int(limit or 50), 200)),
+        "offset": max(0, int(offset or 0)),
+    }
+    if source_type:
+        params["source_type"] = source_type
+    if opus_id:
+        params["opus_id"] = opus_id
+    if source_text:
+        params["source_text"] = source_text
+    if translated_text:
+        params["translated_text"] = translated_text
+    if target_language:
+        params["target_language"] = target_language
+    if product_line:
+        params["product_line"] = product_line
+    if mr_iid not in (None, ""):
+        params["mr_iid"] = mr_iid
+    resp = _api_get(f"{mr_api_root(base_url)}/translations/search",
+                    params=params)
+    resp.raise_for_status()
+    return resp.json() or {"total": 0, "limit": params["limit"],
+                           "offset": params["offset"], "entries": []}
+
+
 def fetch_mr_translation_edit_logs(translation_id, base_url=None):
     """GET /dashboard/translations/{translation_id}/edit-logs
 

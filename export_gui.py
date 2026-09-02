@@ -482,6 +482,17 @@ except Exception as _ft_stage_e:  # pragma: no cover
 else:
     _ft_stage_import_error = None
 
+# 🔑 Key Origin — map pasted Keys / UNS paths back to the MR Pipeline
+# (or File Translation) task that originally translated them. Workaround
+# for products whose Bug Fix channel is still Unsupported (common/uns).
+try:
+    import gui_tab_key_origin as _ko_tab_mod
+except Exception as _ko_e:  # pragma: no cover
+    _ko_tab_mod = None
+    _ko_import_error = _ko_e
+else:
+    _ko_import_error = None
+
 _boot_mark("optional_tabs_imported")
 
 # ---------------------------------------------------------------------------
@@ -954,6 +965,13 @@ if _mr_stage_tab_mod is not None:
 if _ft_stage_tab_mod is not None:
     try:
         for _lang_code, _extra in _ft_stage_tab_mod.STRINGS.items():
+            STRINGS.setdefault(_lang_code, {}).update(_extra)
+    except Exception:
+        pass
+
+if _ko_tab_mod is not None:
+    try:
+        for _lang_code, _extra in _ko_tab_mod.STRINGS.items():
             STRINGS.setdefault(_lang_code, {}).update(_extra)
     except Exception:
         pass
@@ -1798,6 +1816,24 @@ class ExportApp:
                 self.ft_stage_tab = None
         _boot_mark("tab_full_translations_stage")
 
+        # --- Tab: 🔑 Key Origin (optional, pure additive) ---
+        # Paste Keys / UNS paths → originating MR Pipeline task, so Language
+        # Leads can post-edit products whose Bug Fix channel is Unsupported.
+        # Appended last so existing tab indices do not shift.
+        self.ko_tab = None
+        self._ko_tab_index = None
+        self._ko_tab_initialized = False
+        if _ko_tab_mod is not None:
+            try:
+                tab_ko = ttk.Frame(self.notebook, style="App.TFrame")
+                self.notebook.add(tab_ko, text="")
+                self.ko_tab = _ko_tab_mod.KeyOriginTab(tab_ko, self)
+                self._ko_tab_index = self.notebook.index(tab_ko)
+            except Exception as _e:
+                print(f"[Key Origin tab] init failed: {_e}")
+                self.ko_tab = None
+        _boot_mark("tab_key_origin")
+
         # ═══════════════════════════════════════════
         # TAB 1 CONTENTS (File Translation)
         # ═══════════════════════════════════════════
@@ -2273,6 +2309,13 @@ class ExportApp:
                     self.ft_stage_tab, self._ft_stage_tab_index)
             except Exception:
                 pass
+        if self.ko_tab is not None and self._ko_tab_index is not None:
+            try:
+                self.notebook.tab(
+                    self._ko_tab_index, text=self._t("tab_key_origin"))
+                _register_tab_refresh(self.ko_tab, self._ko_tab_index)
+            except Exception:
+                pass
 
         # Summary panel texts
         self.lbl_summary_title.configure(text=self._t("summary_title"))
@@ -2689,6 +2732,15 @@ class ExportApp:
                 self._ft_stage_tab_initialized = True
                 try:
                     self.ft_stage_tab.on_first_show()
+                except Exception:
+                    pass
+            elif (self.ko_tab is not None
+                  and self._ko_tab_index is not None
+                  and tab_idx == self._ko_tab_index
+                  and not self._ko_tab_initialized):
+                self._ko_tab_initialized = True
+                try:
+                    self.ko_tab.on_first_show()
                 except Exception:
                     pass
 

@@ -83,6 +83,8 @@ a = Analysis(
         'gui_tab_review_worklist',
         'gui_tab_mr_pipeline_stage',
         'gui_tab_full_translations_stage',
+        'gui_tab_key_origin',
+        'key_origin',
         # 共享深色日历选择组件（Human Revisions / TM & Context Insight 的
         # 📅 日期选择器）。各 tab 通过普通 import 引用，分析器本能找到，这里
         # 仍按既有惯例显式登记作安全网。

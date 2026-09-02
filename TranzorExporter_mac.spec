@@ -28,6 +28,8 @@ a = Analysis(
         'gui_tab_tranzor_checks',
         'gui_tab_mr_pipeline_stage',
         'gui_tab_full_translations_stage',
+        'gui_tab_key_origin',
+        'key_origin',
         'date_picker',  # 共享深色日历选择组件（日期字段 📅 选择器）
         'searchable_combobox',  # 共享可搜索下拉组件（Project 关键字过滤弹窗）
         'project_presets',  # 命名项目组合（Preset）读写 ~/.tranzor_exporter_config.json
