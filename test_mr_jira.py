@@ -1,6 +1,6 @@
-"""Tests for mr_jira — the MR Pipeline JIRA-column logic layer.
+"""Tests for mr_jira — the MR Pipeline JIRA / Title / MR Status logic layer.
 
-Covers the five load-bearing pieces:
+Covers the load-bearing pieces:
 
 1. :func:`mr_jira.extract_jira_id` — the regex that turns an MR title into
    a JIRA ID, including the version-number guard ("BUI-26.3.1" must NOT
@@ -12,7 +12,10 @@ Covers the five load-bearing pieces:
 4. :func:`mr_jira.find_merge_requests` — exact JIRA-title search semantics
    and conversion of GitLab's cross-project references into Tranzor task
    match keys.
-5. ``MRPipelineTab._MR_COLUMNS`` plus Title ellipsis/Tooltip invariants.
+5. :func:`mr_jira.display_mr_state` / cached GitLab ``state`` — MR Status
+   column mapping (opened → Open) and ``force_refresh`` so a Search shows
+   the live GitLab state instead of a session-stale Open.
+6. ``MRPipelineTab._MR_COLUMNS`` plus Title ellipsis/Tooltip invariants.
 
 Run:  python -m unittest test_mr_jira
 """
@@ -150,20 +153,23 @@ class ExtractJiraTitleTests(unittest.TestCase):
 class _FakeClient:
     """In-memory stand-in for gitlab_client.GitLabClient — no network."""
 
-    def __init__(self, title=None, error=None, token=True):
+    def __init__(self, title=None, error=None, token=True, state="opened"):
         self._title = title
         self._error = error
         self._token = token
+        self._state = state
         self.calls = 0
+        self.force_refresh_flags = []
 
     def has_token(self):
         return self._token
 
-    def get_merge_request(self, project_id, mr_iid):
+    def get_merge_request(self, project_id, mr_iid, *, force_refresh=False):
         self.calls += 1
+        self.force_refresh_flags.append(force_refresh)
         if self._error is not None:
             raise self._error
-        return {"title": self._title}
+        return {"title": self._title, "state": self._state}
 
 
 class FetchJiraIdTests(unittest.TestCase):
@@ -253,7 +259,7 @@ class FetchJiraIdTests(unittest.TestCase):
         # A's call fails. A must surface B's cached answer, not None —
         # otherwise the GUI would clobber the painted ID with "—".
         class _RacingClient(_FakeClient):
-            def get_merge_request(self, project_id, mr_iid):
+            def get_merge_request(self, project_id, mr_iid, **kwargs):
                 self.calls += 1
                 # Simulate the concurrent winner landing mid-flight.
                 with mr_jira._cache_lock:
@@ -264,6 +270,106 @@ class FetchJiraIdTests(unittest.TestCase):
         self.assertEqual(
             mr_jira.fetch_jira_id("web/bui", 5, client=client), "BUP-4360")
         self.assertEqual(client.calls, 1)
+
+
+class DisplayMrStateTests(unittest.TestCase):
+
+    def test_gitlab_api_values_match_gitlab_ui_labels(self):
+        self.assertEqual(mr_jira.display_mr_state("opened"), "Open")
+        self.assertEqual(mr_jira.display_mr_state("merged"), "Merged")
+        self.assertEqual(mr_jira.display_mr_state("closed"), "Closed")
+        self.assertEqual(mr_jira.display_mr_state("locked"), "Locked")
+
+    def test_empty_and_none_are_blank(self):
+        self.assertEqual(mr_jira.display_mr_state(""), "")
+        self.assertEqual(mr_jira.display_mr_state(None), "")
+        self.assertEqual(mr_jira.display_mr_state("  "), "")
+
+    def test_unknown_state_is_title_cased(self):
+        self.assertEqual(mr_jira.display_mr_state("CHECKING"), "Checking")
+
+    def test_case_insensitive_known_values(self):
+        self.assertEqual(mr_jira.display_mr_state("OPENED"), "Open")
+        self.assertEqual(mr_jira.display_mr_state("Merged"), "Merged")
+
+
+class FetchMrStateTests(unittest.TestCase):
+
+    def setUp(self):
+        mr_jira.clear_cache()
+
+    def tearDown(self):
+        mr_jira.clear_cache()
+
+    def test_state_is_cached_from_the_same_gitlab_call(self):
+        client = _FakeClient(title="RLZ-77987 popup", state="opened")
+        metadata = mr_jira.fetch_jira_metadata(
+            "web/web", 41893, client=client)
+
+        self.assertEqual(metadata.state, "opened")
+        self.assertEqual(mr_jira.get_cached_state("web/web", 41893), "opened")
+        self.assertEqual(mr_jira.display_mr_state(metadata.state), "Open")
+        self.assertEqual(client.calls, 1)
+
+        # Warm cache: no extra GitLab hit.
+        again = mr_jira.fetch_jira_metadata(
+            "web/web", 41893, client=client)
+        self.assertEqual(again.state, "opened")
+        self.assertEqual(client.calls, 1)
+
+    def test_force_refresh_picks_up_a_state_change(self):
+        client = _FakeClient(title="RLZ-77987 popup", state="opened")
+        mr_jira.fetch_jira_metadata("web/web", 41893, client=client)
+        client._state = "merged"
+
+        stale = mr_jira.fetch_jira_metadata(
+            "web/web", 41893, client=client)
+        self.assertEqual(stale.state, "opened")
+        self.assertEqual(client.calls, 1)
+
+        fresh = mr_jira.fetch_jira_metadata(
+            "web/web", 41893, client=client, force_refresh=True)
+        self.assertEqual(fresh.state, "merged")
+        self.assertEqual(mr_jira.get_cached_state("web/web", 41893), "merged")
+        self.assertEqual(client.calls, 2)
+        self.assertEqual(client.force_refresh_flags, [False, True])
+
+    def test_force_refresh_failure_keeps_previous_state(self):
+        client = _FakeClient(title="RLZ-7 fix", state="opened")
+        mr_jira.fetch_jira_metadata("web/web", 1, client=client)
+        client._error = RuntimeError("503")
+
+        kept = mr_jira.fetch_jira_metadata(
+            "web/web", 1, client=client, force_refresh=True)
+        self.assertEqual(kept.state, "opened")
+        self.assertEqual(mr_jira.get_cached_state("web/web", 1), "opened")
+
+    def test_legacy_client_without_force_refresh_kwarg_still_works(self):
+        class LegacyClient:
+            def __init__(self):
+                self.calls = 0
+
+            def has_token(self):
+                return True
+
+            def get_merge_request(self, project_id, mr_iid):
+                self.calls += 1
+                return {"title": "RLZ-1 x", "state": "closed"}
+
+        client = LegacyClient()
+        metadata = mr_jira.fetch_jira_metadata(
+            "web/web", 1, client=client, force_refresh=True)
+        self.assertEqual(metadata.state, "closed")
+        self.assertEqual(mr_jira.display_mr_state(metadata.state), "Closed")
+        self.assertEqual(client.calls, 1)
+
+    def test_missing_state_field_caches_empty_string(self):
+        client = _FakeClient(title="chore: bump", state=None)
+        metadata = mr_jira.fetch_jira_metadata(
+            "web/bui", 2, client=client)
+        self.assertEqual(metadata.state, "")
+        self.assertEqual(mr_jira.get_cached_state("web/bui", 2), "")
+        self.assertEqual(mr_jira.display_mr_state(metadata.state), "")
 
 
 class NormalizeJiraIdTests(unittest.TestCase):
@@ -322,6 +428,7 @@ class FindMergeRequestsTests(unittest.TestCase):
     def test_global_search_uses_full_reference_and_exact_displayed_ticket(self):
         client = _FakeSearchClient([
             {"iid": 3064, "title": "BUP-4360 purchase MR4",
+             "state": "merged",
              "references": {"full": "web/bui!3064"}},
             {"iid": 88, "title": "LOC-9 relates to BUP-4360",
              "references": {"full": "common/clw!88"}},
@@ -333,6 +440,7 @@ class FindMergeRequestsTests(unittest.TestCase):
         self.assertEqual(client.calls, [
             ("BUP-4360", {"project_id": None, "in_field": "title"})])
         self.assertEqual(mr_jira.get_cached("web/bui", 3064), "BUP-4360")
+        self.assertEqual(mr_jira.get_cached_state("web/bui", 3064), "merged")
 
     def test_project_search_uses_selected_project_when_reference_is_short(self):
         client = _FakeSearchClient([
@@ -363,14 +471,28 @@ class ColumnLayoutTests(unittest.TestCase):
         from gui_tabs import MRPipelineTab
         cols = MRPipelineTab._MR_COLUMNS
         # Positional reads elsewhere in gui_tabs: project @ 1 (post-edit
-        # prefix), mr @ 2 (export filename); JIRA and Title form a pair.
+        # prefix), mr @ 2 (export filename); MR Status sits beside MR#;
+        # JIRA and Title form a pair immediately after.
         self.assertEqual(cols.index("project"), 1)
         self.assertEqual(cols.index("mr"), 2)
-        self.assertEqual(cols.index("jira"), 3)
-        self.assertEqual(cols.index("title"), 4)
-        # Both metadata columns sort as text.
+        self.assertEqual(cols.index("mr_status"), 3)
+        self.assertEqual(cols.index("jira"), 4)
+        self.assertEqual(cols.index("title"), 5)
+        # GitLab metadata columns sort as text, not as numbers.
+        self.assertNotIn("mr_status", MRPipelineTab._MR_NUMERIC_COLS)
         self.assertNotIn("jira", MRPipelineTab._MR_NUMERIC_COLS)
         self.assertNotIn("title", MRPipelineTab._MR_NUMERIC_COLS)
+
+    def test_heading_strings_exist_in_both_languages(self):
+        from export_gui import STRINGS
+        from gui_tabs import MRPipelineTab
+        for lang in ("en", "zh"):
+            for col in MRPipelineTab._MR_COLUMNS:
+                self.assertIn(
+                    f"mr_col_{col}", STRINGS[lang],
+                    f"missing mr_col_{col} in STRINGS[{lang}]")
+        self.assertEqual(STRINGS["en"]["mr_col_mr_status"], "MR Status")
+        self.assertEqual(STRINGS["zh"]["mr_col_mr_status"], "MR 状态")
 
 
 class TitleEllipsisTests(unittest.TestCase):
@@ -396,7 +518,7 @@ class TitleEllipsisTests(unittest.TestCase):
 
 
 class _FakeTree:
-    def __init__(self, *, region="cell", column="#4", row="task-1",
+    def __init__(self, *, region="cell", column="#5", row="task-1",
                  jira="RA-132077"):
         self.region = region
         self.column = column
@@ -418,6 +540,72 @@ class _FakeTree:
 
     def configure(self, **kwargs):
         self.cursor = kwargs.get("cursor")
+
+
+class ApplyGitlabMetadataTests(unittest.TestCase):
+    """Lock the Tk-thread paint of JIRA + Title + MR Status from one payload."""
+
+    def test_opened_state_paints_as_open_next_to_jira(self):
+        from gui_tabs import MRPipelineTab
+
+        class _Tree:
+            def __init__(self):
+                self.cells = {}
+
+            def set(self, iid, column, value=None):
+                if value is None:
+                    return self.cells.get((iid, column), "")
+                self.cells[(iid, column)] = value
+
+            def column(self, _name, _opt):
+                return 400
+
+        tab = MRPipelineTab.__new__(MRPipelineTab)
+        tab.mr_tree = _Tree()
+        tab._jira_row_iids = {("web/web", 41893): ["task-1"]}
+        tab._jira_titles_by_iid = {}
+        tab._truncated_title_iids = set()
+        tab._mr_title_font = SimpleNamespace(measure=lambda s: len(s))
+
+        tab._apply_jira_metadata(
+            ("web/web", 41893),
+            mr_jira.JiraMetadata("RLZ-77987", "apply Do not show again",
+                                 "opened"),
+        )
+
+        self.assertEqual(tab.mr_tree.cells[("task-1", "mr_status")], "Open")
+        self.assertEqual(tab.mr_tree.cells[("task-1", "jira")], "RLZ-77987")
+        self.assertEqual(
+            tab.mr_tree.cells[("task-1", "title")],
+            "apply Do not show again")
+
+    def test_merged_state_paints_as_merged(self):
+        from gui_tabs import MRPipelineTab
+
+        class _Tree:
+            def __init__(self):
+                self.cells = {}
+
+            def set(self, iid, column, value=None):
+                if value is None:
+                    return self.cells.get((iid, column), "")
+                self.cells[(iid, column)] = value
+
+            def column(self, _name, _opt):
+                return 400
+
+        tab = MRPipelineTab.__new__(MRPipelineTab)
+        tab.mr_tree = _Tree()
+        tab._jira_row_iids = {("web/web", 1): ["task-1"]}
+        tab._jira_titles_by_iid = {}
+        tab._truncated_title_iids = set()
+        tab._mr_title_font = SimpleNamespace(measure=lambda s: len(s))
+
+        tab._apply_jira_metadata(
+            ("web/web", 1),
+            mr_jira.JiraMetadata("RLZ-1", "done", "merged"),
+        )
+        self.assertEqual(tab.mr_tree.cells[("task-1", "mr_status")], "Merged")
 
 
 class JiraHyperlinkInteractionTests(unittest.TestCase):
@@ -451,7 +639,7 @@ class JiraHyperlinkInteractionTests(unittest.TestCase):
         self.assertEqual(tree.cursor, "")
 
         tree.jira = "RA-132077"
-        tree.column = "#3"
+        tree.column = "#3"  # MR# — not the JIRA column
         with mock.patch("gui_tabs.webbrowser.open_new_tab") as opener:
             result = tab._on_mr_tree_click(SimpleNamespace(x=10, y=20))
         opener.assert_not_called()
@@ -462,7 +650,7 @@ class TitleTooltipInteractionTests(unittest.TestCase):
 
     def test_tooltip_only_targets_truncated_title_cell(self):
         from gui_tabs import MRPipelineTab
-        tree = _FakeTree(column="#5")
+        tree = _FakeTree(column="#6")
         tab = MRPipelineTab.__new__(MRPipelineTab)
         tab.mr_tree = tree
         tab._jira_titles_by_iid = {"task-1": "Complete JIRA title"}
@@ -472,9 +660,9 @@ class TitleTooltipInteractionTests(unittest.TestCase):
             tab._title_tooltip_at(10, 20),
             ("task-1", "Complete JIRA title"))
 
-        tree.column = "#4"
+        tree.column = "#5"  # JIRA, not Title
         self.assertIsNone(tab._title_tooltip_at(10, 20))
-        tree.column = "#5"
+        tree.column = "#6"
         tab._truncated_title_iids.clear()
         self.assertIsNone(tab._title_tooltip_at(10, 20))
 
