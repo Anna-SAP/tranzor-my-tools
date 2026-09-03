@@ -66,6 +66,33 @@ def _ellipsize_text(value, max_width, measure):
     return text[:lo].rstrip() + suffix, True
 
 
+def _mr_time_cells(task, *, tz=None):
+    """Created / Ended / Duration cells for one MR Pipeline task.
+
+    Tranzor ``GET /tasks`` exposes ``created_at`` and ``updated_at``; there
+    is no separate ``completed_at``. Duration is already ``updated_at −
+    created_at``, so Ended is that same ``updated_at``, formatted with the
+    same UTC→local conversion as Created. Missing ``updated_at`` → ``—``.
+    """
+    created_raw = (task or {}).get("created_at") or ""
+    updated_raw = (task or {}).get("updated_at") or ""
+    created = format_display_datetime(created_raw, tz=tz)
+    ended = format_display_datetime(updated_raw, empty="—", tz=tz)
+    duration = ""
+    try:
+        if created_raw and updated_raw:
+            c = datetime.fromisoformat(str(created_raw)[:19])
+            u = datetime.fromisoformat(str(updated_raw)[:19])
+            secs = int((u - c).total_seconds())
+            if secs < 60:
+                duration = f"{secs}s"
+            else:
+                duration = f"{secs // 60}m{secs % 60}s"
+    except Exception:
+        pass
+    return created, ended, duration
+
+
 # ============================================================
 # MR Pipeline Tab
 # ============================================================
@@ -80,9 +107,10 @@ class MRPipelineTab:
     # follow so same-origin tasks still group together. These insertions
     # keep the critical positional reads elsewhere valid (project @ idx 1
     # for the post-edit prefix, MR# @ idx 2 for the export filename).
+    # ``ended`` is Tranzor ``updated_at`` (no separate completed_at exists).
     _MR_COLUMNS = ("idx", "project", "mr", "mr_status", "jira", "title",
                    "release", "status", "src_strings", "avg_score",
-                   "created", "duration")
+                   "created", "ended", "duration")
     # Columns whose cells sort numerically; everything else sorts as text.
     _MR_NUMERIC_COLS = frozenset({"idx", "mr", "src_strings", "avg_score"})
 
@@ -440,7 +468,7 @@ class MRPipelineTab:
         col_widths = {"idx": 35, "project": 140, "mr": 60, "mr_status": 90,
                       "jira": 90, "title": 260, "release": 60, "status": 80,
                       "src_strings": 90, "avg_score": 70, "created": 185,
-                      "duration": 70}
+                      "ended": 185, "duration": 70}
         for c in cols:
             width = col_widths.get(c, 80)
             is_title = c == "title"
@@ -1094,20 +1122,7 @@ class MRPipelineTab:
 
         for i, t in enumerate(tasks):
             idx = base_offset + i + 1
-            created = format_display_datetime(t.get("created_at") or "")
-            updated = t.get("updated_at") or ""
-            duration = ""
-            try:
-                if created and updated:
-                    c = datetime.fromisoformat(t["created_at"][:19])
-                    u = datetime.fromisoformat(updated[:19])
-                    secs = int((u - c).total_seconds())
-                    if secs < 60:
-                        duration = f"{secs}s"
-                    else:
-                        duration = f"{secs // 60}m{secs % 60}s"
-            except Exception:
-                pass
+            created, ended, duration = _mr_time_cells(t)
 
             avg = t.get("average_score")
             task_id = t.get("task_id") or ""
@@ -1193,7 +1208,8 @@ class MRPipelineTab:
                     jira_display, title_display,
                     t.get("release", ""), t.get("status", ""),
                     src_display,
-                    avg if avg is not None else "—", created, duration,
+                    avg if avg is not None else "—",
+                    created, ended, duration,
                 ),
                 tags=row_tags,
             )
