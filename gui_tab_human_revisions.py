@@ -21,6 +21,7 @@ from datetime import date, datetime, timedelta
 import export_mr_pipeline as mr_api
 import terminology_highlight as th
 from export_gui import format_age_days, sanitize_for_filename
+from time_display import format_display_datetime, format_display_now
 from date_picker import attach_calendar
 
 # ---------------------------------------------------------------------------
@@ -263,7 +264,7 @@ class HumanRevisionsTab:
         # Configure column widths for both trees
         col_widths = {
             "project": 170, "language": 80, "key": 200, "score": 60,
-            "editor": 130, "date": 140, "age": 55,
+            "editor": 130, "date": 175, "age": 55,
         }
         for tree in (self.mr_tree, self.file_tree):
             for c in tree_cols:
@@ -432,7 +433,7 @@ class HumanRevisionsTab:
             if len(key) > 32:
                 key = key[:30] + "\u2026"
             raw_ts = it.get("revised_at") or ""
-            ts = str(raw_ts)[:16].replace("T", " ")
+            ts = format_display_datetime(raw_ts, fmt="%Y-%m-%d %H:%M")
             # Compute age from the *raw* ISO so we don't lose the timezone
             # suffix the truncation above strips for the visible column.
             age = format_age_days(raw_ts)
@@ -610,7 +611,6 @@ def _esc(text):
 
 def _render_html_report(items, params):
     from collections import defaultdict
-    from datetime import datetime
 
     # Pre-build terminology highlight regexes for every locale present.
     th.prefetch_for_rows(items, source_field="source_text",
@@ -659,7 +659,7 @@ def _render_html_report(items, params):
         Opus ID: <code>{_esc(it.get('opus_id',''))}</code> |
         Score: <strong>{it.get('machine_score','-')}</strong> |
         Error: <em>{_esc(it.get('error_category','-'))}</em> |
-        Revised: {str(it.get('revised_at',''))[:16]}
+        Revised: {format_display_datetime(it.get('revised_at',''), fmt="%Y-%m-%d %H:%M")}
       </footer>
     </article>""")
 
@@ -667,7 +667,7 @@ def _render_html_report(items, params):
             f'<section><h2>{_esc(channel)} ({total_in_channel})</h2>'
             f'{"".join(cards_html)}</section>')
 
-    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    now = format_display_now(fmt="%Y-%m-%d %H:%M")
     time_range = (f'{params.get("start_time","...")[:10]} \u2014 '
                   f'{params.get("end_time","...")[:10]}')
 
@@ -719,7 +719,6 @@ font-size:0.75rem}}.card-meta strong{{color:#1e3a5f}}
 
 def _render_md_report(items, params):
     from collections import defaultdict
-    from datetime import datetime
 
     lines = [
         "# Human Revisions Report", "",
@@ -728,7 +727,7 @@ def _render_md_report(items, params):
         f"{params.get('end_time','...')[:10]}",
         f"- **Total:** {len(items)} revisions",
         f"- **Generated:** "
-        f"{datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}",
+        f"{format_display_now(fmt='%Y-%m-%d %H:%M')}",
         "", "---", "",
     ]
 

@@ -24,9 +24,13 @@ from export_gui import (
     TOKEN_STATUS_RED,
     format_token_expiry_status,
 )
+from time_display import format_tz_label
 
 # A fixed "now" so tests stay stable across runs / clocks / timezones.
 _NOW = datetime(2026, 7, 17, 10, 0, 0)
+# Host-local offset suffix (e.g. "UTC+8") so countdown assertions stay
+# portable across the machines that run this suite.
+_TZ = format_tz_label(at=_NOW)
 
 
 def _status(seconds_left, lang="en", signed_in=True):
@@ -85,33 +89,38 @@ class CountdownTextTests(unittest.TestCase):
     def test_days_bucket_en(self):
         # 5d 3h from 7/17 10:00 → expires 7/22 13:00.
         text, color = _status(5 * 86400 + 3 * 3600)
-        self.assertEqual(text, "🕒 Token expires: 7/22 13:00 (5d 3h left)")
+        self.assertEqual(
+            text, f"🕒 Token expires: 7/22 13:00 {_TZ} (5d 3h left)")
         self.assertEqual(color, TOKEN_STATUS_GREEN)
 
     def test_days_bucket_zh(self):
         text, _ = _status(5 * 86400 + 3 * 3600, lang="zh")
         self.assertEqual(
-            text, "🕒 Token 过期时间: 7/22 13:00（剩 5 天 3 小时）")
+            text, f"🕒 Token 过期时间: 7/22 13:00 {_TZ}（剩 5 天 3 小时）")
 
     def test_hours_bucket(self):
         text, color = _status(2 * 3600 + 30 * 60)
-        self.assertEqual(text, "🕒 Token expires: 7/17 12:30 (2h 30m left)")
+        self.assertEqual(
+            text, f"🕒 Token expires: 7/17 12:30 {_TZ} (2h 30m left)")
         self.assertEqual(color, TOKEN_STATUS_AMBER)
 
     def test_minutes_bucket(self):
         text, color = _status(45 * 60)
-        self.assertEqual(text, "🕒 Token expires: 7/17 10:45 (45 min left)")
+        self.assertEqual(
+            text, f"🕒 Token expires: 7/17 10:45 {_TZ} (45 min left)")
         self.assertEqual(color, TOKEN_STATUS_RED)
 
     def test_minutes_bucket_zh(self):
         text, _ = _status(45 * 60, lang="zh")
-        self.assertEqual(text, "🕒 Token 过期时间: 7/17 10:45（剩 45 分钟）")
+        self.assertEqual(
+            text, f"🕒 Token 过期时间: 7/17 10:45 {_TZ}（剩 45 分钟）")
 
     def test_month_day_unpadded_clock_padded(self):
         # 9/8 20:05 + 12h → 9/9 08:05 — month/day bare, clock zero-padded.
         text, _ = format_token_expiry_status(
             12 * 3600, now=datetime(2026, 9, 8, 20, 5, 0))
         self.assertIn("9/9 08:05", text)
+        self.assertIn(format_tz_label(at=datetime(2026, 9, 8, 20, 5, 0)), text)
 
     def test_remaining_floors_not_rounds(self):
         # 1d 23h 59m 59s must NOT display as 2d.
@@ -141,7 +150,7 @@ class ColorLadderTests(unittest.TestCase):
         # Fresh 7-day token (JWT_EXPIRE_HOURS=168).
         text, color = _status(7 * 86400)
         self.assertEqual(color, TOKEN_STATUS_GREEN)
-        self.assertIn("7/24 10:00", text)
+        self.assertIn(f"7/24 10:00 {_TZ}", text)
         self.assertIn("7d 0h", text)
 
 

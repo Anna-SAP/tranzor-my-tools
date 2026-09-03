@@ -31,6 +31,7 @@ a = Analysis(
         'gui_tab_key_origin',
         'key_origin',
         'date_picker',  # 共享深色日历选择组件（日期字段 📅 选择器）
+        'time_display',  # tz-aware clock formatter (Created / token expiry)
         'searchable_combobox',  # 共享可搜索下拉组件（Project 关键字过滤弹窗）
         'project_presets',  # 命名项目组合（Preset）读写 ~/.tranzor_exporter_config.json
         'mr_jira',  # MR title → JIRA ID 提取（MR Pipeline 的 JIRA 列）

@@ -21,6 +21,7 @@ from collections import OrderedDict
 from datetime import date
 
 import terminology_highlight as th
+from time_display import format_display_datetime
 from tranzor_truncation import hydrate_truncated_entries
 
 
@@ -1765,7 +1766,8 @@ def write_mr_html(results_data, filename, label, bridge_info=None,
             if is_changes:
                 prev_text = r.get("prev_translated_text", "")
                 curr_text = r.get("translated_text", "")
-                task_time = r.get("task_created", "")[:16].replace("T", " ")
+                task_time = format_display_datetime(
+                    r.get("task_created", ""), fmt="%Y-%m-%d %H:%M")
                 fixed_by = r.get("fixed_by", "")
                 mr_link = r.get("mr_link", "")
                 mr_link_html = (f'<a href="{html_mod.escape(mr_link)}" target="_blank">'
@@ -2803,7 +2805,8 @@ def write_mr_excel(results_data, filename):
             ws.cell(row=row_i, column=6, value=curr_text)
             diff_text = _word_diff_text(prev_text, curr_text)
             ws.cell(row=row_i, column=7, value=diff_text)
-            task_time = t.get("task_created", "")[:16].replace("T", " ")
+            task_time = format_display_datetime(
+                t.get("task_created", ""), fmt="%Y-%m-%d %H:%M")
             ws.cell(row=row_i, column=8, value=task_time)
             ws.cell(row=row_i, column=9, value=t.get("fixed_by") or "")
             mr_link = t.get("mr_link", "")

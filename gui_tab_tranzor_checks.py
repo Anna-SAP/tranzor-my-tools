@@ -233,20 +233,14 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import tranzor_checks as tc
 import export_mr_pipeline as mr_api  # 仅为 TRANZOR_URL 跳转
 from export_gui import FONT_FAMILY, FONT_MONO, IS_MAC, format_age_days
+from time_display import FMT_SHORT, format_display_datetime
 
 
 # ---------------------------------------------------------------------------
 # 工具
 # ---------------------------------------------------------------------------
 def _fmt_iso_short(iso_str: str | None) -> str:
-    if not iso_str:
-        return "—"
-    try:
-        s = str(iso_str).replace("Z", "+00:00")
-        dt = datetime.fromisoformat(s)
-        return dt.strftime("%m-%d %H:%M")
-    except Exception:
-        return str(iso_str)[:16]
+    return format_display_datetime(iso_str, fmt=FMT_SHORT, empty="—")
 
 
 def _humanize_elapsed(iso_str: str | None, t) -> str:
@@ -543,7 +537,7 @@ class TranzorChecksTab:
             style="Summary.Treeview", selectmode="browse", height=12)
         widths = {"source": 70, "error_type": 180, "language": 60,
                   "keyword": 240, "count": 60, "tasks": 60,
-                  "latest_task": 140, "latest_seen": 120, "age": 55}
+                  "latest_task": 140, "latest_seen": 155, "age": 55}
         for c in self._agg_cols:
             anchor = "w" if c in ("error_type", "keyword",
                                     "latest_task") else "center"

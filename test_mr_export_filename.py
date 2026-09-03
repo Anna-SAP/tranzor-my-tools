@@ -80,6 +80,17 @@ class CreatedTimeStampTests(unittest.TestCase):
         for bad in '<>:"/\\|?*':
             self.assertNotIn(bad, name)
 
+    def test_created_tz_label_survives_sanitize(self):
+        # GUI Created cells now carry "UTC+8"; the filename must keep the
+        # offset and still be Windows-safe ('+' is legal, ':' is not).
+        name = _build(
+            ".json", mr_iid="40461", id_tag="75040f78", type_tag="all",
+            created="2026-06-17 14:42:26 UTC+8", export_date="2026-06-18")
+        self.assertIn("UTC+8", name)
+        self.assertIn("2026-06-17_14-42-26", name)
+        for bad in '<>:"/\\|?*':
+            self.assertNotIn(bad, name)
+
     def test_mr_tag_omitted_when_no_iid(self):
         name = _build(
             ".json", mr_iid="", id_tag="75040f78", type_tag="changes",

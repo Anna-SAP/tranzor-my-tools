@@ -24,6 +24,7 @@ from export_gui import (
     FONT_FAMILY, IS_MAC, reveal_in_folder, sanitize_for_filename,
     export_output_dir,
 )
+from time_display import format_display_datetime
 from date_picker import attach_calendar
 from searchable_combobox import attach_search, format_selection_summary
 import project_presets as _presets
@@ -437,7 +438,7 @@ class MRPipelineTab:
                                      style="Summary.Treeview", height=14, selectmode="browse")
         col_widths = {"idx": 35, "project": 140, "mr": 60, "jira": 90,
                       "title": 260, "release": 60, "status": 80,
-                      "src_strings": 90, "avg_score": 70, "created": 130,
+                      "src_strings": 90, "avg_score": 70, "created": 185,
                       "duration": 70}
         for c in cols:
             width = col_widths.get(c, 80)
@@ -1092,7 +1093,7 @@ class MRPipelineTab:
 
         for i, t in enumerate(tasks):
             idx = base_offset + i + 1
-            created = (t.get("created_at") or "")[:19].replace("T", " ")
+            created = format_display_datetime(t.get("created_at") or "")
             updated = t.get("updated_at") or ""
             duration = ""
             try:
@@ -2806,7 +2807,8 @@ class QualityOverviewTab:
             chunks = []
             for log in logs[:10]:
                 user = log.get("user_name") or "Unknown"
-                created_at = log.get("created_at") or ""
+                created_at = format_display_datetime(
+                    log.get("created_at") or "")
                 notes = log.get("notes") or ""
                 edited_text = log.get("edited_text") or ""
                 chunks.append(f"[{created_at}] {user}\n{edited_text}")

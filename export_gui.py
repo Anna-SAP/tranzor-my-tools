@@ -151,6 +151,8 @@ from concurrent.futures import ThreadPoolExecutor
 from tkinter import ttk, messagebox
 from datetime import date, datetime, timedelta
 
+from time_display import format_display_datetime, format_tz_label
+
 _boot_mark("stdlib_imports_done")
 
 # ---------------------------------------------------------------------------
@@ -1037,9 +1039,12 @@ def format_token_expiry_status(seconds_left, *, now=None, lang="en",
         color = TOKEN_STATUS_AMBER
     else:
         color = TOKEN_STATUS_RED
-    # "7/22 14:00" — month/day without zero-padding, done by hand because
-    # strftime's no-pad flag is platform-split (%-m POSIX vs %#m Windows).
-    when = f"{exp.month}/{exp.day} {exp.strftime('%H:%M')}"
+    # "7/22 14:00 UTC+8" — month/day without zero-padding, done by hand
+    # because strftime's no-pad flag is platform-split (%-m POSIX vs %#m
+    # Windows). The offset is the host's local zone: ``now`` is naive
+    # local (or an injected test clock), so the label matches the clock.
+    when = (f"{exp.month}/{exp.day} {exp.strftime('%H:%M')} "
+            f"{format_tz_label(at=exp)}")
     return s["token_status_fmt"].format(time=when, left=left), color
 
 
@@ -2058,7 +2063,7 @@ class ExportApp:
             "creator":     (100, "w",      False),
             "status":      (90,  "center", False),
             "src_strings": (95,  "center", False),
-            "created":     (140, "center", False),
+            "created":     (185, "center", False),
         }
         for c in cols:
             w, anchor, stretch = col_cfg[c]
@@ -2468,7 +2473,7 @@ class ExportApp:
             tname = task.get("task_name", "")
             creator = task.get("created_by", "") or task.get("creator", "") or "-"
             status = task.get("status", "") or ""
-            created = (task.get("created_at") or "")[:19].replace("T", " ")
+            created = format_display_datetime(task.get("created_at") or "")
             # Synchronous render when we've already cached the answer.
             cached = (
                 _tpe_local.get_cache().get("legacy", tid)

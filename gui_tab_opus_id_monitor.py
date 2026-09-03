@@ -412,19 +412,12 @@ import opus_id_monitor as om
 # 还要靠后；想用它必须懒加载（见 _build() 里的 ``from export_gui import
 # Tooltip``）。这里只拿稳定在文件顶部的常量。
 from export_gui import FONT_FAMILY, FONT_MONO, IS_MAC
+from time_display import FMT_SHORT, format_display_datetime
 
 
 def _fmt_iso_short(iso_str: str | None) -> str:
-    """ISO 时间字符串 → '05-25 14:32' 这样人类可读的紧凑形式。"""
-    if not iso_str:
-        return "—"
-    try:
-        # 兼容带时区和不带时区两种
-        s = iso_str.replace("Z", "+00:00")
-        dt = datetime.fromisoformat(s)
-        return dt.strftime("%m-%d %H:%M")
-    except Exception:
-        return iso_str[:16]
+    """ISO 时间字符串 → '05-25 14:32 UTC+8' 这样人类可读的紧凑形式。"""
+    return format_display_datetime(iso_str, fmt=FMT_SHORT, empty="—")
 
 
 def _humanize_elapsed(iso_str: str | None, t) -> str:
@@ -687,7 +680,7 @@ class OpusIdMonitorTab:
             bd_frame, columns=cols, show="headings",
             style="Summary.Treeview", selectmode="browse")
         widths = {"project": 240, "alias": 60, "opus": 80, "files": 70,
-                  "langs": 60, "last_added": 110}
+                  "langs": 60, "last_added": 150}
         for c in cols:
             anchor = "w" if c in ("project",) else "center"
             self.tree_breakdown.column(
@@ -756,7 +749,7 @@ class OpusIdMonitorTab:
         self.tree_recent = ttk.Treeview(
             rc_frame, columns=rcols, show="headings",
             style="Summary.Treeview", selectmode="browse", height=20)
-        rwidths = {"time": 75, "project": 95, "alias": 50, "opus": 180}
+        rwidths = {"time": 130, "project": 95, "alias": 50, "opus": 180}
         for c in rcols:
             anchor = "w" if c in ("project", "opus") else "center"
             self.tree_recent.column(
@@ -1406,7 +1399,7 @@ class SyncDeltaDialog(tk.Toplevel):
         tree = ttk.Treeview(
             tbl_frame, columns=cols, show="headings",
             style="Summary.Treeview", selectmode="browse")
-        widths = {"time": 110, "source": 60, "project": 200,
+        widths = {"time": 150, "source": 60, "project": 200,
                   "alias": 90, "opus": 280}
         anchors = {"time": "center", "source": "center",
                     "project": "w", "alias": "center", "opus": "w"}
@@ -1600,7 +1593,7 @@ class ProjectDetailDialog(tk.Toplevel):
             tbl_frame, columns=cols, show="headings",
             style="Summary.Treeview", selectmode="browse")
         widths = {"pathhash": 200, "path": 230, "opus": 70, "langs": 50,
-                  "last": 110, "samples": 220}
+                  "last": 150, "samples": 220}
         for c in cols:
             anchor = "w" if c in ("pathhash", "path", "samples") else "center"
             tree.column(c, width=widths.get(c, 80), anchor=anchor)
@@ -1756,7 +1749,7 @@ class FileDetailDialog(tk.Toplevel):
         self._opus_tree = tree = ttk.Treeview(
             tbl, columns=cols, show="headings",
             style="Summary.Treeview", selectmode="browse")
-        widths = {"logkey": 280, "langs": 60, "source": 460, "added": 110}
+        widths = {"logkey": 280, "langs": 60, "source": 460, "added": 150}
         for c in cols:
             anchor = "w" if c in ("logkey", "source") else "center"
             tree.column(c, width=widths.get(c, 80), anchor=anchor)

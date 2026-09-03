@@ -110,6 +110,7 @@ STRINGS = {
 }
 
 from export_gui import FONT_FAMILY, FONT_MONO  # noqa: E402
+from time_display import format_display_datetime  # noqa: E402
 
 import export_mr_pipeline as mr_api  # noqa: E402
 import key_origin as ko  # noqa: E402
@@ -207,7 +208,7 @@ class KeyOriginTab:
             tree_frame, columns=self._COLS, show="tree headings",
             style="Summary.Treeview", selectmode="browse", height=16)
         self.tree.column("#0", width=420, anchor="w", stretch=True)
-        widths = {"project": 140, "mr": 70, "created": 160, "langs": 60,
+        widths = {"project": 140, "mr": 70, "created": 185, "langs": 60,
                   "kind": 90, "match": 70}
         for col in self._COLS:
             anchor = "center" if col in ("mr", "langs", "match") else "w"
@@ -426,7 +427,7 @@ class KeyOriginTab:
                 short = (rec.task_id if rec else "")[:8]
                 label = self._t("ko_group_file").format(
                     short=short, n=len(keys))
-            created = (rec.created_at if rec else "")[:19].replace("T", " ")
+            created = format_display_datetime(rec.created_at if rec else "")
             gid = self.tree.insert(
                 "", "end", text=label,
                 values=(
@@ -442,8 +443,8 @@ class KeyOriginTab:
             for query in keys:
                 hit = by_search.get(query.search_opus_id) or {}
                 rec_k = hit.get("recommended") or rec
-                created_k = (rec_k.created_at if rec_k else "")[:19].replace(
-                    "T", " ")
+                created_k = format_display_datetime(
+                    rec_k.created_at if rec_k else "")
                 kid = self.tree.insert(
                     gid, "end", text=query.search_opus_id,
                     values=(

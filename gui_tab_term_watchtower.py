@@ -24,6 +24,7 @@ try:
 except Exception:
     tz_term = None
 from export_gui import FONT_FAMILY, IS_MAC
+from time_display import format_display_datetime
 
 # Optional: reuse existing FT collection path for live scans.
 try:
@@ -1935,7 +1936,7 @@ class _TranzorTerminologyDialog(tk.Toplevel):
         self.tree.column("scope", width=110, anchor="w", stretch=False)
         self.tree.column("locales", width=80, anchor="e", stretch=False)
         self.tree.column("dnt", width=60, anchor="center", stretch=False)
-        self.tree.column("updated_at", width=140, anchor="center",
+        self.tree.column("updated_at", width=185, anchor="center",
                          stretch=False)
         self.tree.pack(side="left", fill="both", expand=True)
         vsb = ttk.Scrollbar(tree_wrap, orient="vertical",
@@ -2407,27 +2408,10 @@ class _TermDetailDialog(tk.Toplevel):
     @staticmethod
     def _format_updated_at(value: Any) -> str:
         """Format an ISO datetime (the only audit field Tranzor exposes)
-        as ``YYYY-MM-DD HH:MM:SS``. Returns ``""`` for missing / unparsable
+        as ``YYYY-MM-DD HH:MM:SS UTC+8``. Returns ``""`` for missing
         values so the caller can skip rendering the field entirely.
-
-        The platform serializes ``updated_at`` as Pydantic-encoded ISO
-        (e.g. ``"2026-03-06T14:23:45.123456"`` or ``"…+00:00"``). We
-        tolerate a trailing ``Z`` defensively since stdlib's
-        ``fromisoformat`` didn't accept it until Python 3.11.
         """
-        if not value:
-            return ""
-        text = str(value).strip()
-        if not text:
-            return ""
-        try:
-            if text.endswith("Z"):
-                text = text[:-1] + "+00:00"
-            return datetime.fromisoformat(text).strftime(
-                "%Y-%m-%d %H:%M:%S"
-            )
-        except Exception:
-            return text[:19]  # best-effort fallback
+        return format_display_datetime(value)
 
     def _open_in_browser(self):
         try:

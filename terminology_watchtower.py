@@ -25,6 +25,8 @@ import threading
 import time
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
+
+from time_display import format_display_now
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import atomic_io
@@ -1441,7 +1443,7 @@ def export_evidence_markdown(
     filters_applied: Optional[Dict[str, str]] = None,
     glossary_timestamp: str = "",
 ) -> str:
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = format_display_now()
     lines: List[str] = []
     lines.append(f"# {title}")
     lines.append("")
@@ -1556,7 +1558,7 @@ def export_evidence_html(
     filters_applied: Optional[Dict[str, str]] = None,
     glossary_timestamp: str = "",
 ) -> str:
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = format_display_now()
     rows_html: List[str] = []
     detail_html: List[str] = []
     for i in issues:
@@ -1709,7 +1711,7 @@ def export_evidence_xlsx(
     ws_sum["A1"] = "Term Watchtower — Evidence Report"
     ws_sum["A1"].font = Font(size=14, bold=True)
     rows = [
-        ("Generated", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        ("Generated", format_display_now()),
         ("Scan time", summary.last_scan_at or "-"),
         ("Total active issues", summary.total_active_issues),
         ("Critical", summary.critical),
