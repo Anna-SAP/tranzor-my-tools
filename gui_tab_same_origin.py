@@ -157,6 +157,7 @@ STRINGS = {
 # 这些常量在可选 tab 导入前已在 export_gui 中定义；此处反向 import 安全
 # （export_gui 已在 sys.modules 中、属性已就绪）。
 from export_gui import FONT_FAMILY, FONT_MONO, IS_MAC  # noqa: E402
+from time_display import format_display_datetime  # noqa: E402
 
 import same_origin  # noqa: E402
 import task_post_edit as _tpe  # noqa: E402
@@ -256,7 +257,7 @@ class SameOriginTab:
             tree_frame, columns=self._cols, show="tree headings",
             style="Summary.Treeview", selectmode="browse", height=18)
         self.tree.column("#0", width=440, anchor="w", stretch=True)
-        widths = {"created": 150, "status": 130, "score": 80, "duration": 80}
+        widths = {"created": 185, "status": 130, "score": 80, "duration": 80}
         for c in self._cols:
             anchor = "center" if c in ("score", "duration") else "w"
             self.tree.column(c, width=widths.get(c, 100), anchor=anchor)
@@ -423,7 +424,7 @@ class SameOriginTab:
         mr_iid = g["mr_iid"]
         n = g["task_count"]
         group_label = t("so_group_label").format(project=project, mr=mr_iid, n=n)
-        created_latest = (g.get("latest_created") or "")[:19].replace("T", " ")
+        created_latest = format_display_datetime(g.get("latest_created") or "")
         release = g.get("release", "")
         release_disp = t("so_group_release").format(release=release) if release else ""
         giid = self.tree.insert(
@@ -435,7 +436,7 @@ class SameOriginTab:
 
         for task in g["tasks"]:
             tid = task.get("task_id") or ""
-            created = (task.get("created_at") or "")[:19].replace("T", " ")
+            created = format_display_datetime(task.get("created_at") or "")
             avg = task.get("average_score")
             self.tree.insert(
                 giid, "end",
@@ -729,7 +730,7 @@ class SameOriginDiffDialog(tk.Toplevel):
         versions = d.get("versions", [])
         prev_present_text = None
         for i, v in enumerate(versions, start=1):
-            when = (v.get("created_at") or "")[:19].replace("T", " ")
+            when = format_display_datetime(v.get("created_at") or "")
             self.detail.insert(
                 "end", "\n" + t("so_diff_version").format(i=i, when=when) + "\n",
                 ("hdr",))

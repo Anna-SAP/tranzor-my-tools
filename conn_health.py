@@ -37,6 +37,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional, Tuple
 
+from time_display import format_tz_label
+
 try:
     import requests
 except Exception:  # pragma: no cover — headless/CI without requests
@@ -344,7 +346,8 @@ def format_conn_status(display: DisplayStatus, lang: str = "en",
 
     lines = []
     if display.taken_wall:
-        when = datetime.fromtimestamp(display.taken_wall).strftime("%H:%M:%S")
+        when_dt = datetime.fromtimestamp(display.taken_wall)
+        when = f"{when_dt.strftime('%H:%M:%S')} {format_tz_label(at=when_dt)}"
         lines.append(s["tip_last_probe"].format(when=when, latency=latency))
         lines.append(s["tip_ep_authed"] if display.authed
                      else s["tip_ep_livez"])

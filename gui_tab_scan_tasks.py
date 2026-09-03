@@ -23,6 +23,7 @@ from export_gui import (
     FONT_FAMILY, IS_MAC, format_age_days, reveal_in_folder,
     sanitize_for_filename, export_output_dir,
 )
+from time_display import format_display_datetime
 import task_post_edit as _tpe
 import advanced_filter
 # Aliased so the ``llm_qa`` boolean flag threaded through the export handlers
@@ -321,7 +322,7 @@ class ScanTasksTab:
         col_widths = {"idx": 35, "task_name": 150, "project": 130,
                       "base_ref": 120, "head_ref": 120, "status": 80,
                       "src_strings": 90, "output_mode": 100,
-                      "created": 140, "age": 55}
+                      "created": 185, "age": 55}
         for c in cols:
             anchor = "w" if c in ("task_name", "project", "base_ref", "head_ref") else "center"
             self.scan_tree.column(c, width=col_widths.get(c, 80), anchor=anchor)
@@ -596,7 +597,7 @@ class ScanTasksTab:
         for i, t in enumerate(tasks):
             idx = self.scan_page * self.scan_page_size + i + 1
             created_raw = t.get("created_at") or ""
-            created = created_raw[:19].replace("T", " ")
+            created = format_display_datetime(created_raw)
             # Format age from the *raw* ISO so timezone info isn't dropped.
             age = format_age_days(created_raw)
             task_id = t.get("task_id") or ""
