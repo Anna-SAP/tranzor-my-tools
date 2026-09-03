@@ -10,16 +10,22 @@ MR → JIRA ID 提取 —— MR Pipeline「JIRA」列的纯逻辑层
 Tranzor 平台的任务 payload 只带 ``merge_request_iid`` / ``project_id``，
 不带 MR 标题，所以 JIRA 归属需要一跳 GitLab：
 
-1. ``GET /projects/:id/merge_requests/:iid`` 拿 MR title（复用
+1. ``GET /projects/:id/merge_requests/:iid`` 拿 MR 元数据（复用
    :func:`task_post_edit._shared_gitlab_client` 的进程级共享客户端 ——
    它自身还带 per-(project, iid) 的 MR 响应缓存，双层缓存下同一 MR
    全程只打一次 GitLab）；
 2. 用正则从 title 里提取 JIRA ID（``BUP-4360`` 这类 ``KEY-123`` 形态，
    见 :data:`JIRA_ID_RE`），并把标题开头的 ticket 前缀去掉，作为表格中
-   与 JIRA ID 同源的 Title。
+   与 JIRA ID 同源的 Title；
+3. 同一响应里的 ``state``（``opened`` / ``merged`` / ``closed`` /
+   ``locked``）映射为 MR Pipeline「MR Status」列的展示文案（Open /
+   Merged / Closed / Locked）。表格每次 Search/Refresh 带
+   ``force_refresh=True`` 再打一次 GitLab，避免会话里一直显示过期的
+   Open。
 
 本模块只放 **纯逻辑**（不依赖 Tkinter），便于单测；GUI 层
-(:mod:`gui_tabs` 的 MR Pipeline tab) 引用本模块渲染 JIRA 列。
+(:mod:`gui_tabs` 的 MR Pipeline tab) 引用本模块渲染 JIRA / Title /
+MR Status 列。
 """
 from __future__ import annotations
 
@@ -52,12 +58,44 @@ NON_TICKET_KEYS = frozenset({"UTF", "SHA", "ISO", "RFC", "CVE", "MR"})
 JIRA_BROWSE_BASE_URL = "https://jira.ringcentral.com/browse/"
 
 
+# GitLab API ``state`` → MR Pipeline column label. The API says
+# ``opened``; the GitLab UI (and this column) say ``Open``.
+_MR_STATE_LABELS = {
+    "opened": "Open",
+    "merged": "Merged",
+    "closed": "Closed",
+    "locked": "Locked",
+}
+
+
 @dataclass(frozen=True)
 class JiraMetadata:
-    """JIRA ID and its display title resolved from one GitLab MR response."""
+    """Fields resolved from one GitLab MR response for the MR Pipeline table.
+
+    ``state`` is GitLab's raw value (``opened`` / ``merged`` / …). The GUI
+    paints :func:`display_mr_state` of that string in the MR Status column.
+    """
 
     jira_id: str
     title: str
+    state: str = ""
+
+
+def display_mr_state(raw) -> str:
+    """Map GitLab's ``state`` field to the MR Status column label.
+
+    Unknown values are title-cased so a future GitLab state still renders
+    something readable instead of a blank cell. Empty / None → ``""``.
+    """
+    if raw is None:
+        return ""
+    text = str(raw).strip()
+    if not text:
+        return ""
+    known = _MR_STATE_LABELS.get(text.lower())
+    if known:
+        return known
+    return text[:1].upper() + text[1:].lower()
 
 
 def extract_jira_id(title) -> str:
@@ -143,12 +181,14 @@ def jira_browse_url(value) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 进程级缓存 —— {(project_id, mr_iid): jira_id / title}。MR title 一经建立
-# 基本不改（改了也不影响已归档任务的归属判断），进程内缓存足够；不落盘，
-# 跟 task_post_edit.PostEditCache 同一个生命周期哲学。
+# 进程级缓存 —— {(project_id, mr_iid): jira_id / title / state}。MR title
+# 一经建立基本不改（改了也不影响已归档任务的归属判断）；``state`` 会变
+# （opened → merged），所以 GUI 在每次 Search/Refresh 时 ``force_refresh``
+# 覆盖它。不落盘，跟 task_post_edit.PostEditCache 同一个生命周期哲学。
 # ---------------------------------------------------------------------------
 _cache: dict[tuple[str, int], str] = {}
 _title_cache: dict[tuple[str, int], str] = {}
+_state_cache: dict[tuple[str, int], str] = {}
 _cache_lock = threading.Lock()
 
 
@@ -180,6 +220,16 @@ def get_cached_title(project_id, mr_iid) -> Optional[str]:
         return _title_cache.get(key)
 
 
+def get_cached_state(project_id, mr_iid) -> Optional[str]:
+    """Return the cached raw GitLab MR state, including ``""`` if fetched
+    but the payload had no ``state``. Never-fetched → ``None``."""
+    key = _normalize_key(project_id, mr_iid)
+    if key is None:
+        return None
+    with _cache_lock:
+        return _state_cache.get(key)
+
+
 def get_cached_metadata(project_id, mr_iid) -> Optional[JiraMetadata]:
     """Return metadata only when both ID and title were resolved together."""
     key = _normalize_key(project_id, mr_iid)
@@ -188,7 +238,8 @@ def get_cached_metadata(project_id, mr_iid) -> Optional[JiraMetadata]:
     with _cache_lock:
         if key not in _cache or key not in _title_cache:
             return None
-        return JiraMetadata(_cache[key], _title_cache[key])
+        return JiraMetadata(
+            _cache[key], _title_cache[key], _state_cache.get(key, ""))
 
 
 def can_fetch() -> bool:
@@ -205,21 +256,38 @@ def can_fetch() -> bool:
         return False
 
 
-def fetch_jira_metadata(project_id, mr_iid, client=None) -> Optional[JiraMetadata]:
-    """按 ``(project_id, mr_iid)`` 解析 JIRA ID + Title。
+def _metadata_from_caches(key) -> Optional[JiraMetadata]:
+    """Build a :class:`JiraMetadata` when ID + title are both cached."""
+    if key not in _cache or key not in _title_cache:
+        return None
+    return JiraMetadata(
+        _cache[key], _title_cache[key], _state_cache.get(key, ""))
 
-    成功拿到 GitLab MR title → 一次性提取 ID 和展示标题并写缓存；
+
+def fetch_jira_metadata(project_id, mr_iid, client=None, *,
+                        force_refresh=False) -> Optional[JiraMetadata]:
+    """按 ``(project_id, mr_iid)`` 解析 JIRA ID + Title + GitLab MR state。
+
+    成功拿到 GitLab MR → 一次性提取 ID、展示标题、``state`` 并写缓存；
     失败（无 token / 网络错 / 404）→ 返回 ``None`` 且 **不缓存**，下次
-    渲染自动重试 —— 瞬时故障不该永久固化成 "—"。
+    渲染自动重试 —— 瞬时故障不该永久固化成 "—"。若进程缓存里已有旧值
+    （并发成功的另一 worker，或本次 ``force_refresh`` 失败），失败路径
+    返回那份旧值，避免 GUI 把已画上的格子打回 "—"。
+
+    ``force_refresh=True`` 跳过本模块缓存并让 GitLabClient 重新打 API，
+    这样 MR Status 列能跟上 opened → merged 这类状态变化。JIRA ID /
+    Title 顺带刷新，成本为零。
 
     ``client`` 仅供测试注入；缺省走进程级共享 GitLabClient。
     """
     key = _normalize_key(project_id, mr_iid)
     if key is None:
         return None
-    with _cache_lock:
-        if key in _cache and key in _title_cache:
-            return JiraMetadata(_cache[key], _title_cache[key])
+    if not force_refresh:
+        with _cache_lock:
+            cached = _metadata_from_caches(key)
+            if cached is not None:
+                return cached
     if client is None:
         try:
             import task_post_edit as _tpe
@@ -231,20 +299,26 @@ def fetch_jira_metadata(project_id, mr_iid, client=None) -> Optional[JiraMetadat
     try:
         if not client.has_token():
             return None
-        mr = client.get_merge_request(key[0], key[1]) or {}
+        try:
+            mr = client.get_merge_request(
+                key[0], key[1], force_refresh=force_refresh) or {}
+        except TypeError:
+            # Test doubles (and any older client) only accept (id, iid).
+            mr = client.get_merge_request(key[0], key[1]) or {}
     except Exception:
         # A concurrent fetch for the same key may have succeeded first.
         with _cache_lock:
-            if key in _cache and key in _title_cache:
-                return JiraMetadata(_cache[key], _title_cache[key])
-            return None
+            return _metadata_from_caches(key)
     raw_title = mr.get("title")
     jira = extract_jira_id(raw_title)
     title = extract_jira_title(raw_title, jira)
+    raw_state = mr.get("state")
+    state = "" if raw_state is None else str(raw_state)
     with _cache_lock:
         _cache[key] = jira
         _title_cache[key] = title
-    return JiraMetadata(jira, title)
+        _state_cache[key] = state
+    return JiraMetadata(jira, title, state)
 
 
 def fetch_jira_id(project_id, mr_iid, client=None) -> Optional[str]:
@@ -332,13 +406,18 @@ def find_merge_requests(jira_id, project_id=None, client=None):
             _cache[(project, iid)] = jira
             _title_cache[(project, iid)] = extract_jira_title(
                 mr.get("title"), jira)
+            if "state" in mr:
+                raw_state = mr.get("state")
+                _state_cache[(project, iid)] = (
+                    "" if raw_state is None else str(raw_state))
     return matches
 
 
 def clear_cache() -> int:
     """清空缓存，返回清掉的条数。目前只有测试隔离在用。"""
     with _cache_lock:
-        n = len(set(_cache) | set(_title_cache))
+        n = len(set(_cache) | set(_title_cache) | set(_state_cache))
         _cache.clear()
         _title_cache.clear()
+        _state_cache.clear()
         return n

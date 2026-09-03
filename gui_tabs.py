@@ -74,14 +74,15 @@ class MRPipelineTab:
 
     # Single source of truth for the task-list table columns. ``src_strings``
     # (distinct en-US source-string count) sits between Status and Avg Score
-    # so the two per-task metrics read together; ``jira`` and its companion
-    # ``title`` sit right after ``mr`` so same-origin tasks read as one group.
-    # These insertions keep the critical positional reads elsewhere valid
-    # (project @ idx 1 for the post-edit prefix, MR# @ idx 2 for the export
-    # filename).
-    _MR_COLUMNS = ("idx", "project", "mr", "jira", "title", "release",
-                   "status", "src_strings", "avg_score", "created",
-                   "duration")
+    # so the two per-task metrics read together; ``mr_status`` (live GitLab
+    # Open/Merged/Closed) sits right after ``mr`` so the iid and its current
+    # GitLab state read as a pair; ``jira`` and its companion ``title``
+    # follow so same-origin tasks still group together. These insertions
+    # keep the critical positional reads elsewhere valid (project @ idx 1
+    # for the post-edit prefix, MR# @ idx 2 for the export filename).
+    _MR_COLUMNS = ("idx", "project", "mr", "mr_status", "jira", "title",
+                   "release", "status", "src_strings", "avg_score",
+                   "created", "duration")
     # Columns whose cells sort numerically; everything else sorts as text.
     _MR_NUMERIC_COLS = frozenset({"idx", "mr", "src_strings", "avg_score"})
 
@@ -436,8 +437,8 @@ class MRPipelineTab:
         cols = self._MR_COLUMNS
         self.mr_tree = ttk.Treeview(tree_frame, columns=cols, show="headings",
                                      style="Summary.Treeview", height=14, selectmode="browse")
-        col_widths = {"idx": 35, "project": 140, "mr": 60, "jira": 90,
-                      "title": 260, "release": 60, "status": 80,
+        col_widths = {"idx": 35, "project": 140, "mr": 60, "mr_status": 90,
+                      "jira": 90, "title": 260, "release": 60, "status": 80,
                       "src_strings": 90, "avg_score": 70, "created": 185,
                       "duration": 70}
         for c in cols:
@@ -1081,14 +1082,14 @@ class MRPipelineTab:
         # task_ids whose en-US source-string count isn't cached yet — filled
         # asynchronously after this page renders (see _prefetch_src_counts).
         src_prefetch_ids: list[str] = []
-        # (project_id, mr_iid) keys whose JIRA metadata isn't cached yet —
-        # deduped because one GitLab MR-title fetch supplies both JIRA and
-        # Title to every row belonging to that MR.
+        # (project_id, mr_iid) keys to refresh from GitLab — one fetch
+        # supplies JIRA, Title and live MR Status to every row of that MR.
+        # Deduped because the same MR routinely triggers several tasks.
         jira_prefetch: list[tuple[str, int]] = []
         jira_seen: set[tuple[str, int]] = set()
         # Resolved once per repaint: when GitLab is unreachable (no token)
-        # the JIRA cells render "—" up front instead of a "…" spinner that
-        # would never resolve.
+        # the JIRA / MR Status cells render "—" up front instead of a "…"
+        # spinner that would never resolve.
         jira_fetchable = _jira.can_fetch()
 
         for i, t in enumerate(tasks):
@@ -1162,7 +1163,10 @@ class MRPipelineTab:
             if title_cached is None and jira_key is not None:
                 title_cached = _jira.get_cached_title(*jira_key)
 
-            needs_fetch = jira_cached is None or title_cached is None
+            state_cached = None
+            if jira_key is not None:
+                state_cached = _jira.get_cached_state(*jira_key)
+
             can_resolve = jira_key is not None and jira_fetchable
             jira_display = (
                 (jira_cached or "—") if jira_cached is not None
@@ -1173,12 +1177,20 @@ class MRPipelineTab:
                 if title_cached is not None
                 else ("…" if can_resolve else "—")
             )
+            # Show last-known GitLab state immediately, then refresh it
+            # from GitLab so Search/Refresh is live (opened → merged).
+            mr_status_display = (
+                (_jira.display_mr_state(state_cached) or "—")
+                if state_cached is not None
+                else ("…" if can_resolve else "—")
+            )
 
             iid = self.mr_tree.insert(
                 "", "end",
                 iid=task_id or None,
                 values=(
-                    idx, display_project, mr_iid, jira_display, title_display,
+                    idx, display_project, mr_iid, mr_status_display,
+                    jira_display, title_display,
                     t.get("release", ""), t.get("status", ""),
                     src_display,
                     avg if avg is not None else "—", created, duration,
@@ -1190,8 +1202,9 @@ class MRPipelineTab:
                 self._jira_titles_by_iid[iid] = normalized_title
             if jira_key is not None:
                 self._jira_row_iids.setdefault(jira_key, []).append(iid)
-                if (can_resolve and needs_fetch
-                        and jira_key not in jira_seen):
+                # Always re-fetch on this page so MR Status is current;
+                # JIRA / Title reuse the same GitLab payload.
+                if can_resolve and jira_key not in jira_seen:
                     jira_seen.add(jira_key)
                     jira_prefetch.append(jira_key)
             if task_id:
@@ -1222,7 +1235,9 @@ class MRPipelineTab:
         if src_prefetch_ids:
             self._prefetch_src_counts(src_prefetch_ids)
 
-        # Resolve JIRA + Title asynchronously from the same MR response.
+        # Resolve JIRA + Title + live MR Status from the same GitLab MR
+        # response. force_refresh so a previously-cached "opened" cannot
+        # outlive the MR actually merging.
         if jira_prefetch:
             self._prefetch_jira_metadata(jira_prefetch)
 
@@ -1458,8 +1473,9 @@ class MRPipelineTab:
             self._apply_sort(*self._mr_sort)
 
     # ------------------------------------------------------------------
-    # JIRA metadata prefetch — one GitLab MR-title fetch per distinct
+    # GitLab MR metadata prefetch — one fetch per distinct
     # (project_id, mr_iid), fanned back out to every matching row.
+    # Paints JIRA, Title and live MR Status from the same payload.
     # ------------------------------------------------------------------
     def _prefetch_jira_metadata(self, keys):
         if not keys:
@@ -1467,7 +1483,8 @@ class MRPipelineTab:
 
         def _run():
             def _work(key):
-                metadata = _jira.fetch_jira_metadata(*key)
+                metadata = _jira.fetch_jira_metadata(
+                    *key, force_refresh=True)
                 try:
                     self.parent.after(
                         0, self._apply_jira_metadata, key, metadata)
@@ -1485,7 +1502,7 @@ class MRPipelineTab:
                          daemon=True).start()
 
     def _apply_jira_metadata(self, key, metadata):
-        """Paint JIRA + Title for every row of one MR on the Tk thread."""
+        """Paint JIRA + Title + MR Status for every row of one MR."""
         if metadata is None:
             # Close the late-failure race: a concurrent fetch may have filled
             # both caches after this worker began.
@@ -1494,9 +1511,17 @@ class MRPipelineTab:
                 else (_jira.get_cached(*key) or ""))
         title = (metadata.title if metadata is not None
                  else (_jira.get_cached_title(*key) or ""))
+        raw_state = (metadata.state if metadata is not None else None)
+        if raw_state is None:
+            raw_state = _jira.get_cached_state(*key)
+        status_display = (
+            (_jira.display_mr_state(raw_state) or "—")
+            if raw_state is not None else "—"
+        )
         for iid in self._jira_row_iids.get(key, ()):
             try:
                 self.mr_tree.set(iid, "jira", jira or "—")
+                self.mr_tree.set(iid, "mr_status", status_display)
                 # Preserve an authoritative task-payload title when only its
                 # missing JIRA ID required the fallback GitLab lookup.
                 row_title = self._jira_titles_by_iid.get(iid) or title
@@ -1507,7 +1532,7 @@ class MRPipelineTab:
     def _on_jira_prefetch_done(self):
         # If the user sorted a still-loading metadata column, fold the final
         # values into the requested order once all workers have returned.
-        if self._mr_sort and self._mr_sort[0] in ("jira", "title"):
+        if self._mr_sort and self._mr_sort[0] in ("jira", "title", "mr_status"):
             self._apply_sort(*self._mr_sort)
 
     # ------------------------------------------------------------------

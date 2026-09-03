@@ -315,6 +315,24 @@ class TestGetMergeRequest(unittest.TestCase):
         with self.assertRaises(requests.HTTPError):
             client.get_merge_request("p", 999)
 
+    def test_force_refresh_bypasses_cache_and_stores_new_payload(self):
+        session = _FakeSession({"iid": 1, "state": "opened"})
+        client = _make_client_with_session(session)
+
+        first = client.get_merge_request("p", 1)
+        self.assertEqual(first["state"], "opened")
+        session._payload = {"iid": 1, "state": "merged"}
+        cached = client.get_merge_request("p", 1)
+        self.assertEqual(cached["state"], "opened")
+        self.assertEqual(len(session.calls), 1)
+
+        fresh = client.get_merge_request("p", 1, force_refresh=True)
+        self.assertEqual(fresh["state"], "merged")
+        self.assertEqual(len(session.calls), 2)
+        # Subsequent default reads see the refreshed payload.
+        self.assertEqual(client.get_merge_request("p", 1)["state"], "merged")
+        self.assertEqual(len(session.calls), 2)
+
 
 class TestFetchMrLabels(unittest.TestCase):
 
