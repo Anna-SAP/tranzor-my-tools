@@ -1,8 +1,8 @@
 """Regression tests for ``time_display`` — UI clocks always carry a tz label.
 
 Locks down the compact ``UTC+8`` / ``UTC-5`` / ``UTC+5:30`` suffix, the
-naive-vs-aware conversion contract, and the ISO-shape tolerance the GUI
-relies on when Tranzor / GitLab timestamps arrive without a zone.
+naive-UTC-to-local conversion contract, and the ISO-shape tolerance the GUI
+relies on when Tranzor timestamps arrive without a zone.
 
 Run:  python -m unittest test_time_display
 """
@@ -52,20 +52,24 @@ class TzLabelTests(unittest.TestCase):
 
 class NaiveVsAwareTests(unittest.TestCase):
 
-    def test_naive_keeps_clock_and_gains_label(self):
-        # Historical GUI contract: Tranzor naive created_at is shown as-is.
+    def test_naive_tranzor_created_at_is_utc(self):
+        # Screenshot bug: API "2026-09-03 05:06:57" (UTC, no offset) used
+        # to render as "05:06:57 UTC+8". Convert, don't relabel.
+        text = format_display_datetime(
+            "2026-09-03 05:06:57", tz=TZ_EAST)
+        self.assertEqual(text, "2026-09-03 13:06:57 UTC+8")
+
+    def test_naive_space_separator(self):
         text = format_display_datetime(
             "2026-09-03 02:41:20", tz=TZ_EAST)
-        self.assertEqual(text, "2026-09-03 02:41:20 UTC+8")
+        self.assertEqual(text, "2026-09-03 10:41:20 UTC+8")
 
     def test_naive_T_separator(self):
         text = format_display_datetime(
             "2026-09-03T02:41:20", tz=TZ_EAST)
-        self.assertEqual(text, "2026-09-03 02:41:20 UTC+8")
+        self.assertEqual(text, "2026-09-03 10:41:20 UTC+8")
 
     def test_aware_utc_converts_into_display_zone(self):
-        # 02:41 UTC → 10:41 in UTC+8. Labelling the UTC clock as UTC+8
-        # would be a lie; conversion is the point of an aware input.
         text = format_display_datetime(
             "2026-09-03T02:41:20+00:00", tz=TZ_EAST)
         self.assertEqual(text, "2026-09-03 10:41:20 UTC+8")
@@ -83,12 +87,18 @@ class NaiveVsAwareTests(unittest.TestCase):
     def test_datetime_object_naive(self):
         text = format_display_datetime(
             datetime(2026, 9, 3, 2, 41, 20), tz=TZ_EAST)
-        self.assertEqual(text, "2026-09-03 02:41:20 UTC+8")
+        self.assertEqual(text, "2026-09-03 10:41:20 UTC+8")
 
     def test_datetime_object_aware(self):
         text = format_display_datetime(
             datetime(2026, 9, 3, 2, 41, 20, tzinfo=TZ_UTC), tz=TZ_EAST)
         self.assertEqual(text, "2026-09-03 10:41:20 UTC+8")
+
+    def test_naive_utc_rolls_local_date(self):
+        # 16:00 UTC is midnight the next day in UTC+8.
+        text = format_display_datetime(
+            "2026-09-03T16:00:00", tz=TZ_EAST)
+        self.assertEqual(text, "2026-09-04 00:00:00 UTC+8")
 
 
 class FormatVariantsTests(unittest.TestCase):
@@ -96,12 +106,12 @@ class FormatVariantsTests(unittest.TestCase):
     def test_short_fmt(self):
         text = format_display_datetime(
             "2026-09-03 02:41:20", fmt=FMT_SHORT, tz=TZ_EAST)
-        self.assertEqual(text, "09-03 02:41 UTC+8")
+        self.assertEqual(text, "09-03 10:41 UTC+8")
 
     def test_microseconds_dropped(self):
         text = format_display_datetime(
             "2026-04-03T20:44:41.061939", tz=TZ_EAST)
-        self.assertEqual(text, "2026-04-03 20:44:41 UTC+8")
+        self.assertEqual(text, "2026-04-04 04:44:41 UTC+8")
 
     def test_empty_string(self):
         self.assertEqual(format_display_datetime("", tz=TZ_EAST), "")

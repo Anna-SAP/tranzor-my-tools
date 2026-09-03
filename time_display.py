@@ -6,11 +6,12 @@ offset such as ``UTC+8``, so a reader never has to guess whether a naive
 
 Contract:
 
-* Naive timestamps are treated as already in the display zone (the historical
-  GUI contract: Tranzor's ``created_at`` is shown as-is, and ``format_age_days``
-  diffs it against ``datetime.now()``).
-* Timezone-aware timestamps are converted into the display zone before
-  formatting, so a ``…+00:00`` value is not mis-labelled as local.
+* Naive timestamps from Tranzor (no ``Z`` / offset) are UTC wall clocks.
+  They are converted into the host display zone before formatting. Labelling
+  the UTC digits as ``UTC+8`` was the Created-column bug: a 05:06 UTC task
+  must render as ``13:06:57 UTC+8``, not ``05:06:57 UTC+8``.
+* Timezone-aware timestamps are converted into the display zone the same
+  way, so a ``…+00:00`` / ``Z`` value is not mis-labelled as local.
 * The suffix is compact: ``UTC+8``, ``UTC-5``, ``UTC+5:30``, or ``UTC``.
 """
 from __future__ import annotations
@@ -117,10 +118,12 @@ def format_display_datetime(value, *, fmt: str = FMT_FULL, empty: str = "",
         if not fallback:
             return empty
         return f"{fallback} {format_tz_label(tz=target)}"
+    # Tranzor serializes created_at without an offset; those digits are UTC.
+    # attach UTC then convert — ``replace(tzinfo=local)`` would keep the UTC
+    # clock and lie with a UTC+8 suffix.
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=target)
-    else:
-        dt = dt.astimezone(target)
+        dt = dt.replace(tzinfo=timezone.utc)
+    dt = dt.astimezone(target)
     return f"{dt.strftime(fmt)} {format_tz_label(at=dt, tz=target)}"
 
 
