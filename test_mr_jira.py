@@ -16,6 +16,7 @@ Covers the load-bearing pieces:
    column mapping (opened → Open) and ``force_refresh`` so a Search shows
    the live GitLab state instead of a session-stale Open.
 6. ``MRPipelineTab._MR_COLUMNS`` plus Title ellipsis/Tooltip invariants.
+7. ``_mr_time_cells`` — Created / Ended / Duration from created_at + updated_at.
 
 Run:  python -m unittest test_mr_jira
 """
@@ -24,6 +25,7 @@ from __future__ import annotations
 import os
 import sys
 import unittest
+from datetime import timedelta, timezone
 from types import SimpleNamespace
 from unittest import mock
 
@@ -478,10 +480,14 @@ class ColumnLayoutTests(unittest.TestCase):
         self.assertEqual(cols.index("mr_status"), 3)
         self.assertEqual(cols.index("jira"), 4)
         self.assertEqual(cols.index("title"), 5)
+        # Ended sits between Created and Duration (updated_at → end clock).
+        self.assertEqual(cols.index("ended"), cols.index("created") + 1)
+        self.assertEqual(cols.index("duration"), cols.index("ended") + 1)
         # GitLab metadata columns sort as text, not as numbers.
         self.assertNotIn("mr_status", MRPipelineTab._MR_NUMERIC_COLS)
         self.assertNotIn("jira", MRPipelineTab._MR_NUMERIC_COLS)
         self.assertNotIn("title", MRPipelineTab._MR_NUMERIC_COLS)
+        self.assertNotIn("ended", MRPipelineTab._MR_NUMERIC_COLS)
 
     def test_heading_strings_exist_in_both_languages(self):
         from export_gui import STRINGS
@@ -493,6 +499,8 @@ class ColumnLayoutTests(unittest.TestCase):
                     f"missing mr_col_{col} in STRINGS[{lang}]")
         self.assertEqual(STRINGS["en"]["mr_col_mr_status"], "MR Status")
         self.assertEqual(STRINGS["zh"]["mr_col_mr_status"], "MR 状态")
+        self.assertEqual(STRINGS["en"]["mr_col_ended"], "Ended")
+        self.assertEqual(STRINGS["zh"]["mr_col_ended"], "结束时间")
 
 
 class TitleEllipsisTests(unittest.TestCase):
@@ -665,6 +673,46 @@ class TitleTooltipInteractionTests(unittest.TestCase):
         tree.column = "#6"
         tab._truncated_title_iids.clear()
         self.assertIsNone(tab._title_tooltip_at(10, 20))
+
+
+class TimeCellsTests(unittest.TestCase):
+    """Ended is Tranzor ``updated_at`` (no separate completed_at on /tasks)."""
+
+    TZ_EAST = timezone(timedelta(hours=8))
+
+    def test_completed_task_shows_local_ended_and_duration(self):
+        from gui_tabs import _mr_time_cells
+        created, ended, duration = _mr_time_cells(
+            {
+                "created_at": "2026-09-03T05:06:57",
+                "updated_at": "2026-09-03T05:11:54",
+            },
+            tz=self.TZ_EAST,
+        )
+        self.assertEqual(created, "2026-09-03 13:06:57 UTC+8")
+        self.assertEqual(ended, "2026-09-03 13:11:54 UTC+8")
+        self.assertEqual(duration, "4m57s")
+
+    def test_missing_updated_at_is_em_dash(self):
+        from gui_tabs import _mr_time_cells
+        created, ended, duration = _mr_time_cells(
+            {"created_at": "2026-09-03T05:06:57"},
+            tz=self.TZ_EAST,
+        )
+        self.assertEqual(created, "2026-09-03 13:06:57 UTC+8")
+        self.assertEqual(ended, "—")
+        self.assertEqual(duration, "")
+
+    def test_sub_minute_duration(self):
+        from gui_tabs import _mr_time_cells
+        _, _, duration = _mr_time_cells(
+            {
+                "created_at": "2026-04-03T20:44:41.061939",
+                "updated_at": "2026-04-03T20:44:53.450950",
+            },
+            tz=self.TZ_EAST,
+        )
+        self.assertEqual(duration, "12s")
 
 
 if __name__ == "__main__":
