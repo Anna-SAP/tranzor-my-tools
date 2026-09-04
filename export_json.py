@@ -282,7 +282,8 @@ def source_rows_from_payload(payload, task_name=""):
     Reuses :func:`build_json_entries` so UNS segmented units keep the
     ``:::seg:::{tu_id}`` key shape and en-US falls back to ``source_text``.
     ``task_name`` is repeated on every row (typically the companion JSON
-    filename, e.g. ``mr_pipeline_MR4100_bd6bba88_all_2026-08-31_08-03-01.json``).
+    filename, e.g. ``mr_pipeline_MR4100_bd6bba88_all_2026-08-31_08-03-01.json``
+    or ``scan_task_iva_260520_75040f78_all_2026-06-17_14-42-26.json``).
     """
     if isinstance(payload, dict):
         rows = payload.get("translations") or []
@@ -318,6 +319,28 @@ def sheet_title_for_mr(jira_id, mr_iid):
         return f"MR!{mr}"
     if jira:
         return jira
+    return "Source"
+
+
+def sheet_title_for_scan(task_name, task_id=""):
+    """Excel tab title for a Scan Task, e.g. ``UNS release_26-3-3 02``.
+
+    Prefers the human-readable task name. Empty / placeholder names fall
+    back to ``Scan {uuid[:8]}`` (the Scan analog of ``MR!{iid}``), then
+    ``Source``. Excel's 31-char limit is applied later by
+    :func:`sanitize_excel_sheet_title`.
+    """
+    name = str(task_name or "").strip()
+    if name in _EMPTY_SHEET_MARKERS:
+        name = ""
+    tid = str(task_id or "").strip()
+    if tid in _EMPTY_SHEET_MARKERS:
+        tid = ""
+    id_tag = tid[:8] if tid else ""
+    if name:
+        return name
+    if id_tag:
+        return f"Scan {id_tag}"
     return "Source"
 
 
