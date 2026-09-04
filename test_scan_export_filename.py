@@ -96,6 +96,15 @@ class ScanCreatedTimeStampTests(unittest.TestCase):
             created="2026-06-17 14:42:26", export_date="2026-06-18")
         self.assertTrue(name.startswith("scan_task_75040f78_"))
 
+    def test_source_type_tag_stamps_created_time(self):
+        name = _build(
+            ".xlsx", task_name="iva 260520", id_tag="75040f78",
+            type_tag="source", created="2026-06-17 14:42:26",
+            export_date="2026-06-18")
+        self.assertEqual(
+            name,
+            "scan_task_iva_260520_75040f78_source_2026-06-17_14-42-26.xlsx")
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

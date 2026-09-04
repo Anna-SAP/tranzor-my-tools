@@ -2,7 +2,8 @@
 Scan Tasks — GUI Tab
 ====================
 展示 Tranzor 平台中"Missing Translation Scan"手动触发的任务列表，
-支持按 Project / Status / Task ID 过滤，以及选中后导出翻译结果。
+支持按 Project / Status / Task ID 过滤，以及选中后导出翻译结果 /
+源数据 XLSX（与 MR Pipeline 的 Export Source XLSX 同 schema）。
 
 API: /api/v1/missing_translation_scan/tasks
 翻译结果 schema 与 MR 翻译任务一致，直接复用 export_mr_pipeline.save_mr_file。
@@ -40,6 +41,8 @@ STRINGS = {
         "scan_search":           "🔍 Search",
         "scan_reset":            "Reset",
         "scan_export":           "📦 Export Selected",
+        "scan_source_xlsx_need_selection":
+            "Select a scan task first to export source XLSX",
         "scan_sidebar_title":    "🔎 Scan Task Stats",
         "scan_stat_total":       "Total Tasks",
         "scan_stat_completed":   "Completed",
@@ -65,6 +68,8 @@ STRINGS = {
         "scan_search":           "🔍 查询",
         "scan_reset":            "重置",
         "scan_export":           "📦 导出选中",
+        "scan_source_xlsx_need_selection":
+            "请先选择一个扫描任务以导出源数据 XLSX",
         "scan_sidebar_title":    "🔎 扫描任务统计",
         "scan_stat_total":       "总任务数",
         "scan_stat_completed":   "已完成",
@@ -246,6 +251,18 @@ class ScanTasksTab:
             bg="#7c5cff", fg="#fff", padx=14, pady=4, state="disabled")
         self.btn_scan_llm_qa.pack(side="left", padx=(8, 0))
 
+        # Source-only XLSX: unique Key / en-US Value / companion JSON
+        # filename. Same schema as MR Pipeline; sheet title is the scan
+        # task name (falls back to ``Scan {uuid[:8]}``). Independent of
+        # the Export Type / Output Format radios (always source xlsx).
+        self.btn_scan_source_xlsx = self.app._create_button(
+            action, text=self._t("mr_source_xlsx"),
+            command=self._on_export_source_xlsx,
+            style_name="InfoSmall",
+            font=(FONT_FAMILY, 10, "bold"),
+            bg="#0891b2", fg="#fff", padx=14, pady=4, state="disabled")
+        self.btn_scan_source_xlsx.pack(side="left", padx=(8, 0))
+
         # Export Type selector — mirrors File Translation / MR Pipeline
         self.lbl_scan_export_type = ttk.Label(action, text="", style="Card.TLabel")
         self.lbl_scan_export_type.pack(side="left", padx=(16, 4))
@@ -386,6 +403,7 @@ class ScanTasksTab:
         self.btn_scan_reset.configure(text=t("scan_reset"))
         self.btn_scan_export.configure(text=t("scan_export"))
         self.btn_scan_llm_qa.configure(text=llm_qa_module.button_label(self.app.lang))
+        self.btn_scan_source_xlsx.configure(text=t("mr_source_xlsx"))
         self.lbl_scan_export_type.configure(text=t("export_type_label"))
         self.rb_scan_changes.configure(text=t("export_type_changes"))
         self.rb_scan_translations.configure(text=t("export_type_all"))
@@ -500,17 +518,28 @@ class ScanTasksTab:
             self._loading_anim_id = None
         self.scan_loading_overlay.place_forget()
 
-    def _set_controls_enabled(self, enabled):
-        state = "normal" if enabled else "disabled"
+    def _scan_export_buttons(self):
+        return (self.btn_scan_export, self.btn_scan_llm_qa,
+                self.btn_scan_source_xlsx)
+
+    def _set_scan_export_buttons_enabled(self, enabled):
         if IS_MAC:
             flag = ["!disabled"] if enabled else ["disabled"]
-            self.btn_scan_export.state(flag)
-            self.btn_scan_llm_qa.state(flag)
+            for btn in self._scan_export_buttons():
+                btn.state(flag)
+        else:
+            state = "normal" if enabled else "disabled"
+            for btn in self._scan_export_buttons():
+                btn.configure(state=state)
+
+    def _set_controls_enabled(self, enabled):
+        self._set_scan_export_buttons_enabled(enabled)
+        if IS_MAC:
+            flag = ["!disabled"] if enabled else ["disabled"]
             self.btn_scan_prev.state(flag)
             self.btn_scan_next.state(flag)
         else:
-            self.btn_scan_export.configure(state=state)
-            self.btn_scan_llm_qa.configure(state=state)
+            state = "normal" if enabled else "disabled"
             self.btn_scan_prev.configure(state=state)
             self.btn_scan_next.configure(state=state)
 
@@ -661,13 +690,10 @@ class ScanTasksTab:
         if IS_MAC:
             self.btn_scan_prev.state(["!disabled"] if self.scan_page > 0 else ["disabled"])
             self.btn_scan_next.state(["!disabled"] if has_next else ["disabled"])
-            self.btn_scan_export.state(["!disabled"] if tasks else ["disabled"])
-            self.btn_scan_llm_qa.state(["!disabled"] if tasks else ["disabled"])
         else:
             self.btn_scan_prev.configure(state="normal" if self.scan_page > 0 else "disabled")
             self.btn_scan_next.configure(state="normal" if has_next else "disabled")
-            self.btn_scan_export.configure(state="normal" if tasks else "disabled")
-            self.btn_scan_llm_qa.configure(state="normal" if tasks else "disabled")
+        self._set_scan_export_buttons_enabled(bool(tasks))
         self.lbl_scan_status_bar.configure(text=self._t("status_ready"))
 
     # ------------------------------------------------------------------
@@ -763,6 +789,34 @@ class ScanTasksTab:
     # ------------------------------------------------------------------
     # Export
     # ------------------------------------------------------------------
+    def _scan_row_export_meta(self, iid):
+        """Read task_id / task_name / Created from a visible tree row.
+
+        ``task_name`` strips the ✏️ post-edit prefix so filenames and the
+        source-XLSX sheet title match the raw scan-task name. Column
+        indices resolve from ``_SCAN_COLUMNS`` so a reshuffle can't
+        silently point these reads at the wrong cell.
+        """
+        tags = self.scan_tree.item(iid, "tags")
+        task_id = tags[0] if tags else None
+        values = self.scan_tree.item(iid, "values")
+        task_name = ""
+        created = ""
+        if values:
+            name_col = self._SCAN_COLUMNS.index("task_name")
+            created_col = self._SCAN_COLUMNS.index("created")
+            if len(values) > name_col:
+                task_name = str(values[name_col] or "")
+                if task_name.startswith(_tpe.POST_EDIT_PREFIX):
+                    task_name = task_name[len(_tpe.POST_EDIT_PREFIX):]
+            if len(values) > created_col:
+                created = str(values[created_col] or "")
+        return {
+            "task_id": task_id,
+            "task_name": task_name,
+            "created": created,
+        }
+
     def _on_export(self, llm_qa=False):
         """Export the selected scan task.
 
@@ -774,45 +828,113 @@ class ScanTasksTab:
         if not sel:
             self.lbl_scan_status_bar.configure(text="⚠ 请先选择一条任务")
             return
-        tags = self.scan_tree.item(sel[0], "tags")
-        task_id = tags[0] if tags else None
+        meta = self._scan_row_export_meta(sel[0])
+        task_id = meta.get("task_id")
         if not task_id:
             return
-        # Pull task_name AND the scan task's Created time straight from the
-        # visible row: the name keeps the filename matching what the user
-        # clicked, the Created time stamps *which run* it is (see
-        # _build_export_filename). Indices resolve from _SCAN_COLUMNS so a
-        # column reshuffle can't silently point these reads at the wrong cell.
-        values = self.scan_tree.item(sel[0], "values")
-        task_name = ""
-        scan_created = ""
-        if values:
-            name_col = self._SCAN_COLUMNS.index("task_name")
-            created_col = self._SCAN_COLUMNS.index("created")
-            if len(values) > name_col:
-                task_name = str(values[name_col] or "")
-                if task_name.startswith(_tpe.POST_EDIT_PREFIX):
-                    task_name = task_name[len(_tpe.POST_EDIT_PREFIX):]
-            if len(values) > created_col:
-                scan_created = str(values[created_col] or "")
+        task_name = meta.get("task_name") or ""
+        scan_created = meta.get("created") or ""
         # Send to LLM QA always writes the full-translation JSON audit shape.
         fmt = "json" if llm_qa else self.scan_fmt_var.get()
         export_type = "translations" if llm_qa else self.scan_export_type_var.get()
         # Read Advanced Filters on the main thread (Tk widgets aren't
         # thread-safe) and hand the snapshot to the worker.
         adv_state = self.adv_filter.get_state() if self.adv_filter else None
-        if IS_MAC:
-            self.btn_scan_export.state(["disabled"])
-            self.btn_scan_llm_qa.state(["disabled"])
-        else:
-            self.btn_scan_export.configure(state="disabled")
-            self.btn_scan_llm_qa.configure(state="disabled")
+        self._set_scan_export_buttons_enabled(False)
         self.lbl_scan_status_bar.configure(text=self._t("status_exporting"))
         threading.Thread(target=self._run_export,
                          args=(task_id, fmt, export_type, task_name, adv_state,
                                scan_created),
                          kwargs={"llm_qa": llm_qa},
                          daemon=True).start()
+
+    def _on_export_source_xlsx(self):
+        """Export unique source strings of the selected scan task as XLSX.
+
+        Sheet title is the scan task name (e.g. ``UNS release_26-3-3 02``),
+        falling back to ``Scan {uuid[:8]}``. Columns are Key / en-US Value /
+        companion All-Translations JSON filename — the same schema as
+        MR Pipeline's Export Source XLSX. Requires a selected row.
+        """
+        sel = self.scan_tree.selection()
+        if not sel:
+            self.lbl_scan_status_bar.configure(
+                text=self._t("scan_source_xlsx_need_selection"))
+            return
+        meta = self._scan_row_export_meta(sel[0])
+        if not meta.get("task_id"):
+            self.lbl_scan_status_bar.configure(
+                text=self._t("scan_source_xlsx_need_selection"))
+            return
+        adv_state = self.adv_filter.get_state() if self.adv_filter else None
+        self._set_scan_export_buttons_enabled(False)
+        self.lbl_scan_status_bar.configure(text=self._t("status_exporting"))
+        threading.Thread(
+            target=self._run_export_source_xlsx,
+            args=(meta, adv_state),
+            daemon=True,
+        ).start()
+
+    def _run_export_source_xlsx(self, meta, adv_state=None):
+        try:
+            import export_json
+            task_id = meta["task_id"]
+
+            def _progress(msg):
+                # Worker-thread logs; Tk widgets are not thread-safe.
+                text = f"{self._t('status_exporting')} {msg}".strip()
+                self.parent.after(
+                    0, lambda t=text: self.lbl_scan_status_bar.configure(
+                        text=t[:80]))
+
+            results = mr_api.fetch_scan_results(
+                task_id, progress_callback=_progress)
+            if adv_state is not None:
+                try:
+                    if not advanced_filter.is_empty(adv_state):
+                        results = {
+                            **results,
+                            "translations": advanced_filter.filter_translations(
+                                results.get("translations") or [], adv_state),
+                        }
+                except Exception:
+                    pass
+            today = date.today().isoformat()
+            json_name = self._build_export_filename(
+                ".json",
+                task_name=meta.get("task_name") or "",
+                id_tag=str(task_id)[:8],
+                type_tag="all",
+                created=meta.get("created") or "",
+                export_date=today,
+            )
+            xlsx_name = self._build_export_filename(
+                ".xlsx",
+                task_name=meta.get("task_name") or "",
+                id_tag=str(task_id)[:8],
+                type_tag="source",
+                created=meta.get("created") or "",
+                export_date=today,
+            )
+            rows = export_json.source_rows_from_payload(
+                results, task_name=json_name)
+            title = export_json.sheet_title_for_scan(
+                meta.get("task_name") or "", task_id)
+            filepath = os.path.join(export_output_dir(), xlsx_name)
+            saved = export_json.save_source_xlsx(
+                [{"title": title, "rows": rows}], filepath)
+            if not saved:
+                raise RuntimeError("openpyxl is required to write XLSX")
+            basename = os.path.basename(saved)
+            self.parent.after(0, lambda b=basename: self.lbl_scan_status_bar.configure(
+                text=self._t("status_saved").format(filename=b)))
+            self.parent.after(0, lambda p=saved: reveal_in_folder(p))
+        except Exception as e:
+            msg = str(e)[:50]
+            self.parent.after(0, lambda m=msg: self.lbl_scan_status_bar.configure(
+                text=f"❌ {m}"))
+        finally:
+            self.parent.after(0, lambda: self._set_scan_export_buttons_enabled(True))
 
     def _run_export(self, task_id, fmt, export_type="changes", task_name="",
                     adv_state=None, scan_created="", llm_qa=False):
@@ -891,11 +1013,4 @@ class ScanTasksTab:
             self.parent.after(0, lambda: self.lbl_scan_status_bar.configure(
                 text=f"❌ {msg}"))
         finally:
-            def _restore():
-                if IS_MAC:
-                    self.btn_scan_export.state(["!disabled"])
-                    self.btn_scan_llm_qa.state(["!disabled"])
-                else:
-                    self.btn_scan_export.configure(state="normal")
-                    self.btn_scan_llm_qa.configure(state="normal")
-            self.parent.after(0, _restore)
+            self.parent.after(0, lambda: self._set_scan_export_buttons_enabled(True))
