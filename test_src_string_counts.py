@@ -118,6 +118,146 @@ class CountScanSourceStringsTests(unittest.TestCase):
         ):
             self.assertEqual(mr.count_scan_source_strings("t"), 0)
 
+    def test_fallback_counts_uns_segments_not_template_files(self):
+        # LOC-25243: 2 Handlebars templates × 21 segments × 15 languages.
+        # Every segment row reuses the file-level opus_id and differs only
+        # by tu_id, so distinct opus_id would say 2 while Tranzor's
+        # Strings tab (and the summary, once written) say 42.
+        translations = [
+            {"opus_id": f"common.uns.{tpl}", "tu_id": tu,
+             "has_seg_units": True, "target_language": lang}
+            for tpl in ("a__email_html__1", "b__email_html__1")
+            for tu in range(1, 22)
+            for lang in ("de-DE", "fr-FR", "ja-JP")
+        ]
+        with mock.patch.object(
+            mr, "fetch_scan_task_detail",
+            return_value={"status": "completed", "summary": []},
+        ), mock.patch.object(
+            mr, "fetch_scan_results",
+            return_value={"translations": translations},
+        ):
+            self.assertEqual(mr.count_scan_source_strings("t"), 42)
+
+
+class CountScanSourceStringsOrNoneTests(unittest.TestCase):
+    """``None`` = "not knowable yet, don't cache" — the fix for the Scan
+    Tasks list pinning 0 for a task that was first listed while running."""
+
+    def test_detail_fetch_failure_is_none_and_skips_results(self):
+        with mock.patch.object(
+            mr, "fetch_scan_task_detail", side_effect=RuntimeError("502"),
+        ), mock.patch.object(mr, "fetch_scan_results") as results:
+            self.assertIsNone(mr.count_scan_source_strings_or_none("t"))
+        results.assert_not_called()
+
+    def test_running_task_without_summary_is_none_and_skips_results(self):
+        # LOC-25243 between 10:41 (created) and 10:50 (completed): no
+        # ScanSummary rows yet (ANALYZE writes them last) and /results is a
+        # partial dump. The old code returned 0 here and the GUI cached it.
+        for status in ("pending", "running", "RUNNING"):
+            with self.subTest(status=status), mock.patch.object(
+                mr, "fetch_scan_task_detail",
+                return_value={"status": status, "summary": []},
+            ), mock.patch.object(mr, "fetch_scan_results") as results:
+                self.assertIsNone(mr.count_scan_source_strings_or_none("t"))
+            results.assert_not_called()
+
+    def test_summary_wins_even_if_status_not_yet_terminal(self):
+        # ANALYZE commits the summary a moment before status flips to
+        # completed; the summary is already final at that point.
+        with mock.patch.object(
+            mr, "fetch_scan_task_detail",
+            return_value={"status": "running", "summary": [
+                {"dimension": "language", "dimension_key": "de-DE",
+                 "source_items_count": 42},
+            ]},
+        ), mock.patch.object(mr, "fetch_scan_results") as results:
+            self.assertEqual(mr.count_scan_source_strings_or_none("t"), 42)
+        results.assert_not_called()
+
+    def test_completed_task_without_summary_falls_back_to_results(self):
+        # A scan that found nothing to translate writes no summary rows;
+        # its 0 is genuine and must be returned as 0 (cacheable), not None.
+        for status in ("completed", "failed", "cancelled"):
+            with self.subTest(status=status), mock.patch.object(
+                mr, "fetch_scan_task_detail",
+                return_value={"status": status, "summary": []},
+            ), mock.patch.object(
+                mr, "fetch_scan_results", return_value={"translations": []},
+            ):
+                self.assertEqual(mr.count_scan_source_strings_or_none("t"), 0)
+
+    def test_unknown_status_falls_back_to_results(self):
+        # Older backend without ``status`` in the detail payload.
+        with mock.patch.object(
+            mr, "fetch_scan_task_detail", return_value={},
+        ), mock.patch.object(
+            mr, "fetch_scan_results",
+            return_value={"translations": [{"opus_id": "k1"}, {"opus_id": "k2"}]},
+        ):
+            self.assertEqual(mr.count_scan_source_strings_or_none("t"), 2)
+
+    def test_results_fetch_failure_on_finished_task_is_none(self):
+        with mock.patch.object(
+            mr, "fetch_scan_task_detail",
+            return_value={"status": "completed", "summary": []},
+        ), mock.patch.object(
+            mr, "fetch_scan_results", side_effect=RuntimeError("timeout"),
+        ):
+            self.assertIsNone(mr.count_scan_source_strings_or_none("t"))
+
+    def test_zero_wrapper_maps_none_to_zero(self):
+        with mock.patch.object(
+            mr, "count_scan_source_strings_or_none", return_value=None,
+        ):
+            self.assertEqual(mr.count_scan_source_strings("t"), 0)
+
+
+class SourceStringKeyTests(unittest.TestCase):
+    def test_plain_row_uses_opus_id(self):
+        self.assertEqual(mr.source_string_key({"opus_id": "k1"}), "k1")
+
+    def test_segment_row_appends_tu_id(self):
+        row = {"opus_id": "common.uns.tpl__email_html__1", "tu_id": 7,
+               "has_seg_units": True}
+        self.assertEqual(mr.source_string_key(row),
+                         "common.uns.tpl__email_html__1:::seg:::7")
+
+    def test_already_segmented_key_left_alone(self):
+        row = {"opus_id": "k1:::seg:::3", "tu_id": 9, "has_seg_units": True}
+        self.assertEqual(mr.source_string_key(row), "k1:::seg:::3")
+
+    def test_seg_flag_without_tu_id_uses_opus_id(self):
+        self.assertEqual(
+            mr.source_string_key({"opus_id": "k1", "has_seg_units": True}),
+            "k1")
+        self.assertEqual(
+            mr.source_string_key({"opus_id": "k1", "has_seg_units": True,
+                                  "tu_id": None}),
+            "k1")
+
+    def test_tu_id_without_seg_flag_uses_opus_id(self):
+        # tu_id alone is not a segment marker (plain MR rows may carry it).
+        self.assertEqual(
+            mr.source_string_key({"opus_id": "k1", "tu_id": 2}), "k1")
+
+    def test_missing_opus_id_or_non_dict_is_empty(self):
+        self.assertEqual(mr.source_string_key({}), "")
+        self.assertEqual(mr.source_string_key({"opus_id": None}), "")
+        self.assertEqual(mr.source_string_key(None), "")
+        self.assertEqual(mr.source_string_key("k1"), "")
+
+
+class TerminalStatusTests(unittest.TestCase):
+    def test_terminal_values(self):
+        for s in ("completed", "failed", "cancelled", "COMPLETED", " completed "):
+            self.assertTrue(mr.is_terminal_task_status(s), s)
+
+    def test_in_flight_and_unknown_are_not_terminal(self):
+        for s in ("pending", "running", "", None, "weird"):
+            self.assertFalse(mr.is_terminal_task_status(s), repr(s))
+
 
 class CountLegacySourceStringsTests(unittest.TestCase):
     def _install_backend(self, entries, page=200):
