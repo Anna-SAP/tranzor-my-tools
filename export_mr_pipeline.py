@@ -578,35 +578,86 @@ def fetch_mr_results(task_id, target_language=None,
     return resp.json()
 
 
-def distinct_source_string_count(translations):
-    """Count distinct en-US source strings in a list of MR translation rows.
+# Task ``status`` values after which a task's translation rows stop
+# changing. MR Pipeline and Missing-Translation-Scan tasks share this
+# vocabulary. Anything else — ``pending`` / ``running`` / an unknown value —
+# is in flight: its ``/results`` payload is a partial snapshot and a scan
+# task's ``summary`` does not exist yet (the ANALYZE step writes it last).
+TASK_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
 
-    A "source string" is identified by its ``opus_id`` (the Tranzor string
-    key). The same en-US string is translated into every target language, so
-    the raw row count over-counts the work by the language fan-out (×18 for
-    CHC). Distinct ``opus_id`` is therefore the workload signal linguists
-    care about. Rows without an ``opus_id`` are ignored.
+
+def is_terminal_task_status(status):
+    """True when *status* means the task's translations are final."""
+    return str(status or "").strip().lower() in TASK_TERMINAL_STATUSES
+
+
+def source_string_key(row):
+    """Identity of the en-US source string behind one ``/results`` row.
+
+    Normally the ``opus_id``. UNS Handlebars e-mails are the exception:
+    every segment of one template shares the *file-level* ``opus_id`` and
+    is told apart by ``tu_id`` (``has_seg_units=true``), so a 42-segment
+    template would otherwise count as a single string. Segments get the
+    same ``{opus_id}:::seg:::{tu_id}`` shape the JSON export and the
+    UNS LQA skill already use (``export_json._segment_stable_key``).
+    Returns ``""`` for rows without an ``opus_id``.
+    """
+    if not isinstance(row, dict):
+        return ""
+    key = row.get("opus_id") or ""
+    if not key or ":::seg:::" in key or not row.get("has_seg_units"):
+        return key
+    tu = row.get("tu_id")
+    if tu in (None, ""):
+        return key
+    return f"{key}:::seg:::{tu}"
+
+
+def distinct_source_string_count(translations):
+    """Count distinct en-US source strings in a list of translation rows.
+
+    A "source string" is identified by :func:`source_string_key` — the
+    ``opus_id`` (the Tranzor string key), or ``opus_id:::seg:::tu_id`` for
+    UNS segmented templates. The same en-US string is translated into every
+    target language, so the raw row count over-counts the work by the
+    language fan-out (×18 for CHC). Distinct keys are therefore the
+    workload signal linguists care about. Rows without an ``opus_id`` are
+    ignored.
     """
     return len({
-        t.get("opus_id") for t in (translations or []) if t.get("opus_id")
+        k for k in (source_string_key(t) for t in (translations or [])) if k
     })
+
+
+def count_mr_source_strings_or_none(task_id, base_url=None):
+    """Distinct en-US source-string count for one MR task, or ``None``.
+
+    Fetches ``/tasks/{id}/results`` and counts distinct source strings.
+    There is no lighter endpoint for this — ``/tasks`` omits any count and
+    the task detail's ``translations_count`` is the *row* count (strings ×
+    languages), not distinct source strings — so the full results payload
+    is the only source of truth.
+
+    ``None`` means the count could not be determined (the fetch failed).
+    That is deliberately distinct from a genuine ``0`` (a task with no
+    rows) so a caller that caches answers can leave it uncached and retry
+    on the next render instead of pinning a wrong number for the session.
+    """
+    try:
+        results = fetch_mr_results(task_id, **_fwd(base_url))
+    except Exception:
+        return None
+    return distinct_source_string_count((results or {}).get("translations", []))
 
 
 def count_mr_source_strings(task_id, base_url=None):
     """Distinct en-US source-string count for one MR task.
 
-    Fetches ``/tasks/{id}/results`` and counts distinct ``opus_id``. There is
-    no lighter endpoint for this — ``/tasks`` omits any count and the task
-    detail's ``translations_count`` is the *row* count (strings × languages),
-    not distinct source strings — so the full results payload is the only
-    source of truth. Returns 0 on any error / empty task so callers can render
-    a number without special-casing failures.
+    Same as :func:`count_mr_source_strings_or_none` but returns 0 on any
+    error / empty task so callers can render a number without
+    special-casing failures.
     """
-    try:
-        results = fetch_mr_results(task_id, **_fwd(base_url))
-    except Exception:
-        return 0
-    return distinct_source_string_count(results.get("translations", []))
+    return count_mr_source_strings_or_none(task_id, **_fwd(base_url)) or 0
 
 
 def search_translations(opus_id=None, source_text=None, translated_text=None,
@@ -3600,27 +3651,56 @@ def source_string_count_from_scan_summary(summary):
     return overall
 
 
-def count_scan_source_strings(task_id, base_url=None):
-    """en-US source-string count for one Missing-Translation-Scan task.
+def count_scan_source_strings_or_none(task_id, base_url=None):
+    """en-US source-string count for one Missing-Translation-Scan task, or
+    ``None`` when the count is not knowable *yet*.
 
     Prefers the cheap task-detail ``summary`` (one small GET) so the GUI
     column can fill in without downloading every translation row. Falls
-    back to paging ``/results`` and counting distinct ``opus_id`` when
-    the summary is missing (older backend). Returns 0 on any error.
+    back to paging ``/results`` and counting distinct source strings
+    (segment-aware, see :func:`source_string_key`) when a finished task has
+    no summary rows — an older backend, or a scan that found nothing to
+    translate (ANALYZE writes no summary for an empty task).
+
+    ``None`` — as opposed to a genuine ``0`` — means "don't trust this,
+    don't cache it, ask again later":
+
+    - the task detail could not be fetched (network / 5xx / 404), or
+    - the task is still ``pending`` / ``running`` and has no summary yet.
+      The ANALYZE step writes ``summary`` last, so until then the only
+      number available is a partial ``/results`` snapshot that is wrong
+      the moment the next language lands — and, for a 13k-row UNS scan,
+      expensive to download on every render. The 0 that used to come out
+      of this path is what the Scan Tasks list pinned for a whole session
+      when a task was first listed mid-run.
     """
     try:
-        detail = fetch_scan_task_detail(task_id, **_fwd(base_url))
-        n = source_string_count_from_scan_summary(
-            (detail or {}).get("summary"))
-        if n:
-            return n
+        detail = fetch_scan_task_detail(task_id, **_fwd(base_url)) or {}
     except Exception:
-        pass
+        return None
+    n = source_string_count_from_scan_summary(detail.get("summary"))
+    if n:
+        return n
+    status = str(detail.get("status") or "").strip().lower()
+    if status and not is_terminal_task_status(status):
+        return None
     try:
         results = fetch_scan_results(task_id, **_fwd(base_url))
     except Exception:
-        return 0
-    return distinct_source_string_count(results.get("translations", []))
+        return None
+    return distinct_source_string_count(
+        (results or {}).get("translations", []))
+
+
+def count_scan_source_strings(task_id, base_url=None):
+    """en-US source-string count for one Missing-Translation-Scan task.
+
+    Same as :func:`count_scan_source_strings_or_none` but returns 0 on any
+    error / unknown so callers can render a number without special-casing
+    failures. Callers that *cache* the answer must use the ``_or_none``
+    variant — a 0 from here may just mean "not finished yet".
+    """
+    return count_scan_source_strings_or_none(task_id, **_fwd(base_url)) or 0
 
 
 def scan_row_prev_and_curr(row):

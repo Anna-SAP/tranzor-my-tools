@@ -59,6 +59,7 @@ STRINGS = {
         "scan_col_created":      "Created",
         "scan_col_age":          "Age",
         "scan_post_edit_legend": "✏️ = later translation content change (post-edit or refined iteration)",
+        "scan_src_count_legend": "— = en-US count not available yet (task still running or fetch failed; Search / Refresh retries)",
     },
     "zh": {
         "tab_scan_tasks":        "🔎 扫描任务",
@@ -86,8 +87,16 @@ STRINGS = {
         "scan_col_created":      "创建时间",
         "scan_col_age":          "距今",
         "scan_post_edit_legend": "✏️ = 该任务后期发生过翻译内容变更（人工修订或迭代精修）",
+        "scan_src_count_legend": "— = en-US 字符串数暂不可用（任务仍在运行或获取失败；查询 / 刷新会重试）",
     },
 }
+
+
+# Cell text for an en-US count that could not be determined (task still
+# running, or the fetch failed). Distinct from the "…" loading placeholder
+# and — crucially — from a real 0. The MR Pipeline sort key already ranks
+# "—" as a missing value.
+SRC_COUNT_UNKNOWN = "—"
 
 
 class ScanTasksTab:
@@ -141,8 +150,12 @@ class ScanTasksTab:
         self._scan_row_iid_by_task: dict[str, str] = {}
         # task_id → distinct en-US source-string count. Cached so paging
         # back/forth and re-search don't re-hit the results API — a completed
-        # scan's source-string count is immutable. Filled from worker threads,
-        # so guard it with a lock. Mirrors MR Pipeline's src-count cache.
+        # scan's source-string count is immutable. Only *final* answers go
+        # in (see _resolve_src_count): a task first listed while still
+        # running has no summary yet, and caching the 0 that produced kept
+        # the cell at 0 for the whole session after the task completed.
+        # Filled from worker threads, so guard it with a lock. Mirrors MR
+        # Pipeline's src-count cache.
         self._scan_src_cache: dict[str, int] = {}
         self._scan_src_lock = threading.Lock()
         self._build(parent)
@@ -414,7 +427,8 @@ class ScanTasksTab:
         for col in self._SCAN_COLUMNS:
             self.scan_tree.heading(col, text=t(f"scan_col_{col}"))
         self.lbl_scan_post_edit_legend.configure(
-            text=t("scan_post_edit_legend"),
+            text=(t("scan_post_edit_legend") + "    "
+                  + t("scan_src_count_legend")),
         )
         if self.adv_filter is not None:
             self.adv_filter.refresh_text()
@@ -744,6 +758,36 @@ class ScanTasksTab:
     # en-US source-string counts — filled asynchronously so the page paints
     # immediately (mirrors MRPipelineTab._prefetch_src_counts).
     # ------------------------------------------------------------------
+    def _resolve_src_count(self, task_id):
+        """Cached en-US count for *task_id*, fetching it when unknown.
+
+        Only *final* answers are cached. The API helper returns ``None``
+        while a task is still pending/running (its ``summary`` is written
+        by the last ANALYZE step, so no trustworthy number exists yet) or
+        when the fetch failed; that ``None`` is passed through uncached so
+        the cell shows "—" and the next render (Search / Refresh / paging
+        back) asks again.
+
+        Regression guard for the sticky "0": the previous implementation
+        cached whatever the first fetch produced, so a task first seen
+        mid-run (0 rows, no summary) kept reading 0 for the rest of the
+        session even after it completed with hundreds of strings.
+        """
+        with self._scan_src_lock:
+            count = self._scan_src_cache.get(task_id)
+        if count is not None:
+            return count
+        count = mr_api.count_scan_source_strings_or_none(task_id)
+        if count is not None:
+            with self._scan_src_lock:
+                self._scan_src_cache[task_id] = count
+        return count
+
+    @staticmethod
+    def _src_count_display(count):
+        """Cell text for a resolved count: the number, or "—" when unknown."""
+        return SRC_COUNT_UNKNOWN if count is None else count
+
     def _prefetch_src_counts(self, task_ids):
         ids = [tid for tid in task_ids if tid]
         if not ids:
@@ -751,12 +795,10 @@ class ScanTasksTab:
 
         def _run():
             def _work(tid):
-                with self._scan_src_lock:
-                    count = self._scan_src_cache.get(tid)
-                if count is None:
-                    count = mr_api.count_scan_source_strings(tid)
-                    with self._scan_src_lock:
-                        self._scan_src_cache[tid] = count
+                try:
+                    count = self._resolve_src_count(tid)
+                except Exception:
+                    count = None
                 try:
                     self.parent.after(0, self._apply_src_count, tid, count)
                 except Exception:
@@ -769,14 +811,16 @@ class ScanTasksTab:
                          daemon=True).start()
 
     def _apply_src_count(self, task_id, count):
-        """Replace one row's "…" placeholder with its real count. Runs on the
-        Tk thread. The row may be gone (user paged / re-searched mid-fetch); a
-        stale write is harmless because iid == task_id, so guard regardless."""
+        """Replace one row's "…" placeholder with its real count (or "—" when
+        the count is not knowable yet). Runs on the Tk thread. The row may be
+        gone (user paged / re-searched mid-fetch); a stale write is harmless
+        because iid == task_id, so guard regardless."""
         iid = self._scan_row_iid_by_task.get(task_id)
         if not iid:
             return
         try:
-            self.scan_tree.set(iid, "src_strings", count)
+            self.scan_tree.set(iid, "src_strings",
+                               self._src_count_display(count))
         except tk.TclError:
             pass
 

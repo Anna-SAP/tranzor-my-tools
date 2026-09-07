@@ -891,8 +891,12 @@ class MRPipelineTab:
             t["_translations_count"] = len(trs)
             src = mr_api.distinct_source_string_count(trs)
             t["_src_string_count"] = src
-            with self._src_count_lock:
-                self._src_count_cache[tid] = src
+            # Seed the shared cache only for finished tasks — a running
+            # task's results are a partial snapshot and would otherwise be
+            # pinned for the session (see _resolve_src_count).
+            if mr_api.is_terminal_task_status(t.get("status")):
+                with self._src_count_lock:
+                    self._src_count_cache[tid] = src
             if trs and t.get("average_score") is None:
                 scores = [tr.get("score") for tr in trs if tr.get("score") is not None]
                 if scores:
@@ -1226,7 +1230,7 @@ class MRPipelineTab:
             if task_id:
                 self._mr_row_iid_by_task[task_id] = iid
                 if src_count is None:
-                    src_prefetch_ids.append(task_id)
+                    src_prefetch_ids.append((task_id, t.get("status")))
                 if cache_key is not None and cached is None:
                     prefetch_items.append((self._post_edit_kind, cache_key))
                     # Stash mr_iid → iid so the callback (which carries
@@ -1439,27 +1443,52 @@ class MRPipelineTab:
     # task_id; a completed task's source-string count never changes, so the
     # cache makes paging and re-search effectively free.
     # ------------------------------------------------------------------
-    def _prefetch_src_counts(self, task_ids):
-        ids = [tid for tid in task_ids if tid]
-        if not ids:
+    def _resolve_src_count(self, task_id, status=None):
+        """Cached en-US count for *task_id*, fetching it when unknown.
+
+        Only *final* answers are cached: a count for a task whose
+        ``status`` is terminal (completed / failed / cancelled). A running
+        task's results are a partial snapshot, so its number is shown but
+        not cached — the next render re-asks. ``None`` (fetch failed) is
+        never cached either; the cell shows "—" and Refresh retries. This
+        is the same sticky-0 guard as ``ScanTasksTab._resolve_src_count``.
+        """
+        with self._src_count_lock:
+            count = self._src_count_cache.get(task_id)
+        if count is not None:
+            return count
+        count = mr_api.count_mr_source_strings_or_none(
+            task_id, **self._api_kw())
+        if count is not None and mr_api.is_terminal_task_status(status):
+            with self._src_count_lock:
+                self._src_count_cache[task_id] = count
+        return count
+
+    def _prefetch_src_counts(self, task_items):
+        """*task_items* are ``(task_id, status)`` pairs (a bare id is also
+        accepted and treated as status-unknown, i.e. never cached)."""
+        items = []
+        for it in task_items:
+            tid, status = (it if isinstance(it, tuple) else (it, None))
+            if tid:
+                items.append((tid, status))
+        if not items:
             return
 
         def _run():
-            def _work(tid):
-                with self._src_count_lock:
-                    count = self._src_count_cache.get(tid)
-                if count is None:
-                    count = mr_api.count_mr_source_strings(
-                        tid, **self._api_kw())
-                    with self._src_count_lock:
-                        self._src_count_cache[tid] = count
+            def _work(item):
+                tid, status = item
+                try:
+                    count = self._resolve_src_count(tid, status)
+                except Exception:
+                    count = None
                 try:
                     self.parent.after(0, self._apply_src_count, tid, count)
                 except Exception:
                     pass
 
             with ThreadPoolExecutor(max_workers=4) as pool:
-                list(pool.map(_work, ids))
+                list(pool.map(_work, items))
             try:
                 self.parent.after(0, self._on_src_counts_done)
             except Exception:
@@ -1477,7 +1506,8 @@ class MRPipelineTab:
         if not iid:
             return
         try:
-            self.mr_tree.set(iid, "src_strings", count)
+            self.mr_tree.set(iid, "src_strings",
+                             "—" if count is None else count)
         except tk.TclError:
             pass
 

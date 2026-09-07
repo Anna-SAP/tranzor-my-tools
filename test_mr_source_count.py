@@ -86,6 +86,30 @@ class CountMrSourceStringsTests(unittest.TestCase):
         # the prefetch worker.
         self.assertEqual(mr_api.count_mr_source_strings("task-1"), 0)
 
+    def test_or_none_distinguishes_failure_from_empty(self):
+        # The GUI caches counts per task; a failed fetch must not be
+        # cached as a permanent 0.
+        def boom(task_id):
+            raise RuntimeError("network down")
+
+        mr_api.fetch_mr_results = boom
+        self.assertIsNone(mr_api.count_mr_source_strings_or_none("task-1"))
+
+        mr_api.fetch_mr_results = lambda task_id: {"translations": []}
+        self.assertEqual(mr_api.count_mr_source_strings_or_none("task-1"), 0)
+
+        mr_api.fetch_mr_results = lambda task_id: {"translations": [
+            {"opus_id": "a"}, {"opus_id": "b"}]}
+        self.assertEqual(mr_api.count_mr_source_strings_or_none("task-1"), 2)
+
+    def test_uns_segment_rows_count_per_segment(self):
+        mr_api.fetch_mr_results = lambda task_id: {"translations": [
+            {"opus_id": "common.uns.t__email_html__1", "tu_id": tu,
+             "has_seg_units": True, "target_language": lang}
+            for tu in (1, 2, 3) for lang in ("de-DE", "fr-FR")
+        ]}
+        self.assertEqual(mr_api.count_mr_source_strings("task-1"), 3)
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
