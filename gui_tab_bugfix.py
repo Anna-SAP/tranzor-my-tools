@@ -9,13 +9,13 @@ from __future__ import annotations
 import copy
 import threading
 import tkinter as tk
+from concurrent.futures import ThreadPoolExecutor
 import webbrowser
 from tkinter import ttk
 from typing import Any
 
 import bugfix_panel as bf
 import gitlab_client
-from export_gui import FONT_FAMILY, FONT_MONO
 from time_display import format_display_datetime
 
 
@@ -73,6 +73,71 @@ STRINGS = {
         "bf_col_activity": "MR activity",
         "bf_col_created": "Created",
         "bf_comments_error": "Comments unavailable: {error}",
+        "bf_cached_syncing": (
+            "Cached · {shown}/{total} shown · saved {time} · "
+            "live refresh in progress…"
+        ),
+        "bf_failed_retained": (
+            "Refresh failed; showing the existing snapshot: {error}"
+        ),
+        "bf_yes": "Yes",
+        "bf_no": "No",
+        "bf_none": "(none)",
+        "bf_unknown": "Unknown",
+        "bf_unresolved": "UNRESOLVED",
+        "bf_comment_action": "ACTION REQUEST",
+        "bf_comment_approval": "APPROVAL",
+        "bf_comment_recent": "RECENT COMMENT",
+        "bf_detail_bug": "Bug / Jira",
+        "bf_detail_submission": "Submission",
+        "bf_detail_project": "Project",
+        "bf_detail_branch": "Target branch",
+        "bf_detail_locales": "Locales",
+        "bf_detail_created_by": "Created by",
+        "bf_detail_created": "Created",
+        "bf_detail_axes": "TWO INDEPENDENT STATUS AXES",
+        "bf_detail_workflow": "Bug Fix / TM",
+        "bf_detail_gitlab_mr": "GitLab MR",
+        "bf_detail_mr": "MR",
+        "bf_detail_mr_title": "MR title",
+        "bf_detail_draft": "Draft",
+        "bf_detail_conflicts": "Conflicts",
+        "bf_detail_merge": "Merge detail",
+        "bf_detail_pipeline": "Pipeline",
+        "bf_detail_mr_updated": "MR updated",
+        "bf_detail_mr_url": "MR URL",
+        "bf_detail_create_error": "Create error",
+        "bf_detail_error_code": "Error code",
+        "bf_detail_approval_warning": "Approval warning",
+        "bf_detail_gitlab_sync": "GitLab sync",
+        "bf_detail_record_error": "ERROR",
+        "bf_more_records": "… {count} more record(s)",
+        "bf_state_open": "Open",
+        "bf_state_merged": "Merged",
+        "bf_state_closed": "Closed",
+        "bf_state_direct": "Direct / no MR",
+        "bf_state_unknown": "Unknown",
+        "bf_status_queued": "Queued",
+        "bf_status_processing": "Processing",
+        "bf_status_waiting": "Waiting",
+        "bf_status_applying": "Applying",
+        "bf_status_in_progress": "In progress",
+        "bf_status_applied": "Applied",
+        "bf_status_failed": "Failed",
+        "bf_status_tm_failed": "TM failed",
+        "bf_status_create_failed": "MR creation failed",
+        "bf_status_partially_applied": "Partially applied",
+        "bf_status_not_merged": "Not merged",
+        "bf_attn_workflow_failed": "Bug Fix workflow failed",
+        "bf_attn_mr_closed": "MR closed without merge",
+        "bf_attn_mr_conflicts": "MR has conflicts",
+        "bf_attn_unresolved": "Unresolved MR discussion",
+        "bf_attn_draft_review": "Draft MR needs review",
+        "bf_attn_open_mr": "Open MR",
+        "bf_attn_in_progress": "Bug Fix is still in progress",
+        "bf_attn_mr_unavailable": "MR state unavailable",
+        "bf_attn_direct": "Direct / no MR",
+        "bf_attn_no_action": "No action detected",
         "bf_no_mr_explain": (
             "No MR is linked. This can be a valid direct or Blob-based apply; "
             "it is not treated as an error."
@@ -130,6 +195,68 @@ STRINGS = {
         "bf_col_activity": "MR 动态",
         "bf_col_created": "创建时间",
         "bf_comments_error": "Comments 暂不可用：{error}",
+        "bf_cached_syncing": (
+            "缓存 · 显示 {shown}/{total} · 保存于 {time} · 正在实时刷新…"
+        ),
+        "bf_failed_retained": "刷新失败；继续显示现有快照：{error}",
+        "bf_yes": "是",
+        "bf_no": "否",
+        "bf_none": "（无）",
+        "bf_unknown": "未知",
+        "bf_unresolved": "未解决",
+        "bf_comment_action": "需处理",
+        "bf_comment_approval": "已批准",
+        "bf_comment_recent": "近期评论",
+        "bf_detail_bug": "Bug / Jira",
+        "bf_detail_submission": "Submission",
+        "bf_detail_project": "项目",
+        "bf_detail_branch": "目标分支",
+        "bf_detail_locales": "语种",
+        "bf_detail_created_by": "创建人",
+        "bf_detail_created": "创建时间",
+        "bf_detail_axes": "两条独立状态轴",
+        "bf_detail_workflow": "Bug Fix / TM",
+        "bf_detail_gitlab_mr": "GitLab MR",
+        "bf_detail_mr": "MR",
+        "bf_detail_mr_title": "MR 标题",
+        "bf_detail_draft": "草稿",
+        "bf_detail_conflicts": "冲突",
+        "bf_detail_merge": "合并详情",
+        "bf_detail_pipeline": "Pipeline",
+        "bf_detail_mr_updated": "MR 更新时间",
+        "bf_detail_mr_url": "MR 链接",
+        "bf_detail_create_error": "创建错误",
+        "bf_detail_error_code": "错误代码",
+        "bf_detail_approval_warning": "审批告警",
+        "bf_detail_gitlab_sync": "GitLab 同步",
+        "bf_detail_record_error": "错误",
+        "bf_more_records": "… 另有 {count} 条修复记录",
+        "bf_state_open": "开启",
+        "bf_state_merged": "已合并",
+        "bf_state_closed": "已关闭",
+        "bf_state_direct": "直写 / 无 MR",
+        "bf_state_unknown": "未知",
+        "bf_status_queued": "已排队",
+        "bf_status_processing": "处理中",
+        "bf_status_waiting": "等待中",
+        "bf_status_applying": "应用中",
+        "bf_status_in_progress": "进行中",
+        "bf_status_applied": "已应用",
+        "bf_status_failed": "失败",
+        "bf_status_tm_failed": "TM 失败",
+        "bf_status_create_failed": "MR 创建失败",
+        "bf_status_partially_applied": "部分应用",
+        "bf_status_not_merged": "未合并",
+        "bf_attn_workflow_failed": "Bug Fix 工作流失败",
+        "bf_attn_mr_closed": "MR 未合并即关闭",
+        "bf_attn_mr_conflicts": "MR 存在冲突",
+        "bf_attn_unresolved": "MR discussion 尚未解决",
+        "bf_attn_draft_review": "草稿 MR 待评审",
+        "bf_attn_open_mr": "MR 待评审",
+        "bf_attn_in_progress": "Bug Fix 仍在处理中",
+        "bf_attn_mr_unavailable": "MR 状态暂不可用",
+        "bf_attn_direct": "直写 / 无 MR",
+        "bf_attn_no_action": "无需处理",
         "bf_no_mr_explain": (
             "没有关联 MR。这可能是合法的直写或 Blob-based apply，"
             "面板不会将它误判为错误。"
@@ -139,16 +266,53 @@ STRINGS = {
 
 
 _MR_FILTERS = ("", "opened", "merged", "closed", "none", "unknown")
-_MR_LABEL_KEYS = {
-    "": "bf_all",
-    "opened": "bf_open",
-    "merged": "bf_col_mr_state",
-    "closed": "bf_col_mr_state",
-    "none": "bf_direct",
-    "unknown": "bf_col_mr_state",
+_MR_STATE_KEYS = {
+    "opened": "bf_state_open",
+    "open": "bf_state_open",
+    "merged": "bf_state_merged",
+    "closed": "bf_state_closed",
+    "none": "bf_state_direct",
+    "unknown": "bf_state_unknown",
+}
+_PLATFORM_STATUS_KEYS = {
+    "queued": "bf_status_queued",
+    "processing": "bf_status_processing",
+    "pending": "bf_status_waiting",
+    "waiting_for_merge": "bf_status_waiting",
+    "all_waiting": "bf_status_waiting",
+    "all_applying": "bf_status_applying",
+    "applying_fix": "bf_status_applying",
+    "in_progress": "bf_status_in_progress",
+    "applied": "bf_status_applied",
+    "failed": "bf_status_failed",
+    "delivery_failed": "bf_status_failed",
+    "tm_failed": "bf_status_tm_failed",
+    "create_failed": "bf_status_create_failed",
+    "mr_creation_failed": "bf_status_create_failed",
+    "partially_applied": "bf_status_partially_applied",
+    "not_merged": "bf_status_not_merged",
+}
+_ATTENTION_KEYS = {
+    "workflow_failed": "bf_attn_workflow_failed",
+    "mr_closed": "bf_attn_mr_closed",
+    "mr_conflicts": "bf_attn_mr_conflicts",
+    "unresolved_discussion": "bf_attn_unresolved",
+    "draft_review": "bf_attn_draft_review",
+    "open_mr": "bf_attn_open_mr",
+    "workflow_in_progress": "bf_attn_in_progress",
+    "mr_unavailable": "bf_attn_mr_unavailable",
+    "direct_no_mr": "bf_attn_direct",
+    "no_action": "bf_attn_no_action",
+}
+_COMMENT_REASON_KEYS = {
+    "action request": "bf_comment_action",
+    "approval": "bf_comment_approval",
+    "recent comment": "bf_comment_recent",
 }
 _AUTO_REFRESH_MS = 5 * 60 * 1000
 _MAX_DETAIL_RECORDS = 200
+_COMMENT_WORKERS = 2
+_GITLAB_TIMEOUT_SECONDS = 10
 
 
 def _clip(value: Any, limit: int = 64) -> str:
@@ -185,11 +349,16 @@ class BugFixTab:
         self._data_generation = 0
         self._auto_after_id = None
         self._filter_after_id = None
+        self._cancel_event = threading.Event()
+        self._comment_executor = ThreadPoolExecutor(
+            max_workers=_COMMENT_WORKERS,
+            thread_name_prefix="bugfix-comments",
+        )
+        self._filter_raw = {"project": "", "workflow": "", "mr": ""}
         self._all_rows: list[dict[str, Any]] = []
         self._row_by_iid: dict[str, dict[str, Any]] = {}
         self._comment_loading: set[str] = set()
         self._comment_attempted: set[str] = set()
-        self._gitlab = gitlab_client.GitLabClient()
         self._last_result: dict[str, Any] = {}
         self._build(parent)
         self.refresh_text()
@@ -202,6 +371,8 @@ class BugFixTab:
         return mr_api.TRANZOR_URL
 
     def _button(self, parent, *, command, accent=False):
+        # Lazy import avoids gui_tab_bugfix <-> export_gui initialization cycles.
+        from export_gui import FONT_FAMILY
         return self.app._create_button(
             parent,
             text="",
@@ -215,6 +386,7 @@ class BugFixTab:
         )
 
     def _build(self, parent):
+        from export_gui import FONT_MONO
         content = ttk.Frame(parent, style="App.TFrame")
         content.pack(fill="both", expand=True, padx=16, pady=8)
 
@@ -258,9 +430,12 @@ class BugFixTab:
         self.cmb_mr_state.bind(
             "<<ComboboxSelected>>", self._on_filter_change)
 
+        self.lbl_search = ttk.Label(
+            filters, text="", style="Status.TLabel")
+        self.lbl_search.pack(side="left", padx=(0, 5))
         self.var_search = tk.StringVar()
         self.ent_search = ttk.Entry(
-            filters, textvariable=self.var_search, width=31)
+            filters, textvariable=self.var_search, width=27)
         self.ent_search.pack(side="left", fill="x", expand=True, padx=(0, 8))
         self.ent_search.bind("<Return>", self._on_filter_change)
         self.var_search.trace_add("write", self._schedule_filter)
@@ -356,6 +531,7 @@ class BugFixTab:
         self.lbl_project.configure(text=t("bf_project"))
         self.lbl_workflow.configure(text=t("bf_workflow"))
         self.lbl_mr_state.configure(text=t("bf_mr_state"))
+        self.lbl_search.configure(text=t("bf_search"))
         self.btn_refresh.configure(text=t("bf_refresh"))
         self.btn_reset.configure(text=t("bf_reset"))
         self.btn_platform.configure(text=t("bf_open_platform"))
@@ -380,16 +556,12 @@ class BugFixTab:
         for col, key in headings.items():
             self.tree.heading(col, text=t(key))
 
-        project_raw = self._project_raw()
-        workflow_raw = self._workflow_raw()
-        mr_raw = self._mr_raw()
         self._refresh_filter_values(
-            project_raw=project_raw,
-            workflow_raw=workflow_raw,
-            mr_raw=mr_raw,
+            project_raw=self._project_raw(),
+            workflow_raw=self._workflow_raw(),
+            mr_raw=self._mr_raw(),
         )
         if not self._all_rows:
-            self.ent_search.configure()
             self._set_detail(t("bf_detail_placeholder"))
             if not self._syncing:
                 self._idle(t("bf_ready"))
@@ -420,15 +592,10 @@ class BugFixTab:
         ]
 
     def _mr_options(self):
-        labels = {
-            "": self._t("bf_all"),
-            "opened": "Open",
-            "merged": "Merged",
-            "closed": "Closed",
-            "none": self._t("bf_direct"),
-            "unknown": "Unknown",
-        }
-        return [(raw, labels[raw]) for raw in _MR_FILTERS]
+        return [
+            (raw, self._t(_MR_STATE_KEYS[raw]) if raw else self._t("bf_all"))
+            for raw in _MR_FILTERS
+        ]
 
     @staticmethod
     def _raw_from_display(display, options):
@@ -438,30 +605,29 @@ class BugFixTab:
         return ""
 
     def _project_raw(self):
-        return self._raw_from_display(
-            self.var_project.get(), self._project_options())
+        return self._filter_raw.get("project", "")
 
     def _workflow_raw(self):
-        return self._raw_from_display(
-            self.var_workflow.get(), self._workflow_options())
+        return self._filter_raw.get("workflow", "")
 
     def _mr_raw(self):
-        return self._raw_from_display(
-            self.var_mr_state.get(), self._mr_options())
+        return self._filter_raw.get("mr", "")
 
     def _refresh_filter_values(
             self, *, project_raw="", workflow_raw="", mr_raw=""):
-        for combo, variable, options, raw in (
-            (self.cmb_project, self.var_project,
+        for raw_key, combo, variable, options, raw in (
+            ("project", self.cmb_project, self.var_project,
              self._project_options(), project_raw),
-            (self.cmb_workflow, self.var_workflow,
+            ("workflow", self.cmb_workflow, self.var_workflow,
              self._workflow_options(), workflow_raw),
-            (self.cmb_mr_state, self.var_mr_state,
+            ("mr", self.cmb_mr_state, self.var_mr_state,
              self._mr_options(), mr_raw),
         ):
             combo.configure(values=[label for _key, label in options])
+            selected_raw = raw if any(key == raw for key, _label in options) else ""
+            self._filter_raw[raw_key] = selected_raw
             label = next(
-                (label for key, label in options if key == raw),
+                (label for key, label in options if key == selected_raw),
                 options[0][1],
             )
             variable.set(label)
@@ -527,11 +693,17 @@ class BugFixTab:
         self._comment_attempted.clear()
         self.btn_refresh.configure(state="disabled")
         self._busy(self._t("bf_syncing"))
+        generation = self._data_generation
 
         def work():
             try:
+                # Re-read token/base URL for every refresh so settings changes
+                # take effect without restarting the EXE.
+                client = gitlab_client.GitLabClient(
+                    timeout=_GITLAB_TIMEOUT_SECONDS)
                 result = bf.sync_panel(
-                    self._base_url(), gitlab_client=self._gitlab)
+                    self._base_url(), gitlab_client=client,
+                    cancel_event=self._cancel_event)
             except Exception as exc:
                 result = {
                     "ok": False, "live_ok": False, "source": "none",
@@ -539,7 +711,9 @@ class BugFixTab:
                     "available_statuses": [], "gitlab_error_count": 0,
                     "error": f"{type(exc).__name__}: {exc}"[:300],
                 }
-            self._safe_after(lambda: self._apply_sync_result(result))
+            self._safe_after(
+                lambda: self._apply_sync_result(
+                    result, generation=generation))
 
         threading.Thread(
             target=work, daemon=True, name="bugfix-panel-sync").start()
@@ -552,14 +726,37 @@ class BugFixTab:
         except Exception:
             pass
 
-    def _apply_sync_result(self, result, cache_only=False):
+    def _apply_sync_result(
+            self, result, cache_only=False, generation=None):
         if self._stopped:
+            return
+        if generation is not None and generation != self._data_generation:
             return
         self._syncing = False
         self.btn_refresh.configure(state="normal")
-        self._last_result = dict(result or {})
-        rows = result.get("submissions") if isinstance(result, dict) else []
-        self._all_rows = bf.stable_sort_submissions(rows or [])
+        result = dict(result or {})
+        rows = result.get("submissions") or []
+        retained = (
+            result.get("source") == "none"
+            and bool(self._all_rows)
+            and not rows
+        )
+        if retained:
+            previous = dict(self._last_result)
+            previous.update(result)
+            previous["submissions"] = self._all_rows
+            if not result.get("available_statuses"):
+                previous["available_statuses"] = list(
+                    self._last_result.get("available_statuses") or [])
+            if not result.get("total_submissions"):
+                previous["total_submissions"] = (
+                    self._last_result.get("total_submissions")
+                    or len(self._all_rows)
+                )
+            self._last_result = previous
+        else:
+            self._last_result = dict(result)
+            self._all_rows = bf.stable_sort_submissions(rows)
         current_project = self._project_raw()
         current_workflow = self._workflow_raw()
         current_mr = self._mr_raw()
@@ -572,11 +769,10 @@ class BugFixTab:
 
         if cache_only:
             saved = result.get("saved_at") or "—"
-            self._idle(self._t("bf_cached").format(
+            self._idle(self._t("bf_cached_syncing").format(
                 shown=shown,
                 total=result.get("total_submissions") or len(self._all_rows),
                 time=_display_time(saved),
-                error=self._t("bf_syncing"),
             ))
         elif result.get("live_ok"):
             message = self._t("bf_live").format(
@@ -597,9 +793,12 @@ class BugFixTab:
                 time=_display_time(result.get("saved_at")),
                 error=result.get("error") or "unknown",
             ))
+        elif retained:
+            self._idle(self._t("bf_failed_retained").format(
+                error=result.get("error") or self._t("bf_unknown")))
         else:
             self._idle(self._t("bf_failed").format(
-                error=result.get("error") or "unknown"))
+                error=result.get("error") or self._t("bf_unknown")))
 
     def _schedule_filter(self, *_args):
         if self._filter_after_id is not None:
@@ -614,6 +813,14 @@ class BugFixTab:
             self._filter_after_id = None
 
     def _on_filter_change(self, _event=None):
+        self._filter_raw.update({
+            "project": self._raw_from_display(
+                self.var_project.get(), self._project_options()),
+            "workflow": self._raw_from_display(
+                self.var_workflow.get(), self._workflow_options()),
+            "mr": self._raw_from_display(
+                self.var_mr_state.get(), self._mr_options()),
+        })
         self._apply_filters()
 
     def _apply_filters(self, select_submission=""):
@@ -648,14 +855,14 @@ class BugFixTab:
             self.tree.insert(
                 "", "end", iid=iid,
                 values=(
-                    attn.get("reason") or "—",
+                    self._attention_text(row),
                     row.get("bug_id") or "—",
                     row.get("project_id") or "—",
                     locale,
                     row.get("string_count") or 0,
-                    row.get("platform_status_label") or "Unknown",
+                    self._platform_status_text(row),
                     mr_number,
-                    row.get("mr_state_label") or "Unknown",
+                    self._mr_state_text(row),
                     _display_time(row.get("mr_updated_at")),
                     _display_time(row.get("created_at")),
                 ),
@@ -734,16 +941,23 @@ class BugFixTab:
         snapshot = copy.deepcopy(row)
 
         def work():
+            client = gitlab_client.GitLabClient(
+                timeout=_GITLAB_TIMEOUT_SECONDS)
             enriched = bf.enrich_submission(
-                snapshot, self._gitlab, include_discussions=True,
+                snapshot, client, include_discussions=True,
                 force_refresh=True)
             self._safe_after(
                 lambda: self._apply_comment_result(
                     sid, enriched, generation))
 
-        threading.Thread(
-            target=work, daemon=True,
-            name=f"bugfix-comments-{sid[:12]}").start()
+        try:
+            self._comment_executor.submit(work)
+        except RuntimeError as exc:
+            failed = snapshot
+            failed["comments_loaded"] = True
+            failed["comments_error"] = (
+                f"{type(exc).__name__}: {exc}")[:240]
+            self._apply_comment_result(sid, failed, generation)
 
     def _apply_comment_result(self, sid, enriched, generation):
         self._comment_loading.discard(sid)
@@ -763,35 +977,80 @@ class BugFixTab:
         # has moved to row B. Preserve the current selection while refreshing.
         self._apply_filters(select_submission=selected_sid)
 
+    def _attention_text(self, row):
+        attention = row.get("attention") or {}
+        key = _ATTENTION_KEYS.get(str(attention.get("code") or ""))
+        return self._t(key) if key else (
+            str(attention.get("reason") or self._t("bf_unknown")))
+
+    def _platform_status_text(self, row):
+        raw = str(row.get("platform_status") or "").strip().lower()
+        key = _PLATFORM_STATUS_KEYS.get(raw)
+        return self._t(key) if key else (
+            str(row.get("platform_status_label") or self._t("bf_unknown")))
+
+    def _mr_state_text(self, row):
+        raw = str(row.get("mr_state") or "unknown").strip().lower()
+        key = _MR_STATE_KEYS.get(raw, "bf_state_unknown")
+        return self._t(key)
+
+    def _detail_line(self, label_key, value):
+        return f"{self._t(label_key)}: {value}"
+
     def _show_detail(self, row, comments_loading=False):
-        attn = row.get("attention") or {}
+        unknown = self._t("bf_unknown")
+        empty = self._t("bf_none")
+        yes = self._t("bf_yes")
+        no = self._t("bf_no")
         lines = [
-            f"{attn.get('reason') or '—'}",
+            self._attention_text(row),
             "",
-            f"Bug / Jira:       {row.get('bug_id') or '—'}",
-            f"Submission:       {row.get('submission_id') or '—'}",
-            f"Project:          {row.get('project_id') or '—'}",
-            f"Target branch:    {row.get('target_branch') or '—'}",
-            f"Locales:          {', '.join(row.get('target_languages') or []) or '—'}",
-            f"Created by:       {row.get('created_by') or '—'}",
-            f"Created:          {_display_time(row.get('created_at'))}",
+            self._detail_line("bf_detail_bug", row.get("bug_id") or "—"),
+            self._detail_line(
+                "bf_detail_submission", row.get("submission_id") or "—"),
+            self._detail_line(
+                "bf_detail_project", row.get("project_id") or "—"),
+            self._detail_line(
+                "bf_detail_branch", row.get("target_branch") or "—"),
+            self._detail_line(
+                "bf_detail_locales",
+                ", ".join(row.get("target_languages") or []) or "—"),
+            self._detail_line(
+                "bf_detail_created_by", row.get("created_by") or "—"),
+            self._detail_line(
+                "bf_detail_created", _display_time(row.get("created_at"))),
             "",
-            "TWO INDEPENDENT STATUS AXES",
+            self._t("bf_detail_axes"),
             "──────────────────────────",
-            f"Bug Fix / TM:     {row.get('platform_status_label') or 'Unknown'}",
-            f"GitLab MR:        {row.get('mr_state_label') or 'Unknown'}",
+            self._detail_line(
+                "bf_detail_workflow", self._platform_status_text(row)),
+            self._detail_line(
+                "bf_detail_gitlab_mr", self._mr_state_text(row)),
         ]
 
         if row.get("has_mr"):
             lines.extend([
-                f"MR:               !{row.get('mr_iid') or '?'}",
-                f"MR title:         {row.get('mr_title') or '—'}",
-                f"Draft:            {'yes' if row.get('draft') else 'no'}",
-                f"Conflicts:        {'yes' if row.get('has_conflicts') else 'no'}",
-                f"Merge detail:     {row.get('detailed_merge_status') or row.get('merge_status') or '—'}",
-                f"Pipeline:         {row.get('pipeline_status') or '—'}",
-                f"MR updated:       {_display_time(row.get('mr_updated_at'))}",
-                f"MR URL:           {row.get('mr_url') or '—'}",
+                self._detail_line(
+                    "bf_detail_mr", f"!{row.get('mr_iid') or '?'}"),
+                self._detail_line(
+                    "bf_detail_mr_title", row.get("mr_title") or "—"),
+                self._detail_line(
+                    "bf_detail_draft", yes if row.get("draft") else no),
+                self._detail_line(
+                    "bf_detail_conflicts",
+                    yes if row.get("has_conflicts") else no),
+                self._detail_line(
+                    "bf_detail_merge",
+                    row.get("detailed_merge_status")
+                    or row.get("merge_status") or "—"),
+                self._detail_line(
+                    "bf_detail_pipeline",
+                    row.get("pipeline_status") or "—"),
+                self._detail_line(
+                    "bf_detail_mr_updated",
+                    _display_time(row.get("mr_updated_at"))),
+                self._detail_line(
+                    "bf_detail_mr_url", row.get("mr_url") or "—"),
             ])
         else:
             lines.extend(["", self._t("bf_no_mr_explain")])
@@ -799,18 +1058,24 @@ class BugFixTab:
         if row.get("create_error"):
             lines.extend([
                 "",
-                f"Create error:     {row.get('create_error')}",
-                f"Error code:       {row.get('create_error_code') or '—'}",
+                self._detail_line(
+                    "bf_detail_create_error", row.get("create_error")),
+                self._detail_line(
+                    "bf_detail_error_code",
+                    row.get("create_error_code") or "—"),
             ])
         if row.get("auto_approval_warning"):
             lines.extend([
                 "",
-                f"Approval warning: {row.get('auto_approval_warning')}",
+                self._detail_line(
+                    "bf_detail_approval_warning",
+                    row.get("auto_approval_warning")),
             ])
         if row.get("mr_sync_error"):
             lines.extend([
                 "",
-                f"GitLab sync:      {row.get('mr_sync_error')}",
+                self._detail_line(
+                    "bf_detail_gitlab_sync", row.get("mr_sync_error")),
             ])
 
         if row.get("has_mr"):
@@ -826,11 +1091,17 @@ class BugFixTab:
                 if not comments:
                     lines.append(self._t("bf_comments_none"))
                 for comment in comments:
-                    badge = (
-                        "UNRESOLVED" if comment.get("unresolved")
-                        else str(comment.get("reason") or "COMMENT").upper())
+                    if comment.get("unresolved"):
+                        badge = self._t("bf_unresolved")
+                    else:
+                        reason = str(comment.get("reason") or "").lower()
+                        badge_key = _COMMENT_REASON_KEYS.get(reason)
+                        badge = (
+                            self._t(badge_key) if badge_key
+                            else reason.upper() or unknown
+                        )
                     lines.extend([
-                        f"[{badge}] {comment.get('author') or 'Unknown'}"
+                        f"[{badge}] {comment.get('author') or unknown}"
                         f" · {_display_time(comment.get('updated_at') or comment.get('created_at'))}",
                         str(comment.get("body") or ""),
                         "",
@@ -845,7 +1116,7 @@ class BugFixTab:
                       "──────────────────────────"])
         records = row.get("records") or []
         if not records:
-            lines.append("(none)")
+            lines.append(empty)
         for index, record in enumerate(records[:_MAX_DETAIL_RECORDS], 1):
             key = (
                 record.get("logical_key")
@@ -861,10 +1132,12 @@ class BugFixTab:
                 f"   → {_clip(record.get('corrected_text'), 180)}",
             ])
             if record.get("create_error"):
-                lines.append(f"   ERROR: {record.get('create_error')}")
+                lines.append(
+                    f"   {self._t('bf_detail_record_error')}: "
+                    f"{record.get('create_error')}")
         if len(records) > _MAX_DETAIL_RECORDS:
-            lines.append(
-                f"… {len(records) - _MAX_DETAIL_RECORDS} more record(s)")
+            lines.append(self._t("bf_more_records").format(
+                count=len(records) - _MAX_DETAIL_RECORDS))
 
         self._set_detail("\n".join(lines))
 
@@ -905,6 +1178,10 @@ class BugFixTab:
 
     def stop(self):
         self._stopped = True
+        self._cancel_event.set()
+        executor = getattr(self, "_comment_executor", None)
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
         for after_id in (self._auto_after_id, self._filter_after_id):
             if after_id is not None:
                 try:
