@@ -625,5 +625,39 @@ class TestCancellation(unittest.TestCase):
             caller.join(1)
 
 
+
+class TestCancellationCacheGate(unittest.TestCase):
+
+    def test_cancellation_after_sort_skips_cache_save(self):
+        cancel = threading.Event()
+
+        def cancel_during_sort(rows):
+            cancel.set()
+            return list(rows)
+
+        with (
+            mock.patch.object(
+                bp, "stable_sort_submissions",
+                side_effect=cancel_during_sort,
+            ),
+            mock.patch.object(bp, "save_cache") as save_cache,
+            mock.patch.object(bp, "load_cache") as load_cache,
+        ):
+            result = bp.sync_panel(
+                "http://platform",
+                get_fn=lambda _url, params: {
+                    "submissions": [],
+                    "total_submissions": 0,
+                    "available_statuses": [],
+                },
+                sync_gitlab=False,
+                cancel_event=cancel,
+            )
+
+        self.assertEqual(result["source"], "cancelled")
+        save_cache.assert_not_called()
+        load_cache.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
