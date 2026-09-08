@@ -207,10 +207,11 @@ class TestImportantComments(unittest.TestCase):
 class _FakeGitLab:
 
     def __init__(self, states=None, fail_iids=None, discussions=None,
-                 token=True):
+                 discussion_fail_iids=None, token=True):
         self.states = states or {}
         self.fail_iids = set(fail_iids or [])
         self.discussions = discussions or {}
+        self.discussion_fail_iids = set(discussion_fail_iids or [])
         self.token = token
         self.mr_calls = []
         self.discussion_calls = []
@@ -232,6 +233,8 @@ class _FakeGitLab:
 
     def list_mr_discussions(self, project, iid, **kwargs):
         self.discussion_calls.append((project, iid, kwargs))
+        if iid in self.discussion_fail_iids:
+            raise RuntimeError("comments denied")
         return self.discussions.get(iid, [])
 
 
@@ -280,6 +283,20 @@ class TestEnrichment(unittest.TestCase):
         self.assertTrue(selected["comments_loaded"])
         self.assertEqual(selected["comments"][0]["id"], "8")
         self.assertEqual(len(client.discussion_calls), 1)
+
+    def test_discussion_failure_finishes_loading_and_keeps_live_mr(self):
+        row = bp.enrich_submission(
+            self._row(1),
+            _FakeGitLab(
+                states={1: "opened"},
+                discussion_fail_iids={1},
+            ),
+            include_discussions=True,
+        )
+        self.assertEqual(row["mr_state"], "opened")
+        self.assertEqual(row["mr_sync_error"], "")
+        self.assertTrue(row["comments_loaded"])
+        self.assertIn("comments denied", row["comments_error"])
 
     def test_missing_token_marks_only_gitlab_axis(self):
         row = bp.enrich_submission(
@@ -335,6 +352,26 @@ class TestCacheAndSync(unittest.TestCase):
             self.assertEqual(
                 result["submissions"][0]["submission_id"], "cached")
             self.assertIn("offline", result["error"])
+
+    def test_cache_write_failure_keeps_fresh_live_result(self):
+        with mock.patch.object(
+                bp, "save_cache", side_effect=OSError("disk full")):
+            result = bp.sync_panel(
+                "http://platform",
+                get_fn=lambda *_a, **_k: {
+                    "submissions": [{
+                        "submission_id": "fresh",
+                        "summary": {"aggregate_status": "Applied"},
+                    }],
+                    "total_submissions": 1,
+                },
+                gitlab_client=_FakeGitLab(),
+            )
+        self.assertTrue(result["live_ok"])
+        self.assertEqual(result["source"], "live")
+        self.assertEqual(
+            result["submissions"][0]["submission_id"], "fresh")
+        self.assertIn("disk full", result["cache_error"])
 
     def test_successful_sync_saves_live_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:
