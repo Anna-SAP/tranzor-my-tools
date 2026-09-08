@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import unittest
+from concurrent.futures import CancelledError
 
 import requests
 
@@ -399,6 +401,30 @@ class TestListMrDiscussions(unittest.TestCase):
         client = _make_client_with_session(_FakeSession({"notes": []}))
         with self.assertRaises(ValueError):
             client.list_mr_discussions("p", 1)
+
+    def test_cancellation_stops_next_page_and_does_not_cache_partial(self):
+        cancel = threading.Event()
+
+        class CancellingSession(_PagedSession):
+            def get(self, url, **kwargs):
+                response = super().get(url, **kwargs)
+                cancel.set()
+                return response
+
+        session = CancellingSession([
+            [{"id": "first", "notes": []}],
+            [{"id": "second", "notes": []}],
+        ])
+        client = _make_client_with_session(session)
+
+        with self.assertRaises(CancelledError):
+            client.list_mr_discussions(
+                "common/uns", 42, per_page=1, max_pages=3,
+                cancel_event=cancel,
+            )
+
+        self.assertEqual(len(session.calls), 1)
+        self.assertEqual(client._mr_discussions_cache, {})
 
 
 class TestFetchMrLabels(unittest.TestCase):
