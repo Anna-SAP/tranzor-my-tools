@@ -786,6 +786,9 @@ class BugFixTab:
                         str(comment.get("body") or ""),
                         "",
                     ])
+            elif row.get("mr_sync_error"):
+                lines.append(self._t("bf_comments_error").format(
+                    error=row.get("mr_sync_error")))
             else:
                 lines.append(self._t("bf_comments_loading"))
 
