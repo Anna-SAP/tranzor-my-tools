@@ -662,7 +662,7 @@ class TestCancellationCacheGate(unittest.TestCase):
 
 class TestLockedMrState(unittest.TestCase):
 
-    def test_locked_mr_is_preserved_filterable_and_needs_watch(self):
+    def test_locked_mr_is_preserved_filterable_and_terminal(self):
         row = bp.normalize_submission({
             "submission_id": "locked",
             "project_id": "common/uns",
@@ -674,8 +674,8 @@ class TestLockedMrState(unittest.TestCase):
 
         self.assertEqual(row["mr_state"], "locked")
         self.assertEqual(row["mr_state_label"], "Locked")
-        self.assertEqual(row["attention"]["level"], "watch")
-        self.assertEqual(row["attention"]["code"], "locked_mr")
+        self.assertEqual(row["attention"]["level"], "done")
+        self.assertEqual(row["attention"]["code"], "no_action")
         self.assertEqual(
             [item["submission_id"] for item in bp.filter_submissions(
                 [row], mr_state="locked")],
