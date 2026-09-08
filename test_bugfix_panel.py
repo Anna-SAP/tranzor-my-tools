@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -391,6 +392,168 @@ class TestCacheAndSync(unittest.TestCase):
             self.assertTrue(result["live_ok"])
             self.assertTrue(os.path.isfile(path))
             self.assertEqual(bp.load_cache(path)["source"], "cache")
+
+
+
+class TestAttentionStatusMatrix(unittest.TestCase):
+
+    def test_platform_failure_aggregates_are_always_action(self):
+        states = {
+            "delivery_failed",
+            "tm_failed",
+            "create_failed",
+            "mr_creation_failed",
+            "partially_applied",
+            "not_merged",
+        }
+        for state in states:
+            with self.subTest(state=state):
+                attention = bp.derive_attention({
+                    "platform_status": state,
+                    "mr_state": "merged",
+                    "has_mr": True,
+                })
+                self.assertEqual(attention["level"], "action")
+                self.assertEqual(attention["code"], "workflow_failed")
+
+    def test_platform_in_progress_aggregates_are_always_watch(self):
+        states = {
+            "queued",
+            "processing",
+            "pending",
+            "all_waiting",
+            "all_applying",
+            "in_progress",
+            "applying_fix",
+            "waiting_for_merge",
+        }
+        for state in states:
+            with self.subTest(state=state):
+                attention = bp.derive_attention({
+                    "platform_status": state,
+                    "mr_state": "merged",
+                    "has_mr": True,
+                })
+                self.assertEqual(attention["level"], "watch")
+                self.assertEqual(
+                    attention["code"], "workflow_in_progress")
+
+    def test_blocking_discussion_metadata_is_action_before_lazy_comments(self):
+        for value, expected in (
+            (False, "unresolved_discussion"),
+            (True, "no_action"),
+            (None, "no_action"),
+        ):
+            with self.subTest(blocking_discussions_resolved=value):
+                attention = bp.derive_attention({
+                    "platform_status": "applied",
+                    "mr_state": "merged",
+                    "has_mr": True,
+                    "blocking_discussions_resolved": value,
+                    "comments": [],
+                })
+                self.assertEqual(attention["code"], expected)
+                self.assertEqual(
+                    attention["level"],
+                    "action" if value is False else "done",
+                )
+
+
+class TestCancellation(unittest.TestCase):
+
+    def test_pre_cancelled_history_does_not_start_request(self):
+        cancel = threading.Event()
+        cancel.set()
+        get_fn = mock.Mock()
+
+        with self.assertRaises(bp.SyncCancelled):
+            bp.fetch_all_history(
+                "http://platform", get_fn=get_fn, cancel_event=cancel)
+
+        get_fn.assert_not_called()
+
+    def test_cancellation_between_pages_stops_pagination(self):
+        cancel = threading.Event()
+        calls = []
+
+        def fake_get(_url, params):
+            calls.append(params["page"])
+            cancel.set()
+            return {
+                "submissions": [
+                    {"submission_id": f"s-{index}"}
+                    for index in range(100)
+                ],
+                "total_submissions": 200,
+            }
+
+        with self.assertRaises(bp.SyncCancelled):
+            bp.fetch_all_history(
+                "http://platform", get_fn=fake_get,
+                cancel_event=cancel)
+
+        self.assertEqual(calls, [1])
+
+    def test_batch_cancellation_does_not_start_remaining_rows(self):
+        cancel = threading.Event()
+
+        class CancelAfterFirstClient:
+            def __init__(self):
+                self.calls = []
+
+            def has_token(self):
+                return True
+
+            def get_merge_request(
+                    self, project, iid, force_refresh=False):
+                self.calls.append((project, iid, force_refresh))
+                cancel.set()
+                return {
+                    "iid": iid,
+                    "state": "opened",
+                    "web_url": (
+                        f"https://git/{project}/-/merge_requests/{iid}"
+                    ),
+                }
+
+        client = CancelAfterFirstClient()
+        rows = [
+            {
+                "submission_id": f"s-{iid}",
+                "project_id": "common/uns",
+                "mr_iid": iid,
+                "mr_url": (
+                    "https://git/common/uns/-/merge_requests/"
+                    f"{iid}"
+                ),
+            }
+            for iid in range(1, 21)
+        ]
+
+        with self.assertRaises(bp.SyncCancelled):
+            bp.enrich_submissions(
+                rows, client, max_workers=1, cancel_event=cancel)
+
+        self.assertEqual(
+            [iid for _project, iid, _force in client.calls], [1])
+
+    def test_sync_cancellation_never_falls_back_to_cache(self):
+        cancel = threading.Event()
+        cancel.set()
+        with (
+            mock.patch.object(bp, "load_cache") as load_cache,
+            mock.patch.object(bp, "save_cache") as save_cache,
+        ):
+            result = bp.sync_panel(
+                "http://platform",
+                get_fn=mock.Mock(),
+                cancel_event=cancel,
+            )
+
+        self.assertEqual(result["source"], "cancelled")
+        self.assertFalse(result["ok"])
+        load_cache.assert_not_called()
+        save_cache.assert_not_called()
 
 
 if __name__ == "__main__":
