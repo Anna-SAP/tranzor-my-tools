@@ -800,6 +800,7 @@ def sync_panel(
             "error": "",
             "cache_error": "",
         }
+        _raise_if_cancelled(cancel_event)
         try:
             save_cache(result, cache_path)
         except Exception as exc:
