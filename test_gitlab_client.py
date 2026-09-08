@@ -334,6 +334,73 @@ class TestGetMergeRequest(unittest.TestCase):
         self.assertEqual(len(session.calls), 2)
 
 
+class _PagedSession:
+    """Serve one payload per requested page for pagination assertions."""
+
+    def __init__(self, pages, status_code=200):
+        self.pages = list(pages)
+        self.status_code = status_code
+        self.calls = []
+        self.request_kwargs = []
+        self.headers = {}
+
+    def get(self, url, **kwargs):
+        self.calls.append(url)
+        self.request_kwargs.append(kwargs)
+        page = int((kwargs.get("params") or {}).get("page", 1))
+        payload = self.pages[page - 1] if page <= len(self.pages) else []
+        return _FakeResponse(payload, self.status_code)
+
+
+class TestListMrDiscussions(unittest.TestCase):
+
+    def test_url_encodes_project_and_paginates(self):
+        session = _PagedSession([
+            [{"id": "d1", "notes": []}],
+            [{"id": "d2", "notes": []}],
+            [],
+        ])
+        client = _make_client_with_session(session)
+
+        rows = client.list_mr_discussions(
+            "common/uns", 42, per_page=1, max_pages=5)
+
+        self.assertEqual([row["id"] for row in rows], ["d1", "d2"])
+        self.assertEqual(len(session.calls), 3)
+        self.assertIn(
+            "/api/v4/projects/common%2Funs/merge_requests/42/discussions",
+            session.calls[0],
+        )
+        self.assertEqual(session.request_kwargs[1]["params"]["page"], 2)
+
+    def test_caches_and_force_refreshes(self):
+        session = _FakeSession([{"id": "old"}])
+        client = _make_client_with_session(session)
+
+        self.assertEqual(
+            client.list_mr_discussions("p", 1)[0]["id"], "old")
+        session._payload = [{"id": "new"}]
+        self.assertEqual(
+            client.list_mr_discussions("p", 1)[0]["id"], "old")
+        self.assertEqual(len(session.calls), 1)
+
+        fresh = client.list_mr_discussions(
+            "p", 1, force_refresh=True)
+        self.assertEqual(fresh[0]["id"], "new")
+        self.assertEqual(len(session.calls), 2)
+
+    def test_http_error_propagates(self):
+        client = _make_client_with_session(
+            _FakeSession([], status_code=403))
+        with self.assertRaises(requests.HTTPError):
+            client.list_mr_discussions("p", 1)
+
+    def test_rejects_non_list_payload(self):
+        client = _make_client_with_session(_FakeSession({"notes": []}))
+        with self.assertRaises(ValueError):
+            client.list_mr_discussions("p", 1)
+
+
 class TestFetchMrLabels(unittest.TestCase):
 
     def test_extracts_labels_list(self):
