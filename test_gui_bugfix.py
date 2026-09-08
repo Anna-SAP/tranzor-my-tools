@@ -397,5 +397,94 @@ class TestLatestTaskRunner(unittest.TestCase):
             runner.stop()
 
 
+
+class TestBugFixFinalGuards(unittest.TestCase):
+
+    def test_constructor_failure_does_not_start_comment_workers(self):
+        with (
+            mock.patch.object(
+                gui.BugFixTab, "_build",
+                side_effect=RuntimeError("build failed"),
+            ),
+            mock.patch.object(gui, "_LatestTaskRunner") as runner,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "build failed"):
+                gui.BugFixTab(None, None)
+
+        runner.assert_not_called()
+
+    def test_stopped_tab_ignores_already_queued_comment_callback(self):
+        tab = object.__new__(gui.BugFixTab)
+        tab._stopped = True
+        tab._comment_loading = {"A"}
+        tab._data_generation = 1
+        original = [{"submission_id": "A", "mr_state": "opened"}]
+        tab._all_rows = original
+        tab._apply_filters = mock.Mock()
+
+        tab._apply_comment_result(
+            "A",
+            {"submission_id": "A", "mr_state": "merged"},
+            generation=1,
+        )
+
+        self.assertIs(tab._all_rows, original)
+        self.assertEqual(tab._all_rows[0]["mr_state"], "opened")
+        tab._apply_filters.assert_not_called()
+
+    def test_chinese_workflow_options_use_localized_status_labels(self):
+        tab = object.__new__(gui.BugFixTab)
+        tab._t = lambda key: gui.STRINGS["zh"][key]
+        tab._all_rows = [
+            {"platform_status": "all_applying"},
+            {"platform_status": "partially_applied"},
+        ]
+        tab._last_result = {
+            "available_statuses": [
+                "All Applying", "Partially Applied", "Not Merged"
+            ]
+        }
+
+        options = dict(tab._workflow_options())
+
+        self.assertEqual(options["all_applying"], "应用中")
+        self.assertEqual(options["partially_applied"], "部分应用")
+        self.assertEqual(options["not_merged"], "未合并")
+
+    def test_chinese_comment_reason_codes_render_localized_badges(self):
+        tab = object.__new__(gui.BugFixTab)
+        tab._t = lambda key: gui.STRINGS["zh"][key]
+        captured = []
+        tab._set_detail = captured.append
+        tab._show_detail({
+            "submission_id": "A",
+            "has_mr": True,
+            "mr_iid": 1,
+            "mr_state": "opened",
+            "platform_status": "applied",
+            "attention": {
+                "code": "open_mr",
+                "reason": "Open MR",
+            },
+            "comments_loaded": True,
+            "comments": [
+                {
+                    "author": "Reviewer",
+                    "reason": "action requested",
+                    "body": "Please fix",
+                },
+                {
+                    "author": "Lead",
+                    "reason": "recent human comment",
+                    "body": "FYI",
+                },
+            ],
+            "records": [],
+        })
+
+        self.assertIn("[需处理]", captured[0])
+        self.assertIn("[近期评论]", captured[0])
+
+
 if __name__ == "__main__":
     unittest.main()
