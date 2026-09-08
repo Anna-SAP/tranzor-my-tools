@@ -1900,6 +1900,7 @@ class ExportApp:
         self.bf_tab = None
         self._bf_tab_index = None
         self._bf_tab_initialized = False
+        tab_bf = None
         if _bf_tab_mod is not None:
             try:
                 tab_bf = ttk.Frame(self.notebook, style="App.TFrame")
@@ -1909,6 +1910,15 @@ class ExportApp:
             except Exception as _e:
                 print(f"[BugFix tab] init failed: {_e}")
                 self.bf_tab = None
+                if tab_bf is not None:
+                    try:
+                        self.notebook.forget(tab_bf)
+                    except Exception:
+                        pass
+                    try:
+                        tab_bf.destroy()
+                    except Exception:
+                        pass
         _boot_mark("tab_bugfix")
 
         # ═══════════════════════════════════════════
