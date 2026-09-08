@@ -9,7 +9,7 @@ from __future__ import annotations
 import copy
 import threading
 import tkinter as tk
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import CancelledError
 import webbrowser
 from tkinter import ttk
 from typing import Any
@@ -331,6 +331,61 @@ def _display_time(value: Any) -> str:
         return str(value)
 
 
+class _LatestTaskRunner:
+    """Two daemon workers with at most one not-yet-started selected-row job."""
+
+    def __init__(self, *, max_workers, cancel_event):
+        self._condition = threading.Condition()
+        self._pending = None
+        self._stopped = False
+        self._cancel_event = cancel_event
+        self._threads = []
+        for number in range(max(1, int(max_workers or 1))):
+            thread = threading.Thread(
+                target=self._worker,
+                daemon=True,
+                name=f"bugfix-comments-{number + 1}",
+            )
+            self._threads.append(thread)
+            thread.start()
+
+    def submit_latest(self, key, callback):
+        with self._condition:
+            if self._stopped:
+                raise RuntimeError("BugFix comment runner is stopped")
+            replaced = self._pending[0] if self._pending else ""
+            self._pending = (key, callback)
+            self._condition.notify()
+            return replaced
+
+    def _worker(self):
+        while True:
+            with self._condition:
+                while self._pending is None and not self._stopped:
+                    self._condition.wait()
+                if self._stopped or self._cancel_event.is_set():
+                    return
+                _key, callback = self._pending
+                self._pending = None
+            try:
+                callback()
+            except Exception:
+                # The callback converts request failures into row-local state.
+                # A final guard keeps an unexpected exception from killing the
+                # fixed worker and silently reducing future capacity.
+                pass
+
+    def stop(self):
+        with self._condition:
+            if self._stopped:
+                return ""
+            self._stopped = True
+            replaced = self._pending[0] if self._pending else ""
+            self._pending = None
+            self._condition.notify_all()
+            return replaced
+
+
 class BugFixTab:
     """Lazy, cached Bug Fix history + live GitLab tracking panel."""
 
@@ -350,9 +405,9 @@ class BugFixTab:
         self._auto_after_id = None
         self._filter_after_id = None
         self._cancel_event = threading.Event()
-        self._comment_executor = ThreadPoolExecutor(
+        self._comment_runner = _LatestTaskRunner(
             max_workers=_COMMENT_WORKERS,
-            thread_name_prefix="bugfix-comments",
+            cancel_event=self._cancel_event,
         )
         self._filter_raw = {"project": "", "workflow": "", "mr": ""}
         self._all_rows: list[dict[str, Any]] = []
@@ -941,17 +996,28 @@ class BugFixTab:
         snapshot = copy.deepcopy(row)
 
         def work():
-            client = gitlab_client.GitLabClient(
-                timeout=_GITLAB_TIMEOUT_SECONDS)
-            enriched = bf.enrich_submission(
-                snapshot, client, include_discussions=True,
-                force_refresh=True)
+            try:
+                client = gitlab_client.GitLabClient(
+                    timeout=_GITLAB_TIMEOUT_SECONDS)
+                enriched = bf.enrich_submission(
+                    snapshot, client, include_discussions=True,
+                    force_refresh=True, cancel_event=self._cancel_event)
+            except CancelledError:
+                return
+            except Exception as exc:
+                enriched = snapshot
+                enriched["comments_loaded"] = True
+                enriched["comments_error"] = (
+                    f"{type(exc).__name__}: {exc}")[:240]
             self._safe_after(
                 lambda: self._apply_comment_result(
                     sid, enriched, generation))
 
         try:
-            self._comment_executor.submit(work)
+            replaced = self._comment_runner.submit_latest(sid, work)
+            if replaced:
+                self._comment_loading.discard(replaced)
+                self._comment_attempted.discard(replaced)
         except RuntimeError as exc:
             failed = snapshot
             failed["comments_loaded"] = True
@@ -1179,9 +1245,12 @@ class BugFixTab:
     def stop(self):
         self._stopped = True
         self._cancel_event.set()
-        executor = getattr(self, "_comment_executor", None)
-        if executor is not None:
-            executor.shutdown(wait=False, cancel_futures=True)
+        runner = getattr(self, "_comment_runner", None)
+        if runner is not None:
+            replaced = runner.stop()
+            if replaced:
+                self._comment_loading.discard(replaced)
+                self._comment_attempted.discard(replaced)
         for after_id in (self._auto_after_id, self._filter_after_id):
             if after_id is not None:
                 try:
