@@ -32,7 +32,7 @@
 
 **Tranzor Helper** (internally *TranzorExporter*; GitLab repo `annasu-tranzor-helper`) is a **zero-install, zero-dependency desktop application** that acts as a personal **quality-assurance & export cockpit** for the people who run localization on RingCentral's **Tranzor** platform.
 
-Tranzor is RingCentral's in-house localization platform — a browser front-end over an XTM-style translation-management system that produces machine + human translations across ~18 locales. It is owned by another team and ships on a slow release cadence, but a localization reviewer needs **safeguards and exports today**. Tranzor Helper fills that gap: a single double-clickable executable opens one window with **16 tabs** that let a non-technical language professional:
+Tranzor is RingCentral's in-house localization platform — a browser front-end over an XTM-style translation-management system that produces machine + human translations across ~18 locales. It is owned by another team and ships on a slow release cadence, but a localization reviewer needs **safeguards and exports today**. Tranzor Helper fills that gap: a single double-clickable executable opens one window with **17 tabs** that let a non-technical language professional:
 
 - 📤 **export** translations to HTML / Excel / TMX (XTM-compatible) without ever touching a terminal;
 - 🔎 **search** every translation string the platform has ever produced — instantly, offline, from a local index;
@@ -100,7 +100,7 @@ Tranzor Helper parses this key into structured columns so it can give a reviewer
 
 ## Feature tour
 
-The window is a `ttk.Notebook`. The first three tabs are core; the remaining thirteen are **optional, lazy-loaded, fail-safe** tabs (a broken tab degrades to a missing tab — it never crashes the app).
+The window is a `ttk.Notebook`. The first three tabs are core; the remaining fourteen are **optional, lazy-loaded, fail-safe** tabs (a broken tab degrades to a missing tab — it never crashes the app).
 
 | Tab | What it does | Why it matters |
 |---|---|---|
@@ -114,6 +114,7 @@ The window is a `ttk.Notebook`. The first three tabs are core; the remaining thi
 | 🔎 **Scan Tasks** | Lists "Missing Translation Scan" jobs (with the same **en-US Strings** count as MR Pipeline); filter and export coverage results. | Track coverage sweeps separately from the MR pipeline. |
 | 🛡️ **Term Watchtower** | Import an approved glossary, run a **deterministic** (non-LLM) terminology scan, flag every violation with expected-vs-actual + full context, export evidence. | Catch approved-term violations and hand the dev team proof. |
 | 🔬 **TM & Context Insight** | Visualizes *where* a translation came from (TM / ICE / cache / LLM / human) and whether Context Service attached context. | Lets non-engineers diagnose bad MT output. |
+| 📚 **TM Panel** | Searches the three TM stores the platform does not show together: live ICE match, Shared TM pipeline provenance, and Tranzor records. Default **Ignore hash** drops the path hash so every identity of the same logical key appears, grouped as newest-record vs other hashes. | Find historical translations after a path-root / extension migration; the Dashboard Search Translations page only sees one hash. |
 | 🧬 **OPUS ID Monitor** | Local SQLite cache of every OPUS ID; summary cards, per-project buckets, 30-day new-ID chart. | "Anytime, anywhere" pulse of translation volume. |
 | 🩺 **Tranzor Checks** | Full-task check status + sortable **error-keyword aggregation**, drill-down to issue rows. | Group similar issues; classify terminology / format errors. |
 | 🎯 **Review Worklist** | Compresses 70+ MRs into ~5–10 rows ranked by **merge urgency × language priority**, with 🔴/🟡/🟢 risk dots (issue counts shown alongside). | The Language Lead's single daily entry point. |
@@ -190,7 +191,7 @@ powershell -File build_windows.ps1          # → dist/TranzorExporter.exe
 annasu-tranzor-helper/
 ├── export_gui.py                 # ① main entry — root window, notebook, boot, auth, bridge
 ├── gui_tabs.py                   # core tabs: MR Pipeline + Quality Overview
-├── gui_tab_*.py                  # 13 optional tabs, one file each (fail-safe)
+├── gui_tab_*.py                  # 14 optional tabs, one file each (fail-safe)
 ├── advanced_filter.py            # shared filter engine (UI + export, kept in sync by tests)
 │
 ├── export_mr_pipeline.py         # ② Tranzor MR-pipeline API client  (mr_api)
@@ -201,10 +202,10 @@ annasu-tranzor-helper/
 ├── tranzor_bridge.py             #    loopback HTTP bridge to the browser
 ├── opus_id_monitor.py            #    local SQLite index + incremental sync
 ├── opus_search.py / repo_corpus.py  # search service + GitLab full-baseline ingest
-├── same_origin.py / terminology_watchtower.py / ...  # pure-logic engines (no tkinter)
+├── same_origin.py / tm_panel.py / terminology_watchtower.py / ...  # pure-logic engines (no tkinter)
 │
 ├── userscript/                   # 3 Tampermonkey userscripts (the browser side of the Bridge)
-├── test_*.py                     # 44 unit/regression test files (mostly stdlib unittest)
+├── test_*.py                     # 45 unit/regression test files (mostly stdlib unittest)
 ├── .github/workflows/            # build-windows.yml · build-mac.yml (CI builds binaries)
 ├── *.spec / build_*.{ps1,command}# PyInstaller packaging
 ├── products.json                 # product → GitLab-repo registry (drives the OPUS index)
