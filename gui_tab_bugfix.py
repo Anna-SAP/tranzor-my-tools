@@ -718,6 +718,8 @@ class BugFixTab:
             and not row.get("comments_loaded")
             and row.get("submission_id") not in self._comment_loading
             and row.get("submission_id") not in self._comment_attempted
+            and not self._syncing
+            and not self._cache_loading
         ):
             self._load_selected_comments(row)
 
@@ -816,6 +818,9 @@ class BugFixTab:
                           "──────────────────────────"])
             if comments_loading:
                 lines.append(self._t("bf_comments_loading"))
+            elif row.get("comments_error"):
+                lines.append(self._t("bf_comments_error").format(
+                    error=row.get("comments_error")))
             elif row.get("comments_loaded"):
                 comments = row.get("comments") or []
                 if not comments:
@@ -830,9 +835,6 @@ class BugFixTab:
                         str(comment.get("body") or ""),
                         "",
                     ])
-            elif row.get("comments_error"):
-                lines.append(self._t("bf_comments_error").format(
-                    error=row.get("comments_error")))
             elif row.get("mr_sync_error"):
                 lines.append(self._t("bf_comments_error").format(
                     error=row.get("mr_sync_error")))
