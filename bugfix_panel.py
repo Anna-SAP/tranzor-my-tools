@@ -127,7 +127,9 @@ def fetch_all_history(
         params = dict(common)
         params.update({"page": page, "page_size": size})
         payload = _response_json(get_fn(_history_url(base_url), params=params))
-        batch = payload.get("submissions") or []
+        batch = payload.get("submissions")
+        if batch is None:
+            batch = []
         if not isinstance(batch, list):
             raise ValueError("Bug Fix history submissions must be a list")
         raw_statuses = payload.get("available_statuses") or []
@@ -533,6 +535,34 @@ def filter_submissions(
     return out
 
 
+_SENSITIVE_CACHE_KEYS = {
+    "authorization", "password", "passwd", "secret", "access_token",
+    "api_token", "gitlab_token", "private_token",
+}
+
+
+def _scrub_cache_value(value: Any) -> Any:
+    """Recursively remove credential-shaped fields from persisted snapshots."""
+    if isinstance(value, Mapping):
+        clean = {}
+        for key, item in value.items():
+            normalized = _normal(key)
+            if (
+                normalized in _SENSITIVE_CACHE_KEYS
+                or normalized.endswith("_token")
+                or normalized.endswith("_password")
+                or normalized.endswith("_secret")
+            ):
+                continue
+            clean[str(key)] = _scrub_cache_value(item)
+        return clean
+    if isinstance(value, list):
+        return [_scrub_cache_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [_scrub_cache_value(item) for item in value]
+    return value
+
+
 def _cache_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
     rows = []
     for raw in payload.get("submissions") or []:
@@ -541,7 +571,7 @@ def _cache_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
         # not persisted. The cache stores no credentials or request headers.
         row.pop("comments", None)
         row["comments_loaded"] = False
-        rows.append(row)
+        rows.append(_scrub_cache_value(row))
     return {
         "schema_version": CACHE_SCHEMA_VERSION,
         "saved_at": _utc_now(),
