@@ -115,6 +115,7 @@ STRINGS = {
         "bf_state_open": "Open",
         "bf_state_merged": "Merged",
         "bf_state_closed": "Closed",
+        "bf_state_locked": "Locked",
         "bf_state_direct": "Direct / no MR",
         "bf_state_unknown": "Unknown",
         "bf_status_queued": "Queued",
@@ -132,6 +133,7 @@ STRINGS = {
         "bf_attn_mr_closed": "MR closed without merge",
         "bf_attn_mr_conflicts": "MR has conflicts",
         "bf_attn_unresolved": "Unresolved MR discussion",
+        "bf_attn_locked_mr": "Locked MR",
         "bf_attn_draft_review": "Draft MR needs review",
         "bf_attn_open_mr": "Open MR",
         "bf_attn_in_progress": "Bug Fix is still in progress",
@@ -234,6 +236,7 @@ STRINGS = {
         "bf_state_open": "开启",
         "bf_state_merged": "已合并",
         "bf_state_closed": "已关闭",
+        "bf_state_locked": "已锁定",
         "bf_state_direct": "直写 / 无 MR",
         "bf_state_unknown": "未知",
         "bf_status_queued": "已排队",
@@ -251,6 +254,7 @@ STRINGS = {
         "bf_attn_mr_closed": "MR 未合并即关闭",
         "bf_attn_mr_conflicts": "MR 存在冲突",
         "bf_attn_unresolved": "MR discussion 尚未解决",
+        "bf_attn_locked_mr": "MR 已锁定",
         "bf_attn_draft_review": "草稿 MR 待评审",
         "bf_attn_open_mr": "MR 待评审",
         "bf_attn_in_progress": "Bug Fix 仍在处理中",
@@ -265,12 +269,14 @@ STRINGS = {
 }
 
 
-_MR_FILTERS = ("", "opened", "merged", "closed", "none", "unknown")
+_MR_FILTERS = (
+    "", "opened", "merged", "closed", "locked", "none", "unknown")
 _MR_STATE_KEYS = {
     "opened": "bf_state_open",
     "open": "bf_state_open",
     "merged": "bf_state_merged",
     "closed": "bf_state_closed",
+    "locked": "bf_state_locked",
     "none": "bf_state_direct",
     "unknown": "bf_state_unknown",
 }
@@ -297,6 +303,7 @@ _ATTENTION_KEYS = {
     "mr_closed": "bf_attn_mr_closed",
     "mr_conflicts": "bf_attn_mr_conflicts",
     "unresolved_discussion": "bf_attn_unresolved",
+    "locked_mr": "bf_attn_locked_mr",
     "draft_review": "bf_attn_draft_review",
     "open_mr": "bf_attn_open_mr",
     "workflow_in_progress": "bf_attn_in_progress",
