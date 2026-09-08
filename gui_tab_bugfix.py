@@ -183,6 +183,7 @@ class BugFixTab:
         self._all_rows: list[dict[str, Any]] = []
         self._row_by_iid: dict[str, dict[str, Any]] = {}
         self._comment_loading: set[str] = set()
+        self._comment_attempted: set[str] = set()
         self._gitlab = gitlab_client.GitLabClient()
         self._last_result: dict[str, Any] = {}
         self._build(parent)
@@ -330,6 +331,7 @@ class BugFixTab:
         self.btn_open_mr = self._button(
             actions, command=self._open_selected_mr, accent=True)
         self.btn_open_mr.pack(side="right")
+        self.btn_open_mr.configure(state="disabled")
         self.detail = tk.Text(
             right, wrap="word", bg="#0a0a1a", fg="#e4e7ef",
             insertbackground="#fff", relief="flat",
@@ -498,6 +500,7 @@ class BugFixTab:
         if self._syncing or self._stopped:
             return
         self._syncing = True
+        self._comment_attempted.clear()
         self.btn_refresh.configure(state="disabled")
         self._busy(self._t("bf_syncing"))
 
@@ -678,6 +681,7 @@ class BugFixTab:
             row.get("has_mr")
             and not row.get("comments_loaded")
             and row.get("submission_id") not in self._comment_loading
+            and row.get("submission_id") not in self._comment_attempted
         ):
             self._load_selected_comments(row)
 
@@ -686,6 +690,7 @@ class BugFixTab:
         if not sid:
             return
         self._comment_loading.add(sid)
+        self._comment_attempted.add(sid)
         self._show_detail(row, comments_loading=True)
 
         def work():
