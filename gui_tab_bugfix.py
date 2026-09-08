@@ -305,9 +305,9 @@ _ATTENTION_KEYS = {
     "no_action": "bf_attn_no_action",
 }
 _COMMENT_REASON_KEYS = {
-    "action request": "bf_comment_action",
+    "action requested": "bf_comment_action",
     "approval": "bf_comment_approval",
-    "recent comment": "bf_comment_recent",
+    "recent human comment": "bf_comment_recent",
 }
 _AUTO_REFRESH_MS = 5 * 60 * 1000
 _MAX_DETAIL_RECORDS = 200
@@ -405,10 +405,7 @@ class BugFixTab:
         self._auto_after_id = None
         self._filter_after_id = None
         self._cancel_event = threading.Event()
-        self._comment_runner = _LatestTaskRunner(
-            max_workers=_COMMENT_WORKERS,
-            cancel_event=self._cancel_event,
-        )
+        self._comment_runner = None
         self._filter_raw = {"project": "", "workflow": "", "mr": ""}
         self._all_rows: list[dict[str, Any]] = []
         self._row_by_iid: dict[str, dict[str, Any]] = {}
@@ -417,6 +414,12 @@ class BugFixTab:
         self._last_result: dict[str, Any] = {}
         self._build(parent)
         self.refresh_text()
+        # Start background workers only after construction succeeds; otherwise
+        # an optional-tab build error would leave orphan condition waiters.
+        self._comment_runner = _LatestTaskRunner(
+            max_workers=_COMMENT_WORKERS,
+            cancel_event=self._cancel_event,
+        )
 
     def _t(self, key):
         return self.app._t(key)
@@ -642,7 +645,12 @@ class BugFixTab:
             if item
         )
         return [("", self._t("bf_all"))] + [
-            (item, item.replace("_", " ").title())
+            (
+                item,
+                self._t(_PLATFORM_STATUS_KEYS[item])
+                if item in _PLATFORM_STATUS_KEYS
+                else item.replace("_", " ").title(),
+            )
             for item in sorted(values)
         ]
 
