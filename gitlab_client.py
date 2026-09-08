@@ -18,6 +18,7 @@ commit diff 中恢复 Language Lead BATCH_FIX 的 pre-fix 原译文。
 import json
 import os
 import re
+from concurrent.futures import CancelledError
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
@@ -349,7 +350,8 @@ class GitLabClient:
         return data
 
     def list_mr_discussions(self, project_id, mr_iid, *, per_page=100,
-                            max_pages=3, force_refresh=False):
+                            max_pages=3, force_refresh=False,
+                            cancel_event=None):
         """Return GitLab MR discussions, walking bounded API pages.
 
         The BugFix panel uses discussions rather than plain notes so an
@@ -358,6 +360,11 @@ class GitLabClient:
         cache. HTTP and payload errors deliberately bubble up so the caller can
         show a precise partial-sync warning without hiding Platform records.
         """
+        def raise_if_cancelled():
+            if cancel_event is not None and cancel_event.is_set():
+                raise CancelledError("GitLab discussions request cancelled")
+
+        raise_if_cancelled()
         page_size = max(1, min(int(per_page or 100), 100))
         page_cap = max(1, int(max_pages or 1))
         key = (str(project_id), int(mr_iid), page_size, page_cap)
@@ -369,11 +376,13 @@ class GitLabClient:
                f"{int(mr_iid)}/discussions")
         out = []
         for page in range(1, page_cap + 1):
+            raise_if_cancelled()
             resp = self._session.get(
                 url,
                 params={"per_page": page_size, "page": page},
                 timeout=self.timeout,
             )
+            raise_if_cancelled()
             resp.raise_for_status()
             batch = resp.json()
             if not isinstance(batch, list):
@@ -382,6 +391,7 @@ class GitLabClient:
             if len(batch) < page_size:
                 break
 
+        raise_if_cancelled()
         self._mr_discussions_cache[key] = list(out)
         return out
 
