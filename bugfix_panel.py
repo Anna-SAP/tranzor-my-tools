@@ -433,7 +433,13 @@ def enrich_submission(
             "mr_sync_error": "",
             "mr_synced_at": _utc_now(),
         })
-        if include_discussions:
+    except Exception as exc:  # one inaccessible MR must not hide history
+        row["mr_sync_error"] = f"{type(exc).__name__}: {exc}"[:240]
+        row["attention"] = derive_attention(row)
+        return row
+
+    if include_discussions:
+        try:
             discussions = client.list_mr_discussions(
                 row["mr_project_id"], row["mr_iid"],
                 per_page=COMMENTS_PER_PAGE,
@@ -442,9 +448,15 @@ def enrich_submission(
             )
             row["comments"] = classify_important_comments(discussions)
             row["comments_loaded"] = True
+            row["comments_error"] = ""
             row["discussion_count"] = len(discussions)
-    except Exception as exc:  # one inaccessible MR must not hide history
-        row["mr_sync_error"] = f"{type(exc).__name__}: {exc}"[:240]
+        except Exception as exc:
+            # The MR metadata remains live even when its discussions endpoint
+            # is unavailable. Mark the selected-row attempt as complete so the
+            # UI renders an error instead of an endless loading state.
+            row["comments_loaded"] = True
+            row["comments_error"] = (
+                f"{type(exc).__name__}: {exc}")[:240]
 
     row["attention"] = derive_attention(row)
     return row
@@ -671,8 +683,16 @@ def sync_panel(
             "gitlab_error_count": sum(
                 bool(row.get("mr_sync_error")) for row in rows),
             "error": "",
+            "cache_error": "",
         }
-        save_cache(result, cache_path)
+        try:
+            save_cache(result, cache_path)
+        except Exception as exc:
+            # Cache persistence is an offline-start optimization, not part of
+            # the live synchronization contract. Never throw away fresh data
+            # just because the snapshot could not be written.
+            result["cache_error"] = (
+                f"{type(exc).__name__}: {exc}")[:300]
         return result
     except Exception as exc:
         cached = load_cache(cache_path)
