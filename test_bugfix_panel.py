@@ -555,6 +555,75 @@ class TestCancellation(unittest.TestCase):
         load_cache.assert_not_called()
         save_cache.assert_not_called()
 
+    def test_blocked_workers_are_daemon_and_cancel_returns_promptly(self):
+        cancel = threading.Event()
+        release = threading.Event()
+        two_started = threading.Event()
+        caller_done = threading.Event()
+        calls = []
+        outcome = []
+
+        class BlockingClient:
+            def has_token(self):
+                return True
+
+            def get_merge_request(
+                    self, project, iid, force_refresh=False):
+                calls.append(iid)
+                if len(calls) == 2:
+                    two_started.set()
+                release.wait(2)
+                return {
+                    "iid": iid,
+                    "state": "opened",
+                    "web_url": (
+                        f"https://git/{project}/-/merge_requests/{iid}"
+                    ),
+                }
+
+        rows = [
+            {
+                "submission_id": f"s-{iid}",
+                "project_id": "common/uns",
+                "mr_iid": iid,
+                "mr_url": (
+                    "https://git/common/uns/-/merge_requests/"
+                    f"{iid}"
+                ),
+            }
+            for iid in range(1, 21)
+        ]
+
+        def call_batch():
+            try:
+                bp.enrich_submissions(
+                    rows, BlockingClient(), max_workers=2,
+                    cancel_event=cancel)
+            except bp.SyncCancelled:
+                outcome.append("cancelled")
+            finally:
+                caller_done.set()
+
+        caller = threading.Thread(target=call_batch, daemon=True)
+        caller.start()
+        try:
+            self.assertTrue(two_started.wait(1))
+            workers = [
+                thread for thread in threading.enumerate()
+                if thread.name.startswith("bugfix-mr-")
+            ]
+            self.assertEqual(len(workers), 2)
+            self.assertTrue(all(thread.daemon for thread in workers))
+
+            cancel.set()
+            self.assertTrue(caller_done.wait(0.5))
+            self.assertEqual(outcome, ["cancelled"])
+            self.assertEqual(sorted(calls), [1, 2])
+        finally:
+            cancel.set()
+            release.set()
+            caller.join(1)
+
 
 if __name__ == "__main__":
     unittest.main()
