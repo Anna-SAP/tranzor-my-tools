@@ -6,6 +6,7 @@ selected row. All network work runs off the tkinter thread.
 """
 from __future__ import annotations
 
+import copy
 import threading
 import tkinter as tk
 import webbrowser
@@ -51,6 +52,7 @@ STRINGS = {
             "live refresh failed: {error}"
         ),
         "bf_failed": "Refresh failed: {error}",
+        "bf_cache_error": "Snapshot was not saved: {error}",
         "bf_empty": "No Bug Fix submissions match these filters.",
         "bf_detail_placeholder": (
             "Select a submission to inspect its MR, important comments, "
@@ -108,6 +110,7 @@ STRINGS = {
             "实时刷新失败：{error}"
         ),
         "bf_failed": "刷新失败：{error}",
+        "bf_cache_error": "本地快照未保存：{error}",
         "bf_empty": "当前筛选条件下没有 Bug Fix 记录。",
         "bf_detail_placeholder": (
             "选中记录可查看 MR、重要 comments、告警和具体修复内容。"
@@ -177,7 +180,9 @@ class BugFixTab:
         self.app = app
         self._first_shown = False
         self._syncing = False
+        self._cache_loading = False
         self._stopped = False
+        self._data_generation = 0
         self._auto_after_id = None
         self._filter_after_id = None
         self._all_rows: list[dict[str, Any]] = []
@@ -483,8 +488,26 @@ class BugFixTab:
         if self._first_shown:
             return
         self._first_shown = True
+        self._cache_loading = True
+        self.btn_refresh.configure(state="disabled")
         self._busy(self._t("bf_loading_cache"))
-        cached = bf.load_cache()
+
+        def work():
+            try:
+                cached = bf.load_cache()
+            except Exception:
+                cached = None
+            self._safe_after(lambda: self._finish_initial_cache(cached))
+
+        threading.Thread(
+            target=work, daemon=True, name="bugfix-panel-cache").start()
+        self._schedule_auto_refresh()
+
+    def _finish_initial_cache(self, cached):
+        if self._stopped:
+            return
+        self._cache_loading = False
+        self.btn_refresh.configure(state="normal")
         if cached and cached.get("submissions"):
             cached.update({
                 "ok": True, "live_ok": False, "source": "cache",
@@ -494,19 +517,28 @@ class BugFixTab:
         else:
             self._idle(self._t("bf_ready"))
         self.refresh_live()
-        self._schedule_auto_refresh()
 
     def refresh_live(self):
-        if self._syncing or self._stopped:
+        if self._syncing or self._cache_loading or self._stopped:
             return
         self._syncing = True
+        self._data_generation += 1
+        self._comment_loading.clear()
         self._comment_attempted.clear()
         self.btn_refresh.configure(state="disabled")
         self._busy(self._t("bf_syncing"))
 
         def work():
-            result = bf.sync_panel(
-                self._base_url(), gitlab_client=self._gitlab)
+            try:
+                result = bf.sync_panel(
+                    self._base_url(), gitlab_client=self._gitlab)
+            except Exception as exc:
+                result = {
+                    "ok": False, "live_ok": False, "source": "none",
+                    "submissions": [], "total_submissions": 0,
+                    "available_statuses": [], "gitlab_error_count": 0,
+                    "error": f"{type(exc).__name__}: {exc}"[:300],
+                }
             self._safe_after(lambda: self._apply_sync_result(result))
 
         threading.Thread(
@@ -547,13 +579,17 @@ class BugFixTab:
                 error=self._t("bf_syncing"),
             ))
         elif result.get("live_ok"):
-            self._idle(self._t("bf_live").format(
+            message = self._t("bf_live").format(
                 shown=shown,
                 total=result.get("total_submissions") or len(self._all_rows),
                 pages=result.get("pages_fetched") or 0,
                 errors=result.get("gitlab_error_count") or 0,
                 time=_display_time(result.get("synced_at")),
-            ))
+            )
+            if result.get("cache_error"):
+                message += " · " + self._t("bf_cache_error").format(
+                    error=result.get("cache_error"))
+            self._idle(message)
         elif result.get("source") == "cache":
             self._idle(self._t("bf_cached").format(
                 shown=shown,
@@ -692,20 +728,26 @@ class BugFixTab:
         self._comment_loading.add(sid)
         self._comment_attempted.add(sid)
         self._show_detail(row, comments_loading=True)
+        generation = self._data_generation
+        snapshot = copy.deepcopy(row)
 
         def work():
             enriched = bf.enrich_submission(
-                row, self._gitlab, include_discussions=True,
+                snapshot, self._gitlab, include_discussions=True,
                 force_refresh=True)
             self._safe_after(
-                lambda: self._apply_comment_result(sid, enriched))
+                lambda: self._apply_comment_result(
+                    sid, enriched, generation))
 
         threading.Thread(
             target=work, daemon=True,
             name=f"bugfix-comments-{sid[:12]}").start()
 
-    def _apply_comment_result(self, sid, enriched):
+    def _apply_comment_result(self, sid, enriched, generation):
         self._comment_loading.discard(sid)
+        if generation != self._data_generation:
+            return
+        selected_sid = self._selected_submission_id()
         replaced = False
         for index, row in enumerate(self._all_rows):
             if str(row.get("submission_id") or "") == sid:
@@ -715,7 +757,9 @@ class BugFixTab:
         if not replaced:
             return
         self._all_rows = bf.stable_sort_submissions(self._all_rows)
-        self._apply_filters(select_submission=sid)
+        # A completed request for row A must never steal focus after the user
+        # has moved to row B. Preserve the current selection while refreshing.
+        self._apply_filters(select_submission=selected_sid)
 
     def _show_detail(self, row, comments_loading=False):
         attn = row.get("attention") or {}
@@ -786,6 +830,9 @@ class BugFixTab:
                         str(comment.get("body") or ""),
                         "",
                     ])
+            elif row.get("comments_error"):
+                lines.append(self._t("bf_comments_error").format(
+                    error=row.get("comments_error")))
             elif row.get("mr_sync_error"):
                 lines.append(self._t("bf_comments_error").format(
                     error=row.get("mr_sync_error")))
