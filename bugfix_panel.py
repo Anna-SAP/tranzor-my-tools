@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import os
 import re
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+import threading
+from concurrent.futures import CancelledError
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Mapping
 from urllib.parse import unquote, urlparse
@@ -27,7 +28,7 @@ CACHE_PATH = os.path.expanduser(
     "~/.tranzor_exporter/bugfix_panel_cache.json")
 
 
-class SyncCancelled(RuntimeError):
+class SyncCancelled(CancelledError):
     """Raised internally when the desktop panel is closing."""
 
 
@@ -400,32 +401,43 @@ def derive_attention(submission: Mapping[str, Any]) -> dict[str, Any]:
         or submission.get("create_error")
     ):
         return {"priority": 0, "level": "action",
+                "code": "workflow_failed",
                 "reason": "Bug Fix workflow failed"}
     if mr_state == "closed":
         return {"priority": 0, "level": "action",
+                "code": "mr_closed",
                 "reason": "MR closed without merge"}
     if submission.get("has_conflicts"):
         return {"priority": 0, "level": "action",
+                "code": "mr_conflicts",
                 "reason": "MR has conflicts"}
     if submission.get("blocking_discussions_resolved") is False:
         return {"priority": 0, "level": "action",
+                "code": "unresolved_discussion",
                 "reason": "Unresolved MR discussion"}
     if unresolved:
         return {"priority": 0, "level": "action",
                 "reason": "Unresolved MR discussion"}
     if mr_state in {"opened", "open"}:
-        reason = "Draft MR needs review" if submission.get("draft") else "Open MR"
-        return {"priority": 1, "level": "watch", "reason": reason}
+        draft = bool(submission.get("draft"))
+        reason = "Draft MR needs review" if draft else "Open MR"
+        return {"priority": 1, "level": "watch",
+                "code": "draft_review" if draft else "open_mr",
+                "reason": reason}
     if status in _IN_PROGRESS_PLATFORM_STATES:
         return {"priority": 1, "level": "watch",
+                "code": "workflow_in_progress",
                 "reason": "Bug Fix is still in progress"}
     if mr_state == "unknown" and submission.get("has_mr"):
         return {"priority": 2, "level": "unknown",
+                "code": "mr_unavailable",
                 "reason": "MR state unavailable"}
     if not submission.get("has_mr"):
         return {"priority": 3, "level": "direct",
+                "code": "direct_no_mr",
                 "reason": "Direct / no MR"}
-    return {"priority": 4, "level": "done", "reason": "No action detected"}
+    return {"priority": 4, "level": "done",
+            "code": "no_action", "reason": "No action detected"}
 
 
 def enrich_submission(
@@ -434,8 +446,10 @@ def enrich_submission(
     *,
     include_discussions: bool = False,
     force_refresh: bool = True,
+    cancel_event: Any = None,
 ) -> dict[str, Any]:
     """Add live GitLab metadata; a GitLab failure remains row-local."""
+    _raise_if_cancelled(cancel_event)
     row = normalize_submission(submission)
     if not row["has_mr"]:
         return row
@@ -446,10 +460,12 @@ def enrich_submission(
         return row
 
     try:
+        _raise_if_cancelled(cancel_event)
         mr = client.get_merge_request(
             row["mr_project_id"], row["mr_iid"],
             force_refresh=force_refresh,
         )
+        _raise_if_cancelled(cancel_event)
         if not isinstance(mr, Mapping):
             raise ValueError("GitLab MR response must be an object")
         state = _normal(mr.get("state")) or "unknown"
@@ -479,6 +495,8 @@ def enrich_submission(
             "mr_sync_error": "",
             "mr_synced_at": _utc_now(),
         })
+    except CancelledError:
+        raise
     except Exception as exc:  # one inaccessible MR must not hide history
         row["mr_sync_error"] = f"{type(exc).__name__}: {exc}"[:240]
         row["attention"] = derive_attention(row)
@@ -486,16 +504,21 @@ def enrich_submission(
 
     if include_discussions:
         try:
+            _raise_if_cancelled(cancel_event)
             discussions = client.list_mr_discussions(
                 row["mr_project_id"], row["mr_iid"],
                 per_page=COMMENTS_PER_PAGE,
                 max_pages=MAX_COMMENT_PAGES,
                 force_refresh=force_refresh,
+                cancel_event=cancel_event,
             )
+            _raise_if_cancelled(cancel_event)
             row["comments"] = classify_important_comments(discussions)
             row["comments_loaded"] = True
             row["comments_error"] = ""
             row["discussion_count"] = len(discussions)
+        except CancelledError:
+            raise
         except Exception as exc:
             # The MR metadata remains live even when its discussions endpoint
             # is unavailable. Mark the selected-row attempt as complete so the
@@ -504,6 +527,7 @@ def enrich_submission(
             row["comments_error"] = (
                 f"{type(exc).__name__}: {exc}")[:240]
 
+    _raise_if_cancelled(cancel_event)
     row["attention"] = derive_attention(row)
     return row
 
@@ -516,11 +540,11 @@ def enrich_submissions(
     force_refresh: bool = True,
     cancel_event: Any = None,
 ) -> list[dict[str, Any]]:
-    """Fetch live MR state concurrently while preserving input order.
+    """Fetch live MR state on bounded daemon workers, preserving input order.
 
-    At most max_workers futures exist at once. When the desktop window closes,
-    queued work is never started and running HTTP calls are left to their own
-    bounded timeout instead of keeping the whole MR queue alive.
+    Workers claim one row at a time instead of pre-queuing the entire history.
+    Cancellation stops new requests immediately. Any already-running HTTP call
+    remains on a daemon thread, so it cannot hold the EXE open during shutdown.
     """
     rows = [normalize_submission(item) for item in submissions]
     indices = [i for i, row in enumerate(rows) if row["has_mr"]]
@@ -532,59 +556,61 @@ def enrich_submissions(
         for index in indices:
             _raise_if_cancelled(cancel_event)
             rows[index] = enrich_submission(
-                rows[index], client, force_refresh=force_refresh)
+                rows[index], client, force_refresh=force_refresh,
+                cancel_event=cancel_event)
         return rows
 
     workers = max(1, min(int(max_workers or 1), 8, len(indices)))
-    pool = ThreadPoolExecutor(
-        max_workers=workers, thread_name_prefix="bugfix-mr")
-    pending: dict[Any, int] = {}
-    index_iter = iter(indices)
-    cancelled = False
+    lock = threading.Lock()
+    all_done = threading.Event()
+    state = {"next": 0, "running": workers}
 
-    def submit_next() -> bool:
+    def worker() -> None:
         try:
-            index = next(index_iter)
-        except StopIteration:
-            return False
-        future = pool.submit(
-            enrich_submission, rows[index], client,
-            include_discussions=False, force_refresh=force_refresh,
-        )
-        pending[future] = index
-        return True
-
-    try:
-        for _unused in range(workers):
-            _raise_if_cancelled(cancel_event)
-            if not submit_next():
-                break
-
-        while pending:
-            _raise_if_cancelled(cancel_event)
-            done, _not_done = wait(
-                tuple(pending), timeout=0.1, return_when=FIRST_COMPLETED)
-            if not done:
-                continue
-            for future in done:
-                index = pending.pop(future)
-                try:
-                    rows[index] = future.result()
-                except Exception as exc:
-                    rows[index]["mr_sync_error"] = (
-                        f"{type(exc).__name__}: {exc}")[:240]
-                    rows[index]["attention"] = derive_attention(rows[index])
+            while True:
                 _raise_if_cancelled(cancel_event)
-                submit_next()
-        return rows
-    except SyncCancelled:
-        cancelled = True
-        raise
-    finally:
-        if cancelled:
-            for future in pending:
-                future.cancel()
-        pool.shutdown(wait=not cancelled, cancel_futures=cancelled)
+                with lock:
+                    position = state["next"]
+                    if position >= len(indices):
+                        return
+                    state["next"] = position + 1
+                    index = indices[position]
+                _raise_if_cancelled(cancel_event)
+                try:
+                    enriched = enrich_submission(
+                        rows[index], client,
+                        include_discussions=False,
+                        force_refresh=force_refresh,
+                        cancel_event=cancel_event,
+                    )
+                except CancelledError:
+                    return
+                except Exception as exc:
+                    enriched = dict(rows[index])
+                    enriched["mr_sync_error"] = (
+                        f"{type(exc).__name__}: {exc}")[:240]
+                    enriched["attention"] = derive_attention(enriched)
+                _raise_if_cancelled(cancel_event)
+                rows[index] = enriched
+        except CancelledError:
+            return
+        finally:
+            with lock:
+                state["running"] -= 1
+                if state["running"] == 0:
+                    all_done.set()
+
+    for worker_number in range(workers):
+        threading.Thread(
+            target=worker,
+            daemon=True,
+            name=f"bugfix-mr-{worker_number + 1}",
+        ).start()
+
+    while not all_done.wait(0.05):
+        _raise_if_cancelled(cancel_event)
+    _raise_if_cancelled(cancel_event)
+    return rows
 
 
 def stable_sort_submissions(
@@ -782,7 +808,7 @@ def sync_panel(
             result["cache_error"] = (
                 f"{type(exc).__name__}: {exc}")[:300]
         return result
-    except SyncCancelled as exc:
+    except CancelledError as exc:
         return {
             "ok": False,
             "live_ok": False,
