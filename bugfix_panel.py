@@ -154,7 +154,10 @@ def fetch_all_history(
             out.append(row)
 
         last_page_was_full = len(batch) >= size
-        if len(batch) < size or (total is not None and len(out) >= total):
+        # Stop only on a partial page. total_submissions is useful display
+        # metadata, but trusting it as a pagination gate can silently truncate
+        # when a concurrent write or backend count drift under-reports rows.
+        if len(batch) < size:
             break
     else:
         if last_page_was_full and (total is None or len(out) < total):
