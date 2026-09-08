@@ -38,6 +38,26 @@ class TestHistoryPagination(unittest.TestCase):
             "http://platform/api/v1/bug-fix/history",
         )
 
+    def test_underreported_total_does_not_truncate_full_page(self):
+        calls = []
+
+        def fake_get(_url, params):
+            calls.append(params["page"])
+            if params["page"] == 1:
+                return {
+                    "submissions": [
+                        {"submission_id": f"s-{i}"} for i in range(100)
+                    ],
+                    "total_submissions": 1,
+                }
+            return {"submissions": [], "total_submissions": 1}
+
+        payload = bp.fetch_all_history(
+            "http://platform", get_fn=fake_get)
+
+        self.assertEqual(len(payload["submissions"]), 100)
+        self.assertEqual(calls, [1, 2])
+
     def test_forwards_filters_and_truncates_query(self):
         seen = {}
 
