@@ -1034,7 +1034,7 @@ class BugFixTab:
             self._apply_comment_result(sid, failed, generation)
 
     def _apply_comment_result(self, sid, enriched, generation):
-        if self._stopped:
+        if getattr(self, "_stopped", False):
             return
         self._comment_loading.discard(sid)
         if generation != self._data_generation:
