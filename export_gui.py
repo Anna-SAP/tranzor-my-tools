@@ -505,6 +505,16 @@ except Exception as _tmp_e:  # pragma: no cover
 else:
     _tmp_import_error = None
 
+# 🐞 BugFix — complete Platform Bug Fix history plus live GitLab MR state
+# and selected-row discussions. Pure-additive, cached and appended last.
+try:
+    import gui_tab_bugfix as _bf_tab_mod
+except Exception as _bf_e:  # pragma: no cover
+    _bf_tab_mod = None
+    _bf_import_error = _bf_e
+else:
+    _bf_import_error = None
+
 _boot_mark("optional_tabs_imported")
 
 # ---------------------------------------------------------------------------
@@ -995,6 +1005,13 @@ if _ko_tab_mod is not None:
 if _tmp_tab_mod is not None:
     try:
         for _lang_code, _extra in _tmp_tab_mod.STRINGS.items():
+            STRINGS.setdefault(_lang_code, {}).update(_extra)
+    except Exception:
+        pass
+
+if _bf_tab_mod is not None:
+    try:
+        for _lang_code, _extra in _bf_tab_mod.STRINGS.items():
             STRINGS.setdefault(_lang_code, {}).update(_extra)
     except Exception:
         pass
@@ -1877,6 +1894,23 @@ class ExportApp:
                 self.tmp_tab = None
         _boot_mark("tab_tm_panel")
 
+        # --- Tab: 🐞 BugFix (optional, pure additive) ---
+        # Platform history + independent live GitLab state. Comments load only
+        # for the selected submission; the first screen starts from local cache.
+        self.bf_tab = None
+        self._bf_tab_index = None
+        self._bf_tab_initialized = False
+        if _bf_tab_mod is not None:
+            try:
+                tab_bf = ttk.Frame(self.notebook, style="App.TFrame")
+                self.notebook.add(tab_bf, text="")
+                self.bf_tab = _bf_tab_mod.BugFixTab(tab_bf, self)
+                self._bf_tab_index = self.notebook.index(tab_bf)
+            except Exception as _e:
+                print(f"[BugFix tab] init failed: {_e}")
+                self.bf_tab = None
+        _boot_mark("tab_bugfix")
+
         # ═══════════════════════════════════════════
         # TAB 1 CONTENTS (File Translation)
         # ═══════════════════════════════════════════
@@ -2366,6 +2400,13 @@ class ExportApp:
                 _register_tab_refresh(self.tmp_tab, self._tmp_tab_index)
             except Exception:
                 pass
+        if self.bf_tab is not None and self._bf_tab_index is not None:
+            try:
+                self.notebook.tab(
+                    self._bf_tab_index, text=self._t("tab_bugfix"))
+                _register_tab_refresh(self.bf_tab, self._bf_tab_index)
+            except Exception:
+                pass
 
         # Summary panel texts
         self.lbl_summary_title.configure(text=self._t("summary_title"))
@@ -2800,6 +2841,15 @@ class ExportApp:
                 self._tmp_tab_initialized = True
                 try:
                     self.tmp_tab.on_first_show()
+                except Exception:
+                    pass
+            elif (self.bf_tab is not None
+                  and self._bf_tab_index is not None
+                  and tab_idx == self._bf_tab_index
+                  and not self._bf_tab_initialized):
+                self._bf_tab_initialized = True
+                try:
+                    self.bf_tab.on_first_show()
                 except Exception:
                     pass
 
@@ -3450,6 +3500,11 @@ class ExportApp:
         try:
             if getattr(self, "rw_tab", None) is not None:
                 self.rw_tab.stop_watchdog()
+        except Exception:
+            pass
+        try:
+            if getattr(self, "bf_tab", None) is not None:
+                self.bf_tab.stop()
         except Exception:
             pass
         try:
