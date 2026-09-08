@@ -659,5 +659,29 @@ class TestCancellationCacheGate(unittest.TestCase):
         load_cache.assert_not_called()
 
 
+
+class TestLockedMrState(unittest.TestCase):
+
+    def test_locked_mr_is_preserved_filterable_and_terminal(self):
+        row = bp.normalize_submission({
+            "submission_id": "locked",
+            "project_id": "common/uns",
+            "mr_iid": 99,
+            "mr_url": "https://git/common/uns/-/merge_requests/99",
+            "mr_state": "locked",
+            "summary": {"aggregate_status": "Applied"},
+        })
+
+        self.assertEqual(row["mr_state"], "locked")
+        self.assertEqual(row["mr_state_label"], "Locked")
+        self.assertEqual(row["attention"]["level"], "done")
+        self.assertEqual(row["attention"]["code"], "no_action")
+        self.assertEqual(
+            [item["submission_id"] for item in bp.filter_submissions(
+                [row], mr_state="locked")],
+            ["locked"],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
