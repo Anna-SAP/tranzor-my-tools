@@ -65,6 +65,54 @@ class TestBugFixTabAsyncGuards(unittest.TestCase):
         tab._apply_filters.assert_not_called()
         self.assertNotIn("A", tab._comment_loading)
 
+    def test_select_does_not_start_comments_during_full_sync(self):
+        tab = object.__new__(gui.BugFixTab)
+        tab._syncing = True
+        tab._cache_loading = False
+        tab._comment_loading = set()
+        tab._comment_attempted = set()
+        tab.btn_open_mr = _Button()
+        tab._selected_row = lambda: {
+            "submission_id": "A",
+            "has_mr": True,
+            "mr_url": "https://git/mr/1",
+            "comments_loaded": False,
+        }
+        tab._show_detail = mock.Mock()
+        tab._load_selected_comments = mock.Mock()
+
+        gui.BugFixTab._on_select(tab)
+
+        tab._load_selected_comments.assert_not_called()
+
+    def test_comment_error_wins_over_loaded_empty_state(self):
+        tab = object.__new__(gui.BugFixTab)
+        captured = []
+        tab._set_detail = captured.append
+        tab._t = lambda key: {
+            "bf_no_mr_explain": "no mr",
+            "bf_comments_title": "comments",
+            "bf_comments_loading": "loading",
+            "bf_comments_none": "no comments",
+            "bf_comments_error": "Comments unavailable: {error}",
+            "bf_records_title": "records",
+        }.get(key, key)
+
+        gui.BugFixTab._show_detail(tab, {
+            "submission_id": "A",
+            "has_mr": True,
+            "mr_iid": 1,
+            "mr_state_label": "Open",
+            "platform_status_label": "Applied",
+            "comments_loaded": True,
+            "comments": [],
+            "comments_error": "403 denied",
+            "records": [],
+        })
+
+        self.assertIn("Comments unavailable: 403 denied", captured[0])
+        self.assertNotIn("no comments", captured[0])
+
     def test_comment_result_preserves_current_selection(self):
         tab = object.__new__(gui.BugFixTab)
         tab._comment_loading = {"A"}
