@@ -100,12 +100,13 @@ Requirements are grouped by capability. Each has an ID (`FR-x`) referenced by th
 - **FR-20 — Internationalised UI.** Every screen toggles between English and 简体中文.
 - **FR-21 — Standalone binaries.** PyInstaller produces a single-file Windows `.exe` and a universal2 macOS `.app`, each launching without a Python install. *(Rule R7)*
 - **FR-22 — Concurrency safety.** Network I/O runs on background threads (≤ 8 workers) with retry/backoff and per-task isolation; the tkinter main thread is never blocked. *(Rule R1, performance)*
+- **FR-23 — BugFix tracking.** Fully paginate Platform Bug Fix history; display the Platform/TM workflow and live GitLab MR lifecycle as independent status axes; retain valid direct/no-MR records; lazily load important human comments and unresolved discussions for the selected MR; keep cached Platform rows visible when GitLab or Platform refresh partially fails.
 
 ---
 
 ## 4. Acceptance criteria
 
-Acceptance is **evidence-based**: most criteria below are pinned by an automated regression test (44 `test_*.py` files, mostly stdlib `unittest`). "Verified by" names the guarding test or the manual gate.
+Acceptance is **evidence-based**: most criteria below are pinned by automated regression tests (mostly stdlib `unittest`). "Verified by" names the guarding test or the manual gate.
 
 ### 4.1 Functional acceptance
 
@@ -122,6 +123,7 @@ Acceptance is **evidence-based**: most criteria below are pinned by an automated
 | AC-9 (FR-18) | The Bridge enforces a userscript **version handshake** (test-verified); its transport hardening — loopback-only binding, shared-secret token gate, token-bucket rate limit — is enforced in `tranzor_bridge.py`. | `test_tranzor_bridge.py` (handshake) + source review |
 | AC-10 (FR-22) | `ReadTimeout` is not retried; `ConnectionError`/`ConnectTimeout` retry up to `MAX_RETRIES`; default timeout is `(10, 120)`. | `test_api_timeout.py` |
 | AC-11 (FR-2) | "Export all" inherits the active Project/Release/Status filters. | `test_collect_all_filters.py` |
+| AC-16 (FR-23) | Applied remains independent of Open/Merged/Closed; no-MR records remain valid; history pagination is exhaustive; discussions are selected-row lazy; malformed responses, token-free cache, and per-MR failures are isolated. | `test_bugfix_panel.py`, `test_gitlab_client.py` |
 
 ### 4.2 Non-functional acceptance
 
