@@ -495,6 +495,16 @@ except Exception as _ko_e:  # pragma: no cover
 else:
     _ko_import_error = None
 
+# 📚 TM Panel — three-layer TM visualization (ICE / Shared provenance /
+# Tranzor records) with ignore-hash search. Pure-additive, appended last.
+try:
+    import gui_tab_tm_panel as _tmp_tab_mod
+except Exception as _tmp_e:  # pragma: no cover
+    _tmp_tab_mod = None
+    _tmp_import_error = _tmp_e
+else:
+    _tmp_import_error = None
+
 _boot_mark("optional_tabs_imported")
 
 # ---------------------------------------------------------------------------
@@ -978,6 +988,13 @@ if _ft_stage_tab_mod is not None:
 if _ko_tab_mod is not None:
     try:
         for _lang_code, _extra in _ko_tab_mod.STRINGS.items():
+            STRINGS.setdefault(_lang_code, {}).update(_extra)
+    except Exception:
+        pass
+
+if _tmp_tab_mod is not None:
+    try:
+        for _lang_code, _extra in _tmp_tab_mod.STRINGS.items():
             STRINGS.setdefault(_lang_code, {}).update(_extra)
     except Exception:
         pass
@@ -1843,6 +1860,23 @@ class ExportApp:
                 self.ko_tab = None
         _boot_mark("tab_key_origin")
 
+        # --- Tab: 📚 TM Panel (optional, pure additive) ---
+        # Three-layer TM visualization + ignore-hash search. Appended last
+        # so existing tab indices do not shift.
+        self.tmp_tab = None
+        self._tmp_tab_index = None
+        self._tmp_tab_initialized = False
+        if _tmp_tab_mod is not None:
+            try:
+                tab_tmp = ttk.Frame(self.notebook, style="App.TFrame")
+                self.notebook.add(tab_tmp, text="")
+                self.tmp_tab = _tmp_tab_mod.TmPanelTab(tab_tmp, self)
+                self._tmp_tab_index = self.notebook.index(tab_tmp)
+            except Exception as _e:
+                print(f"[TM Panel tab] init failed: {_e}")
+                self.tmp_tab = None
+        _boot_mark("tab_tm_panel")
+
         # ═══════════════════════════════════════════
         # TAB 1 CONTENTS (File Translation)
         # ═══════════════════════════════════════════
@@ -2325,6 +2359,13 @@ class ExportApp:
                 _register_tab_refresh(self.ko_tab, self._ko_tab_index)
             except Exception:
                 pass
+        if self.tmp_tab is not None and self._tmp_tab_index is not None:
+            try:
+                self.notebook.tab(
+                    self._tmp_tab_index, text=self._t("tab_tm_panel"))
+                _register_tab_refresh(self.tmp_tab, self._tmp_tab_index)
+            except Exception:
+                pass
 
         # Summary panel texts
         self.lbl_summary_title.configure(text=self._t("summary_title"))
@@ -2750,6 +2791,15 @@ class ExportApp:
                 self._ko_tab_initialized = True
                 try:
                     self.ko_tab.on_first_show()
+                except Exception:
+                    pass
+            elif (self.tmp_tab is not None
+                  and self._tmp_tab_index is not None
+                  and tab_idx == self._tmp_tab_index
+                  and not self._tmp_tab_initialized):
+                self._tmp_tab_initialized = True
+                try:
+                    self.tmp_tab.on_first_show()
                 except Exception:
                     pass
 

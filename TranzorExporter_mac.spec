@@ -30,6 +30,8 @@ a = Analysis(
         'gui_tab_full_translations_stage',
         'gui_tab_key_origin',
         'key_origin',
+        'gui_tab_tm_panel',
+        'tm_panel',
         'date_picker',  # 共享深色日历选择组件（日期字段 📅 选择器）
         'time_display',  # tz-aware clock formatter (Created / token expiry)
         'searchable_combobox',  # 共享可搜索下拉组件（Project 关键字过滤弹窗）
