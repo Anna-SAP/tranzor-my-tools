@@ -419,10 +419,6 @@ def derive_attention(submission: Mapping[str, Any]) -> dict[str, Any]:
         return {"priority": 0, "level": "action",
                 "code": "unresolved_discussion",
                 "reason": "Unresolved MR discussion"}
-    if mr_state == "locked":
-        return {"priority": 1, "level": "watch",
-                "code": "locked_mr",
-                "reason": "Locked MR"}
     if mr_state in {"opened", "open"}:
         draft = bool(submission.get("draft"))
         reason = "Draft MR needs review" if draft else "Open MR"
