@@ -87,6 +87,8 @@ a = Analysis(
         'key_origin',
         'gui_tab_tm_panel',
         'tm_panel',
+        'gui_tab_bugfix',
+        'bugfix_panel',
         # 共享深色日历选择组件（Human Revisions / TM & Context Insight 的
         # 📅 日期选择器）。各 tab 通过普通 import 引用，分析器本能找到，这里
         # 仍按既有惯例显式登记作安全网。
