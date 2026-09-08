@@ -9,6 +9,7 @@ commit diff 中恢复 Language Lead BATCH_FIX 的 pre-fix 原译文。
 - get_merge_request(project_id, mr_iid)   取 MR 元数据（含 labels / state）——
                                           用于 skip-translate 标签识别，以及
                                           MR Pipeline 表格的实时 MR Status 列
+- list_mr_discussions(project_id, mr_iid)  取 MR discussions（分页 + 缓存）
 
 配置来源（优先级）：
 1. 环境变量 TRANZOR_GITLAB_TOKEN / TRANZOR_GITLAB_BASE_URL
@@ -224,6 +225,7 @@ class GitLabClient:
         self._branches_cache = {}      # (project_id, search) -> branches list
         self._mr_cache = {}            # (project_id, mr_iid) -> mr dict
         self._mr_search_cache = {}     # (project_id, search, in_field) -> MR list
+        self._mr_discussions_cache = {}  # (project, iid, page sizing) -> list
 
     def has_token(self):
         return bool(self.token)
@@ -345,6 +347,43 @@ class GitLabClient:
         data = resp.json() or {}
         self._mr_cache[key] = data
         return data
+
+    def list_mr_discussions(self, project_id, mr_iid, *, per_page=100,
+                            max_pages=3, force_refresh=False):
+        """Return GitLab MR discussions, walking bounded API pages.
+
+        The BugFix panel uses discussions rather than plain notes so an
+        actionable review thread keeps its resolvable/resolved state. Results
+        are cached for the client lifetime; manual panel refresh can bypass the
+        cache. HTTP and payload errors deliberately bubble up so the caller can
+        show a precise partial-sync warning without hiding Platform records.
+        """
+        page_size = max(1, min(int(per_page or 100), 100))
+        page_cap = max(1, int(max_pages or 1))
+        key = (str(project_id), int(mr_iid), page_size, page_cap)
+        if not force_refresh and key in self._mr_discussions_cache:
+            return list(self._mr_discussions_cache[key])
+
+        url = (f"{self.base_url}/api/v4/projects/"
+               f"{self._encode(project_id)}/merge_requests/"
+               f"{int(mr_iid)}/discussions")
+        out = []
+        for page in range(1, page_cap + 1):
+            resp = self._session.get(
+                url,
+                params={"per_page": page_size, "page": page},
+                timeout=self.timeout,
+            )
+            resp.raise_for_status()
+            batch = resp.json()
+            if not isinstance(batch, list):
+                raise ValueError("GitLab discussions response must be a list")
+            out.extend(item for item in batch if isinstance(item, dict))
+            if len(batch) < page_size:
+                break
+
+        self._mr_discussions_cache[key] = list(out)
+        return out
 
     def list_merge_requests(self, search, *, project_id=None,
                             in_field="title", per_page=100, max_pages=10):
