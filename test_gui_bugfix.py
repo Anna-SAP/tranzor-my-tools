@@ -499,11 +499,11 @@ class TestLockedMrLocalization(unittest.TestCase):
         self.assertEqual(
             tab._attention_text({
                 "attention": {
-                    "code": "locked_mr",
-                    "reason": "Locked MR",
+                    "code": "no_action",
+                    "reason": "No action detected",
                 }
             }),
-            "MR 已锁定",
+            "无需处理",
         )
 
 
