@@ -486,5 +486,26 @@ class TestBugFixFinalGuards(unittest.TestCase):
         self.assertIn("[近期评论]", captured[0])
 
 
+
+class TestLockedMrLocalization(unittest.TestCase):
+
+    def test_locked_state_is_available_in_chinese_filter_and_detail(self):
+        tab = object.__new__(gui.BugFixTab)
+        tab._t = lambda key: gui.STRINGS["zh"][key]
+
+        self.assertEqual(dict(tab._mr_options())["locked"], "已锁定")
+        self.assertEqual(
+            tab._mr_state_text({"mr_state": "locked"}), "已锁定")
+        self.assertEqual(
+            tab._attention_text({
+                "attention": {
+                    "code": "locked_mr",
+                    "reason": "Locked MR",
+                }
+            }),
+            "MR 已锁定",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
