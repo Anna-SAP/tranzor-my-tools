@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 import re
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Mapping
 from urllib.parse import unquote, urlparse
@@ -25,6 +25,16 @@ MAX_COMMENT_PAGES = 3
 CACHE_SCHEMA_VERSION = 1
 CACHE_PATH = os.path.expanduser(
     "~/.tranzor_exporter/bugfix_panel_cache.json")
+
+
+class SyncCancelled(RuntimeError):
+    """Raised internally when the desktop panel is closing."""
+
+
+def _raise_if_cancelled(cancel_event: Any = None) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise SyncCancelled("BugFix synchronization cancelled")
+
 
 _ACTION_RE = re.compile(
     r"\b(block(?:ed|er|ing)?|must|please|request(?:ed)? changes?|"
@@ -67,6 +77,11 @@ def _label(value: Any) -> str:
         "failed": "Failed",
         "tm_failed": "TM failed",
         "mr_creation_failed": "MR creation failed",
+        "partially_applied": "Partially applied",
+        "all_applying": "Applying",
+        "all_waiting": "Waiting",
+        "in_progress": "In progress",
+        "not_merged": "Not merged",
     }
     return known.get(_normal(raw), raw.replace("_", " ").title())
 
@@ -99,6 +114,7 @@ def fetch_all_history(
     page_size: int = HISTORY_PAGE_SIZE,
     get_fn: Callable[..., Any] | None = None,
     max_pages: int = MAX_HISTORY_PAGES,
+    cancel_event: Any = None,
 ) -> dict[str, Any]:
     """Fetch every matching Platform submission using its grouped pagination."""
     if get_fn is None:
@@ -124,6 +140,7 @@ def fetch_all_history(
     last_page_was_full = False
 
     for page in range(1, cap + 1):
+        _raise_if_cancelled(cancel_event)
         params = dict(common)
         params.update({"page": page, "page_size": size})
         payload = _response_json(get_fn(_history_url(base_url), params=params))
@@ -346,6 +363,27 @@ def classify_important_comments(
     return candidates[:max(0, int(limit or 0))]
 
 
+_FAILED_PLATFORM_STATES = {
+    "delivery_failed",
+    "tm_failed",
+    "create_failed",
+    "mr_creation_failed",
+    "partially_applied",
+    "not_merged",
+}
+_IN_PROGRESS_PLATFORM_STATES = {
+    "queued",
+    "processing",
+    "pending",
+    "all_waiting",
+    "all_applying",
+    "in_progress",
+    # Compatibility with older record-level values seen in history payloads.
+    "applying_fix",
+    "waiting_for_merge",
+}
+
+
 def derive_attention(submission: Mapping[str, Any]) -> dict[str, Any]:
     status = _normal(submission.get("platform_status"))
     mr_state = _normal(submission.get("mr_state"))
@@ -355,7 +393,12 @@ def derive_attention(submission: Mapping[str, Any]) -> dict[str, Any]:
         for item in comments
     )
 
-    if "fail" in status or "error" in status or submission.get("create_error"):
+    if (
+        status in _FAILED_PLATFORM_STATES
+        or "fail" in status
+        or "error" in status
+        or submission.get("create_error")
+    ):
         return {"priority": 0, "level": "action",
                 "reason": "Bug Fix workflow failed"}
     if mr_state == "closed":
@@ -364,13 +407,16 @@ def derive_attention(submission: Mapping[str, Any]) -> dict[str, Any]:
     if submission.get("has_conflicts"):
         return {"priority": 0, "level": "action",
                 "reason": "MR has conflicts"}
+    if submission.get("blocking_discussions_resolved") is False:
+        return {"priority": 0, "level": "action",
+                "reason": "Unresolved MR discussion"}
     if unresolved:
         return {"priority": 0, "level": "action",
                 "reason": "Unresolved MR discussion"}
     if mr_state in {"opened", "open"}:
         reason = "Draft MR needs review" if submission.get("draft") else "Open MR"
         return {"priority": 1, "level": "watch", "reason": reason}
-    if status in {"queued", "processing", "waiting_for_merge", "pending"}:
+    if status in _IN_PROGRESS_PLATFORM_STATES:
         return {"priority": 1, "level": "watch",
                 "reason": "Bug Fix is still in progress"}
     if mr_state == "unknown" and submission.get("has_mr"):
@@ -468,39 +514,77 @@ def enrich_submissions(
     *,
     max_workers: int = 4,
     force_refresh: bool = True,
+    cancel_event: Any = None,
 ) -> list[dict[str, Any]]:
-    """Fetch live MR state concurrently while preserving input order."""
+    """Fetch live MR state concurrently while preserving input order.
+
+    At most max_workers futures exist at once. When the desktop window closes,
+    queued work is never started and running HTTP calls are left to their own
+    bounded timeout instead of keeping the whole MR queue alive.
+    """
     rows = [normalize_submission(item) for item in submissions]
     indices = [i for i, row in enumerate(rows) if row["has_mr"]]
+    _raise_if_cancelled(cancel_event)
     if not indices:
         return rows
     if client is None or (
             hasattr(client, "has_token") and not client.has_token()):
-        return [
-            enrich_submission(row, client, force_refresh=force_refresh)
-            if row["has_mr"] else row
-            for row in rows
-        ]
+        for index in indices:
+            _raise_if_cancelled(cancel_event)
+            rows[index] = enrich_submission(
+                rows[index], client, force_refresh=force_refresh)
+        return rows
 
     workers = max(1, min(int(max_workers or 1), 8, len(indices)))
-    with ThreadPoolExecutor(
-            max_workers=workers, thread_name_prefix="bugfix-mr") as pool:
-        future_to_index = {
-            pool.submit(
-                enrich_submission, rows[index], client,
-                include_discussions=False, force_refresh=force_refresh,
-            ): index
-            for index in indices
-        }
-        for future in as_completed(future_to_index):
-            index = future_to_index[future]
-            try:
-                rows[index] = future.result()
-            except Exception as exc:
-                rows[index]["mr_sync_error"] = (
-                    f"{type(exc).__name__}: {exc}")[:240]
-                rows[index]["attention"] = derive_attention(rows[index])
-    return rows
+    pool = ThreadPoolExecutor(
+        max_workers=workers, thread_name_prefix="bugfix-mr")
+    pending: dict[Any, int] = {}
+    index_iter = iter(indices)
+    cancelled = False
+
+    def submit_next() -> bool:
+        try:
+            index = next(index_iter)
+        except StopIteration:
+            return False
+        future = pool.submit(
+            enrich_submission, rows[index], client,
+            include_discussions=False, force_refresh=force_refresh,
+        )
+        pending[future] = index
+        return True
+
+    try:
+        for _unused in range(workers):
+            _raise_if_cancelled(cancel_event)
+            if not submit_next():
+                break
+
+        while pending:
+            _raise_if_cancelled(cancel_event)
+            done, _not_done = wait(
+                tuple(pending), timeout=0.1, return_when=FIRST_COMPLETED)
+            if not done:
+                continue
+            for future in done:
+                index = pending.pop(future)
+                try:
+                    rows[index] = future.result()
+                except Exception as exc:
+                    rows[index]["mr_sync_error"] = (
+                        f"{type(exc).__name__}: {exc}")[:240]
+                    rows[index]["attention"] = derive_attention(rows[index])
+                _raise_if_cancelled(cancel_event)
+                submit_next()
+        return rows
+    except SyncCancelled:
+        cancelled = True
+        raise
+    finally:
+        if cancelled:
+            for future in pending:
+                future.cancel()
+        pool.shutdown(wait=not cancelled, cancel_futures=cancelled)
 
 
 def stable_sort_submissions(
@@ -649,6 +733,7 @@ def sync_panel(
     sync_gitlab: bool = True,
     cache_path: str | None = None,
     max_workers: int = 4,
+    cancel_event: Any = None,
 ) -> dict[str, Any]:
     """Synchronize Platform history and current MR states with cache fallback."""
     try:
@@ -659,7 +744,9 @@ def sync_panel(
             status=status,
             query=query,
             get_fn=get_fn,
+            cancel_event=cancel_event,
         )
+        _raise_if_cancelled(cancel_event)
         rows = [normalize_submission(item)
                 for item in history["submissions"]]
         if sync_gitlab:
@@ -668,7 +755,8 @@ def sync_panel(
                 gitlab_client = GitLabClient()
             rows = enrich_submissions(
                 rows, gitlab_client, max_workers=max_workers,
-                force_refresh=True)
+                force_refresh=True, cancel_event=cancel_event)
+        _raise_if_cancelled(cancel_event)
         rows = stable_sort_submissions(rows)
         result = {
             "ok": True,
@@ -694,6 +782,18 @@ def sync_panel(
             result["cache_error"] = (
                 f"{type(exc).__name__}: {exc}")[:300]
         return result
+    except SyncCancelled as exc:
+        return {
+            "ok": False,
+            "live_ok": False,
+            "source": "cancelled",
+            "stale": False,
+            "submissions": [],
+            "total_submissions": 0,
+            "available_statuses": [],
+            "gitlab_error_count": 0,
+            "error": str(exc),
+        }
     except Exception as exc:
         cached = load_cache(cache_path)
         if cached is not None:
