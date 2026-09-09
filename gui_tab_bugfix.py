@@ -7,9 +7,11 @@ selected row. All network work runs off the tkinter thread.
 from __future__ import annotations
 
 import copy
+import re
 import threading
 import tkinter as tk
 from concurrent.futures import CancelledError
+from datetime import datetime, timezone
 import webbrowser
 from tkinter import ttk
 from typing import Any
@@ -25,7 +27,7 @@ STRINGS = {
         "bf_hint": (
             "Every Platform Bug Fix submission in one view. Bug Fix / TM "
             "status and GitLab MR status are independent: Applied does not "
-            "mean Merged. Important discussions load only when a row is selected."
+            "mean Merged. Important discussions load only when a row is selected. Click a column heading to sort."
         ),
         "bf_project": "Project",
         "bf_workflow": "Bug Fix status",
@@ -149,7 +151,7 @@ STRINGS = {
         "bf_hint": (
             "集中查看 Platform 的全部 Bug Fix 记录。Bug Fix / TM 状态与 "
             "GitLab MR 状态彼此独立：Applied 不代表 Merged。选中记录后才读取"
-            "重要 discussions，避免批量请求。"
+            "重要 discussions，避免批量请求。点击列标题可排序。"
         ),
         "bf_project": "项目",
         "bf_workflow": "Bug Fix 状态",
@@ -398,9 +400,15 @@ class BugFixTab:
         "workflow", "mr", "mr_state", "activity", "created",
     )
 
+    _SORTABLE_COLS = {
+        "created", "mr_state", "mr", "strings", "locale", "project", "bug",
+    }
+
     def __init__(self, parent, app):
         self.parent = parent
         self.app = app
+        self._sort_column = ""
+        self._sort_descending = False
         self._first_shown = False
         self._syncing = False
         self._cache_loading = False
@@ -566,7 +574,7 @@ class BugFixTab:
         left.rowconfigure(0, weight=1)
         left.columnconfigure(0, weight=1)
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
-        self.tree.bind("<Double-1>", lambda _e: self._open_selected_mr())
+        self.tree.bind("<Double-1>", self._on_double_click)
 
         actions = ttk.Frame(right, style="Card.TFrame")
         actions.pack(fill="x", padx=8, pady=(8, 4))
@@ -603,6 +611,21 @@ class BugFixTab:
         self._kpis["open"][0].configure(text=t("bf_open"))
         self._kpis["direct"][0].configure(text=t("bf_direct"))
 
+        self._refresh_sort_headings()
+
+        self._refresh_filter_values(
+            project_raw=self._project_raw(),
+            workflow_raw=self._workflow_raw(),
+            mr_raw=self._mr_raw(),
+        )
+        if not self._all_rows:
+            self._set_detail(t("bf_detail_placeholder"))
+            if not self._syncing:
+                self._idle(t("bf_ready"))
+        else:
+            self._apply_filters()
+
+    def _refresh_sort_headings(self):
         headings = {
             "attention": "bf_col_attention",
             "bug": "bf_col_bug",
@@ -616,19 +639,75 @@ class BugFixTab:
             "created": "bf_col_created",
         }
         for col, key in headings.items():
-            self.tree.heading(col, text=t(key))
+            text = self._t(key)
+            if col == self._sort_column:
+                text += " ▼" if self._sort_descending else " ▲"
+            command = (
+                (lambda column=col: self._sort_by(column))
+                if col in self._SORTABLE_COLS else ""
+            )
+            self.tree.heading(col, text=text, command=command)
 
-        self._refresh_filter_values(
-            project_raw=self._project_raw(),
-            workflow_raw=self._workflow_raw(),
-            mr_raw=self._mr_raw(),
-        )
-        if not self._all_rows:
-            self._set_detail(t("bf_detail_placeholder"))
-            if not self._syncing:
-                self._idle(t("bf_ready"))
+    def _sort_by(self, column):
+        if column not in self._SORTABLE_COLS:
+            return
+        if column == self._sort_column:
+            self._sort_descending = not self._sort_descending
         else:
-            self._apply_filters()
+            self._sort_column = column
+            self._sort_descending = column == "created"
+        self._refresh_sort_headings()
+        self._apply_filters()
+
+    def _sort_rows(self, rows):
+        """Sort full values, with missing/invalid values last in either direction."""
+        column = self._sort_column
+        if not column:
+            return rows
+
+        def key(row):
+            if column == "created":
+                try:
+                    value = datetime.fromisoformat(
+                        str(row.get("created_at") or "").replace("Z", "+00:00"))
+                    if value.tzinfo is None:
+                        value = value.replace(tzinfo=timezone.utc)
+                    return value.timestamp()
+                except (ValueError, TypeError, OverflowError, OSError):
+                    return None
+            if column in {"mr", "strings"}:
+                value = row.get("mr_iid" if column == "mr" else "string_count")
+                if column == "mr" and not value:
+                    return None
+                try:
+                    return int(value) if value is not None else None
+                except (ValueError, TypeError):
+                    return None
+            if column == "mr_state":
+                value = self._mr_state_text(row)
+            elif column == "locale":
+                value = ", ".join(row.get("target_languages") or [])
+            else:
+                value = row.get("bug_id" if column == "bug" else "project_id")
+            if not value:
+                return None
+            # Natural order keeps LOC-9 before LOC-10; ignore letter case.
+            return tuple((1, int(part)) if part.isdigit() else (0, part)
+                         for part in re.split(r"(\d+)", str(value).casefold()))
+
+        present, missing = [], []
+        for row in rows:
+            value = key(row)
+            if value is None:
+                missing.append(row)
+            else:
+                present.append((value, row))
+        present.sort(key=lambda item: item[0], reverse=self._sort_descending)
+        return [row for _, row in present] + missing
+
+    def _on_double_click(self, event):
+        if self.tree.identify_region(event.x, event.y) in {"cell", "tree"}:
+            self._open_selected_mr()
 
     def _project_options(self):
         projects = sorted({
@@ -901,6 +980,8 @@ class BugFixTab:
             query=self.var_search.get(),
         )
 
+        rows = self._sort_rows(rows)
+
         for iid in self.tree.get_children():
             self.tree.delete(iid)
         self._row_by_iid.clear()
@@ -964,6 +1045,9 @@ class BugFixTab:
             self._kpis[key][1].configure(text=str(value))
 
     def _reset_filters(self):
+        self._sort_column = ""
+        self._sort_descending = False
+        self._refresh_sort_headings()
         self.var_search.set("")
         self._refresh_filter_values()
         self._apply_filters()

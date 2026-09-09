@@ -16,6 +16,117 @@ class _Button:
         self.states.append(kwargs)
 
 
+class TestBugFixSorting(unittest.TestCase):
+    def setUp(self):
+        self.tab = object.__new__(gui.BugFixTab)
+        self.tab._sort_column = ""
+        self.tab._sort_descending = False
+        self.tab._t = lambda key: gui.STRINGS["en"][key]
+        self.tab.tree = mock.Mock()
+        self.tab._apply_filters = mock.Mock()
+
+    def test_every_requested_header_toggles_and_marks_direction(self):
+        self.tab._refresh_sort_headings()
+        commands = {call.args[0]: call.kwargs["command"]
+                    for call in self.tab.tree.heading.call_args_list}
+        for column in ("created", "mr_state", "mr", "strings", "locale", "project", "bug"):
+            with self.subTest(column=column):
+                commands[column]()
+                self.assertEqual(self.tab._sort_column, column)
+                self.assertEqual(self.tab._sort_descending, column == "created")
+                commands[column]()
+                self.assertEqual(self.tab._sort_descending, column != "created")
+                current = {call.args[0]: call.kwargs["text"]
+                           for call in self.tab.tree.heading.call_args_list[-10:]}
+                arrow = " ▼" if column != "created" else " ▲"
+                self.assertTrue(current[column].endswith(arrow))
+                self.assertEqual(sum(text.endswith((" ▲", " ▼")) for text in current.values()), 1)
+        self.assertEqual(self.tab._apply_filters.call_count, 14)
+
+    def test_numeric_natural_and_localized_state_order(self):
+        cases = [
+            ("mr", {"mr_iid": 9}, {"mr_iid": 100}),
+            ("strings", {"string_count": 0}, {"string_count": 12}),
+            ("bug", {"bug_id": "loc-9"}, {"bug_id": "LOC-10"}),
+            ("project", {"project_id": "common/uns"}, {"project_id": "Web/jedi"}),
+            ("locale", {"target_languages": ["de-DE", "fr-FR"]}, {"target_languages": ["en-US"]}),
+            ("mr_state", {"mr_state": "closed"}, {"mr_state": "opened"}),
+        ]
+        for column, first, last in cases:
+            with self.subTest(column=column):
+                self.tab._sort_column = column
+                self.tab._sort_descending = False
+                self.assertEqual(self.tab._sort_rows([last, first]), [first, last])
+                self.tab._sort_descending = True
+                self.assertEqual(self.tab._sort_rows([first, last]), [last, first])
+
+    def test_timezones_missing_values_and_stable_ties(self):
+        early = {"created_at": "2026-09-09T08:00:00+08:00"}
+        late = {"created_at": "2026-09-09T01:00:00Z"}
+        tie = {"created_at": "2026-09-09T01:00:00", "submission_id": "tie"}
+        invalid = {"created_at": "invalid"}
+        missing = {}
+        self.tab._sort_column = "created"
+        rows = [late, invalid, early, tie, missing]
+        self.assertEqual(self.tab._sort_rows(rows), [early, late, tie, invalid, missing])
+        self.tab._sort_descending = True
+        self.assertEqual(self.tab._sort_rows(rows), [late, tie, early, invalid, missing])
+        self.assertEqual(rows, [late, invalid, early, tie, missing])
+        for column, populated in [("mr", {"mr_iid": 5}), ("bug", {"bug_id": "LOC-1"})]:
+            self.tab._sort_column = column
+            for descending in (False, True):
+                self.tab._sort_descending = descending
+                self.assertEqual(self.tab._sort_rows([missing, populated]), [populated, missing])
+
+    def test_filter_render_retains_sort_and_selection(self):
+        tab = self.tab
+        # Exercise the actual filter/render path, used by live and comment refresh.
+        del tab._apply_filters
+        tab._filter_raw = {"project": "", "workflow": "", "mr": ""}
+        tab._all_rows = [
+            {"submission_id": "A", "summary": {"total": 12}, "project_id": "web/jedi"},
+            {"submission_id": "B", "summary": {"total": 2}, "project_id": "web/jedi"},
+            {"submission_id": "C", "summary": {"total": 1}, "project_id": "common/uns"},
+        ]
+        tab._row_by_iid = {}
+        tab.var_search = _ValueVar()
+        tab._selected_submission_id = lambda: "A"
+        tab._update_kpis = mock.Mock()
+        tab._show_detail = mock.Mock()
+        tab.tree.get_children.return_value = []
+        tab._sort_by("strings")
+        self.assertEqual(list(tab._row_by_iid), ["C", "B", "A"])
+        tab.tree.selection_set.assert_called_with("A")
+        tab._filter_raw["project"] = "web/jedi"
+        tab._apply_filters()
+        self.assertEqual(list(tab._row_by_iid), ["B", "A"])
+        tab._all_rows[0]["summary"]["total"] = 0
+        tab._apply_filters()
+        self.assertEqual(list(tab._row_by_iid), ["A", "B"])
+        self.assertEqual(tab._sort_column, "strings")
+        tab.tree.selection_set.assert_called_with("A")
+
+    def test_reset_restores_default_order(self):
+        tab = self.tab
+        tab._sort_by("created")
+        tab.var_search = _ValueVar("LOC-9")
+        tab._refresh_filter_values = mock.Mock()
+        tab._reset_filters()
+        self.assertEqual(tab._sort_column, "")
+        self.assertEqual(tab.var_search.get(), "")
+        rows = [{"submission_id": "B"}, {"submission_id": "A"}]
+        self.assertEqual(tab._sort_rows(rows), rows)
+
+    def test_double_click_header_does_not_open_selected_mr(self):
+        self.tab._open_selected_mr = mock.Mock()
+        self.tab.tree.identify_region.return_value = "heading"
+        self.tab._on_double_click(mock.Mock(x=1, y=1))
+        self.tab._open_selected_mr.assert_not_called()
+        self.tab.tree.identify_region.return_value = "cell"
+        self.tab._on_double_click(mock.Mock(x=1, y=25))
+        self.tab._open_selected_mr.assert_called_once()
+
+
 class TestBugFixTabAsyncGuards(unittest.TestCase):
 
     def test_first_show_does_not_read_cache_on_tk_thread(self):
