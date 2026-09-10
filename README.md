@@ -32,7 +32,7 @@
 
 **Tranzor Helper** (internally *TranzorExporter*; GitLab repo `annasu-tranzor-helper`) is a **zero-install, zero-dependency desktop application** that acts as a personal **quality-assurance & export cockpit** for the people who run localization on RingCentral's **Tranzor** platform.
 
-Tranzor is RingCentral's in-house localization platform — a browser front-end over an XTM-style translation-management system that produces machine + human translations across ~18 locales. It is owned by another team and ships on a slow release cadence, but a localization reviewer needs **safeguards and exports today**. Tranzor Helper fills that gap: a single double-clickable executable opens one window with **18 tabs** that let a non-technical language professional:
+Tranzor is RingCentral's in-house localization platform — a browser front-end over an XTM-style translation-management system that produces machine + human translations across ~18 locales. It is owned by another team and ships on a slow release cadence, but a localization reviewer needs **safeguards and exports today**. Tranzor Helper fills that gap: a single double-clickable executable opens one window with **19 tabs** that let a non-technical language professional:
 
 - 📤 **export** translations to HTML / Excel / TMX (XTM-compatible) without ever touching a terminal;
 - 🔎 **search** every translation string the platform has ever produced — instantly, offline, from a local index;
@@ -116,6 +116,7 @@ The window is a `ttk.Notebook`. The first three tabs are core; the remaining fou
 | 🔬 **TM & Context Insight** | Visualizes *where* a translation came from (TM / ICE / cache / LLM / human) and whether Context Service attached context. | Lets non-engineers diagnose bad MT output. |
 | 📚 **TM Panel** | Searches the three TM stores the platform does not show together: live ICE match, Shared TM pipeline provenance, and Tranzor records. Default **Ignore hash** drops the path hash so every identity of the same logical key appears, grouped as newest-record vs other hashes. | Find historical translations after a path-root / extension migration; the Dashboard Search Translations page only sees one hash. |
 | 🐞 **BugFix** | Fully paginates Platform Bug Fix history, keeps the Bug Fix/TM state separate from live GitLab MR state, and lazily surfaces high-signal comments and unresolved discussions. | Track Open/Merged/Closed MRs and reviewer action without losing direct or Blob-based records that legitimately have no MR. |
+| 🔁 **MR → TM** | Parses a GitLab MR (or local git patch) of locale files, extracts translation pairs (UNS whole-file `.hbs` or JSON/TS keys), probes ICE TM for stale values, and can submit them through blob-based Bug Fix. Default is preview-only. | Backfill Tranzor TM after a Git-only locale fix (LOC-24849 / LOC-24914 / LOC-25246) so later translations do not reuse the old string. |
 | 🧬 **OPUS ID Monitor** | Local SQLite cache of every OPUS ID; summary cards, per-project buckets, 30-day new-ID chart. | "Anytime, anywhere" pulse of translation volume. |
 | 🩺 **Tranzor Checks** | Full-task check status + sortable **error-keyword aggregation**, drill-down to issue rows. | Group similar issues; classify terminology / format errors. |
 | 🎯 **Review Worklist** | Compresses 70+ MRs into ~5–10 rows ranked by **merge urgency × language priority**, with 🔴/🟡/🟢 risk dots (issue counts shown alongside). | The Language Lead's single daily entry point. |
@@ -192,7 +193,7 @@ powershell -File build_windows.ps1          # → dist/TranzorExporter.exe
 annasu-tranzor-helper/
 ├── export_gui.py                 # ① main entry — root window, notebook, boot, auth, bridge
 ├── gui_tabs.py                   # core tabs: MR Pipeline + Quality Overview
-├── gui_tab_*.py                  # 14 optional tabs, one file each (fail-safe)
+├── gui_tab_*.py                  # 15 optional tabs, one file each (fail-safe)
 ├── advanced_filter.py            # shared filter engine (UI + export, kept in sync by tests)
 │
 ├── export_mr_pipeline.py         # ② Tranzor MR-pipeline API client  (mr_api)

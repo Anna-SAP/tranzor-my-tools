@@ -227,6 +227,7 @@ class GitLabClient:
         self._mr_cache = {}            # (project_id, mr_iid) -> mr dict
         self._mr_search_cache = {}     # (project_id, search, in_field) -> MR list
         self._mr_discussions_cache = {}  # (project, iid, page sizing) -> list
+        self._mr_diffs_cache = {}      # (project, iid) -> diff list
 
     def has_token(self):
         return bool(self.token)
@@ -539,6 +540,48 @@ class GitLabClient:
                 break
         self._mr_commits_cache[key] = out
         return out
+
+    def list_mr_diffs(self, project_id, mr_iid, *, per_page=100, max_pages=50,
+                      force_refresh=False):
+        """List file-level diffs for a merge request.
+
+        ``GET /projects/:id/merge_requests/:iid/diffs`` (GitLab 14+). Each
+        item has ``old_path`` / ``new_path`` / ``diff`` / ``new_file`` /
+        ``deleted_file`` / ``renamed_file``. Large files may have an empty
+        ``diff``; callers that need full content should ``get_file_raw``.
+
+        Cached per ``(project_id, mr_iid)`` for the client lifetime.
+        """
+        key = (str(project_id), int(mr_iid))
+        if not force_refresh and key in self._mr_diffs_cache:
+            return list(self._mr_diffs_cache[key])
+
+        page_size = max(1, min(int(per_page or 100), 100))
+        page_cap = max(1, int(max_pages or 1))
+        url = (f"{self.base_url}/api/v4/projects/"
+               f"{self._encode(project_id)}/merge_requests/"
+               f"{int(mr_iid)}/diffs")
+        out = []
+        for page in range(1, page_cap + 1):
+            resp = self._session.get(
+                url,
+                params={"per_page": page_size, "page": page},
+                timeout=self.timeout,
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            if isinstance(payload, dict):
+                batch = payload.get("diffs") or payload.get("changes") or []
+            else:
+                batch = payload or []
+            if not isinstance(batch, list):
+                raise ValueError("GitLab MR diffs response must be a list")
+            out.extend(item for item in batch if isinstance(item, dict))
+            if len(batch) < page_size:
+                break
+
+        self._mr_diffs_cache[key] = list(out)
+        return list(out)
 
 
 # ---------------------------------------------------------------------------
