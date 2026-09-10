@@ -24,7 +24,7 @@ STRINGS = {
             "key. Newest-record ≠ current-branch ID; confirm that via Bug Fix "
             "→ Blob-based Fix."
         ),
-        "tmp_query": "OPUS ID / key",
+        "tmp_query": "OPUS IDs / keys (one per line)",
         "tmp_match": "Match",
         "tmp_match_ignore_hash": "Ignore hash",
         "tmp_match_fuzzy": "Fuzzy",
@@ -260,6 +260,22 @@ _LANG_CHOICES = [
     "ko-KR", "ja-JP", "zh-CN", "zh-TW", "zh-HK",
 ]
 
+STRINGS["en"].update({
+    "tmp_lang": "Target languages (comma-separated)",
+    "tmp_batch_limit": "Use at most 100 keys, 30 languages and 200 key/language combinations.",
+    "tmp_status_partial": "partial (see per-key results)",
+    "tmp_batch_summary": "{n} key/language queries · checked {time}",
+    "tmp_batch_item": "{key} [{lang}] · records: {records} · ICE hits: {hits}",
+})
+STRINGS["zh"].update({
+    "tmp_query": "OPUS ID / Key（每行一个）",
+    "tmp_lang": "目标语言（多个用逗号分隔）",
+    "tmp_batch_limit": "最多 100 个 Key、30 种语言、200 组 Key/语言组合。",
+    "tmp_status_partial": "部分完成（查看各 Key 结果）",
+    "tmp_batch_summary": "{n} 组 Key/语言查询 · 查询时间 {time}",
+    "tmp_batch_item": "{key} [{lang}] · 翻译记录：{records} · ICE 命中：{hits}",
+})
+
 _MATCH_KEYS = ("ignore_hash", "fuzzy", "exact")
 _CHANNEL_KEYS = ("all", "mr", "file")
 _WARN_KEYS = {
@@ -276,6 +292,7 @@ _STATUS_KEYS = {
     "skipped": "tmp_status_skipped",
     "unavailable": "tmp_status_unavailable",
     "no_probe": "tmp_status_no_probe",
+    "partial": "tmp_status_partial",
     "no_api": "tmp_status_no_api",
 }
 
@@ -328,10 +345,10 @@ class TmPanelTab:
 
         self.lbl_query = ttk.Label(form, text="", style="Status.TLabel")
         self.lbl_query.grid(row=0, column=0, sticky="e", padx=(0, 6), pady=3)
-        self.var_query = tk.StringVar()
-        self.ent_query = ttk.Entry(form, textvariable=self.var_query)
+        self.ent_query = tk.Text(form, height=6, width=55, wrap="none",
+                                 font=(FONT_FAMILY, 10))
         self.ent_query.grid(row=0, column=1, sticky="ew", padx=(0, 12), pady=3)
-        self.ent_query.bind("<Return>", lambda _e: self._on_search())
+        self.ent_query.bind("<Control-Return>", self._search_from_keyboard)
         self.lbl_match = ttk.Label(form, text="", style="Status.TLabel")
         self.lbl_match.grid(row=0, column=2, sticky="e", padx=(0, 6), pady=3)
         self.var_match = tk.StringVar(value="ignore_hash")
@@ -603,7 +620,7 @@ class TmPanelTab:
 
     # ------------------------------------------------------------------
     def _on_clear(self):
-        self.var_query.set("")
+        self.ent_query.delete("1.0", "end")
         self.var_source.set("")
         self.var_translation.set("")
         self.var_product.set("")
@@ -633,7 +650,7 @@ class TmPanelTab:
         if not layers:
             layers = set(tm.LAYERS)
         return tm.QueryIntent(
-            query=self.var_query.get(),
+            query=self.ent_query.get("1.0", "end-1c"),
             match_mode=self._match_raw(),
             source_text=self.var_source.get(),
             translated_text=self.var_translation.get(),
@@ -643,6 +660,10 @@ class TmPanelTab:
             layers=frozenset(layers),
         )
 
+    def _search_from_keyboard(self, _event=None):
+        self._on_search()
+        return "break"
+
     def _on_search(self):
         if self._searching:
             return
@@ -651,6 +672,7 @@ class TmPanelTab:
         if err:
             key = {
                 "need_filter": "tmp_need_filter",
+                "batch_limit": "tmp_batch_limit",
                 "ice_needs_source_or_query": "tmp_ice_needs_source_or_query",
             }.get(err, "tmp_need_filter")
             self._idle(self._t(key))
@@ -663,7 +685,7 @@ class TmPanelTab:
             view = None
             fail = None
             try:
-                view = tm.search_tm_layers(
+                view = tm.search_tm_batch(
                     intent,
                     search_fn=lambda **kw: tm.default_search_records(
                         base_url=base_url, **kw),
@@ -698,12 +720,26 @@ class TmPanelTab:
             err = view.get("error") or ""
             key = {
                 "need_filter": "tmp_need_filter",
+                "batch_limit": "tmp_batch_limit",
                 "ice_needs_source_or_query": "tmp_ice_needs_source_or_query",
             }.get(err, "")
             self._idle(self._t(key) if key else self._t("tmp_failed").format(
                 error=err or "error"))
             return
 
+        results = view.get("query_results") or []
+        if results:
+            lines = [self._t("tmp_batch_summary").format(
+                n=len(results), time=view.get("checked_at", ""))]
+            for item in results:
+                lines.append(self._t("tmp_batch_item").format(
+                    key=item["query"] or "(source/product)", lang=item["language"] or "all",
+                    records=item["records"], hits=item["ice_hits"]))
+                lines.append("  " + " · ".join(
+                    f"{layer}: {self._status_label(state)}"
+                    for layer, state in item["status"].items()))
+                lines.extend(f"  {name}: {message}" for name, message in item["errors"].items())
+            self._set_detail("\n".join(lines))
         kpis = view.get("kpis") or {}
         self._kpi["ice"][1].configure(text=self._t("tmp_kpi_ice_n").format(
             hits=kpis.get("ice_store_hits", 0),
@@ -749,7 +785,8 @@ class TmPanelTab:
                 ice=kpis.get("ice_store_hits", 0),
                 shared=kpis.get("shared_hits", 0),
             ))
-        self._set_detail(self._t("tmp_detail_placeholder"))
+        if not results:
+            self._set_detail(self._t("tmp_detail_placeholder"))
 
     def _anatomy_text(self, anatomy: dict) -> str:
         t = self._t

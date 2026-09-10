@@ -24,7 +24,8 @@ from __future__ import annotations
 import os
 import re
 from collections import OrderedDict, defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Mapping, Sequence
 from urllib.parse import urlencode
 
@@ -811,6 +812,81 @@ def _safe_call(label: str, fn, *args, **kwargs) -> tuple[Any, str]:
         return fn(*args, **kwargs), ""
     except Exception as exc:  # noqa: BLE001
         return None, f"{label}: {exc}"
+
+
+MAX_QUERY_KEYS = 100
+MAX_TARGET_LANGUAGES = 30
+MAX_BATCH_SEARCHES = 200
+
+
+def split_queries(text: str) -> list[str]:
+    """One literal key per line; accept Markdown-escaped underscores."""
+    return list(dict.fromkeys(
+        value for line in (text or "").splitlines()
+        if (value := strip_wrapping_quotes(line).replace(r"\_", "_"))
+    ))
+
+
+def split_target_languages(text: str) -> list[str]:
+    return list(dict.fromkeys(filter(None, re.split(r"[,;，；\s]+", text or ""))))
+
+
+def search_tm_batch(intent: QueryIntent, **adapters) -> dict[str, Any]:
+    """Run each key/language independently; retain partial failures and dedupe."""
+    clean = intent.cleaned()
+    queries = split_queries(clean.query) or [""]
+    languages = split_target_languages(clean.target_language) or [""]
+    if (len(queries) > MAX_QUERY_KEYS or len(languages) > MAX_TARGET_LANGUAGES
+            or len(queries) * len(languages) > MAX_BATCH_SEARCHES):
+        return {"ok": False, "error": "batch_limit"}
+    if validate_intent(clean):
+        return {"ok": False, "error": validate_intent(clean)}
+    results = []
+    records = []
+    ice = []
+    seen_ice = set()
+    errors = {}
+    notes = []
+    statuses = {layer: [] for layer in LAYERS}
+    for query in queries:
+        for language in languages:
+            single = replace(clean, query=query, target_language=language)
+            view = search_tm_layers(single, **adapters)
+            label = f"{query or '(source/product)'} [{language or 'all'}]"
+            for name, message in view.get("errors", {}).items():
+                errors[f"{label} / {name}"] = message
+            # Seeds may be hidden from the records layer but are needed for grouping.
+            rows = [r for family in view.get("lineages", [])
+                    for bucket in family["hashes"] for r in bucket["records"]]
+            records.extend(rows)
+            for hit in view.get("ice", []):
+                identity = (hit["opus_id"], hit["source_text"], hit["match_type"],
+                            tuple(sorted(hit["translations"].items())))
+                if identity not in seen_ice:
+                    seen_ice.add(identity)
+                    ice.append(hit)
+            for layer in LAYERS:
+                statuses[layer].append(view.get("status", {}).get(layer, "skipped"))
+            notes.extend(view.get("warnings", []))
+            results.append({"query": query, "language": language,
+                            "status": view.get("status", {}),
+                            "errors": view.get("errors", {}),
+                            "records": len(rows),
+                            "ice_hits": sum(h.get("hit", False) for h in view.get("ice", []))})
+    records = merge_records(records)
+    lineages = group_lineages(records, ice,
+                             query_hash=parse_opus_id(queries[0])["path_hash"] if len(queries) == 1 else "")
+    status = {}
+    for layer, states in statuses.items():
+        unique = set(states)
+        status[layer] = states[0] if len(unique) == 1 else "partial"
+    return {"ok": True, "error": "", "intent": _intent_public(clean),
+            "anatomy": anatomy_card(clean, lineages),
+            "records": records if "records" in clean.layers else [],
+            "ice": ice, "lineages": lineages, "kpis": kpis(records, ice, lineages),
+            "warnings": list(dict.fromkeys(notes)), "errors": errors,
+            "status": status, "query_results": results,
+            "checked_at": datetime.now(timezone.utc).isoformat()}
 
 
 def search_tm_layers(
