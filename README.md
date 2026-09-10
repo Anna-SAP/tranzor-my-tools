@@ -179,7 +179,7 @@ powershell -File build_windows.ps1          # → dist/TranzorExporter.exe
 
 ## Run instructions
 
-1. **Launch** `TranzorExporter.exe` / `.app` (or `python export_gui.py`). A local bridge server starts on `127.0.0.1:48217`; tabs render lazily on first click so cold-start stays fast. Toggle **EN / 中文** at the top-right anytime.
+1. **Launch** `TranzorExporter.exe` / `.app` (or `python export_gui.py`). A local bridge server starts on `127.0.0.1:48217`; tabs render lazily on first click so cold-start stays fast. Toggle **EN / 中文** and **☀ Light / 🌙 Dark** at the top-right anytime (the theme is remembered across launches). When the window is too narrow for all tab titles they are shortened with `…`; hover a tab to see its full name.
 2. **Authenticate.** The platform requires a Bearer JWT. Sign in with your LDAP email + password; the app stores **only** the JWT (never your password) in `~/.tranzor_exporter_auth.json` and attaches it transparently to platform requests. Offline-first tabs (OPUS Monitor/Search, Review Worklist, Tranzor Checks first paint) work from the local cache *before* you log in.
 3. **Pick a task / MR** — a row in **🔀 MR Pipeline** or **🔎 Scan Tasks**, a Task ID in **📁 File Translation**, or open **🎯 Review Worklist** to be steered to the highest-priority MRs.
 4. **Run checks** — **🚦 Pre-Translation Check** before a job, **🛡️ Term Watchtower** for terminology, **🩺 Tranzor Checks** for error triage, **🔬 TM & Context Insight** for routing, **🧬 Same Origin** for drift. Hit **🔄 Sync** to pull fresh data on demand.
