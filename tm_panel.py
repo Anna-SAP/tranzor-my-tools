@@ -1,23 +1,10 @@
-"""
-TM Panel —— 三层翻译记忆检索（ICE TM / Shared TM / Tranzor 记录）
-================================================================
+"""Live Shared TM search, separate ICE matching, and historical Tranzor records.
 
-Dashboard 的 Search Translations 只查 ``translations`` / ``legacy_translations``
-记录表；Shared TM 的 ``search()`` 没有 UI；ICE TM 只有 match、没有浏览入口。
-本模块把这三层摊开给本地化同事检索，并按 OPUS ID 的 Hash 谱系分组。
-
-数据约束（与 Tranzor-Platform 源码核对，见 opus-id-tm-guide.html）：
-
-* **Tranzor 记录** — ``GET /api/v1/translations/search``（MR + File）。
-  Fuzzy = ``ILIKE '%x%'``（``% _ \\`` 被转义）；Exact = 整段相等。
-* **ICE TM** — ``POST {context-service}/api/v1/translation-memory/match``。
-  规则 1：``segment_key``（OPUS ID）+ 内容 CRC；规则 3：>3 词可按内容命中。
-* **Shared TM** — 包内 ``search()`` 没有 HTTP。本层展示的是流水线写回记录表
-  时的 ``tm_match`` 溯源（``GET /dashboard/mr-cases``）以及 File Translation
-  的 ``translation_type=TM``。这不是 Shared TM 库表本身的浏览，调用方必须
-  把这一点标清楚。
-
-纯逻辑、无 tkinter。GUI 在 :mod:`gui_tab_tm_panel`。
+The GUI reads /api/v1/translation-memory/search on every search. Store pairs
+provide IDs and source text even when no MR/file records exist. The endpoint
+must be deployed; unavailable or invalid responses are explicit failures.
+Historical provenance adapters remain available for callers that need them,
+but are not a substitute for live TM pairs. GUI code is in gui_tab_tm_panel.
 """
 from __future__ import annotations
 
@@ -505,7 +492,7 @@ def apply_provenance(
 
 
 def is_shared_tm_hit(row: Mapping[str, Any]) -> bool:
-    return bool(row.get("tm_match") or row.get("file_tm"))
+    return bool(row.get("origin") == "shared_tm" or row.get("tm_match") or row.get("file_tm"))
 
 
 def provenance_targets(
@@ -654,7 +641,7 @@ def kpis(
 ) -> dict[str, int]:
     ice_store_hits = sum(1 for h in ice_hits if h.get("hit"))
     return {
-        "record_rows": len(records),
+        "record_rows": sum(r.get("origin") not in ("shared_tm", "ice_seed") for r in records),
         "logical_keys": len(lineages),
         "hash_variants": sum(g.get("hash_count") or 0 for g in lineages),
         "ice_store_hits": ice_store_hits,
@@ -871,7 +858,8 @@ def search_tm_batch(intent: QueryIntent, **adapters) -> dict[str, Any]:
             results.append({"query": query, "language": language,
                             "status": view.get("status", {}),
                             "errors": view.get("errors", {}),
-                            "records": len(rows),
+                            "records": sum(r.get("origin") != "shared_tm" for r in rows),
+                            "shared_pairs": sum(r.get("origin") == "shared_tm" for r in rows),
                             "ice_hits": sum(h.get("hit", False) for h in view.get("ice", []))})
     records = merge_records(records)
     lineages = group_lineages(records, ice,
@@ -883,7 +871,7 @@ def search_tm_batch(intent: QueryIntent, **adapters) -> dict[str, Any]:
     return {"ok": True, "error": "", "intent": _intent_public(clean),
             "anatomy": anatomy_card(clean, lineages),
             "records": records if "records" in clean.layers else [],
-            "ice": ice, "lineages": lineages, "kpis": kpis(records, ice, lineages),
+            "ice": ice, "lineages": lineages, "kpis": {**kpis(records, ice, lineages), **({"shared_hits": sum(r.get("origin") == "shared_tm" for r in records)} if adapters.get("store_fn") else {})},
             "warnings": list(dict.fromkeys(notes)), "errors": errors,
             "status": status, "query_results": results,
             "checked_at": datetime.now(timezone.utc).isoformat()}
@@ -896,6 +884,7 @@ def search_tm_layers(
     ice_fn: IceMatchFn | None = None,
     local_fn: LocalSearchFn | None = None,
     provenance_fn: ProvenanceFn | None = None,
+    store_fn: Callable[..., Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Run the selected TM layers and return a JSON-serialisable view model."""
     clean = intent.cleaned()
@@ -988,9 +977,25 @@ def search_tm_layers(
             is_shared_tm_hit(r) for r in records
         ) else "no_api"
 
+    store_rows = []
+    if store_fn is not None and ("shared" in clean.layers or "ice" in clean.layers):
+        try:
+            store_rows, truncated = search_live_store(clean, store_fn)
+            status["shared"] = "truncated" if truncated else ("ok" if store_rows else "empty")
+            if truncated:
+                errors["shared"] = "Result limit reached; narrow the key or language filter."
+        except Exception as exc:
+            status["shared"] = "error"
+            errors["shared"] = str(exc)
+        # Store rows are distinct from pipeline records even if IDs/text coincide.
+        records = merge_records(store_rows, records)
+
     ice_hits: list[dict[str, Any]] = []
     if "ice" in clean.layers:
-        probes = ice_probe_items(clean, records)
+        all_probes = ice_probe_items(clean, store_rows + records, cap=max(len(records) + 2, MAX_ICE_PROBES))
+        probes = all_probes[:MAX_ICE_PROBES]
+        if len(all_probes) > len(probes):
+            errors["ice_limit"] = "ICE probe limit reached; narrow the key or language filter."
         if not probes:
             status["ice"] = "no_probe"
         elif ice_fn is None:
@@ -1019,6 +1024,11 @@ def search_tm_layers(
         display_records = []
 
     notes = warnings_for(clean, records, ice_hits)
+    if store_fn is not None:
+        # Provenance markers are historical evidence, not live-store rows.
+        live_count = len(store_rows)
+    else:
+        live_count = sum(is_shared_tm_hit(r) for r in records)
     view = {
         "ok": True,
         "error": "",
@@ -1033,6 +1043,7 @@ def search_tm_layers(
         "status": status,
         "totals": {"records_api": total, "records_merged": len(records)},
     }
+    view["kpis"]["shared_hits"] = live_count
     return view
 
 
@@ -1053,6 +1064,53 @@ def _intent_public(intent: QueryIntent) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Default HTTP adapters (injected in tests)
 # ---------------------------------------------------------------------------
+def search_live_store(intent: QueryIntent, search_fn) -> tuple[list[dict], bool]:
+    rows = []
+    params = {"key": ignore_hash_needle(intent.query) if intent.match_mode == "ignore_hash" else intent.query,
+              "match_mode": "exact" if intent.match_mode == "exact" else "fuzzy",
+              "source": intent.source_text, "target": intent.translated_text,
+              "project": intent.product_line, "target_language": intent.target_language,
+              "limit": PAGE_SIZE}
+    for page in range(10):
+        payload = search_fn(**params, offset=page * PAGE_SIZE)
+        if not isinstance(payload, Mapping) or payload.get("store") != "shared_tm":
+            raise ValueError("Shared TM search returned an invalid response (not a live store result).")
+        entries = payload.get("entries")
+        total = payload.get("total")
+        if not isinstance(entries, list) or not isinstance(total, int) or total < 0:
+            raise ValueError("Shared TM search returned invalid pagination data.")
+        for item in entries:
+            if not all(k in item for k in ("pair_id", "pair_type", "source", "target", "target_language")):
+                raise ValueError("Shared TM search returned an incomplete translation pair.")
+            row = parse_record_entry({
+                "translation_id": f"shared_tm:{item['pair_type']}:{item['pair_id']}",
+                "opus_id": item.get("source_id") or "",
+                "source_text": item["source"], "translated_text": item["target"],
+                "target_language": item["target_language"],
+                "source_type": item["pair_type"], "project_id": item.get("project", ""),
+                "created_at": item.get("updated_date") or item.get("created_date") or "",
+            }, origin="shared_tm")
+            row.update(pair_id=item["pair_id"], pair_type=item["pair_type"],
+                       updated_at=item.get("updated_date"), checked_at=payload.get("checked_at"))
+            rows.append(row)
+        if (page + 1) * PAGE_SIZE >= total:
+            return rows, False
+        if len(entries) < PAGE_SIZE:
+            raise ValueError("Shared TM returned an incomplete page; retry the query.")
+    return rows, True
+
+
+def default_search_store(base_url: str | None = None, **params) -> dict[str, Any]:
+    import requests
+    import export_mr_pipeline as mr_api
+    url = (base_url or mr_api.TRANZOR_URL).rstrip("/") + "/api/v1/translation-memory/search"
+    response = requests.get(url, params=params, headers={"Cache-Control": "no-cache"}, timeout=30)
+    if response.status_code == 404:
+        raise RuntimeError("Shared TM search API is not deployed on this Platform. This is not an empty TM result.")
+    response.raise_for_status()
+    return response.json()
+
+
 def default_search_records(base_url: str | None = None, **kwargs) -> dict[str, Any]:
     import export_mr_pipeline as mr_api
     kwargs.setdefault("source_type", kwargs.pop("source_type", "all"))

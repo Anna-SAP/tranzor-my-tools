@@ -265,7 +265,7 @@ STRINGS["en"].update({
     "tmp_batch_limit": "Use at most 100 keys, 30 languages and 200 key/language combinations.",
     "tmp_status_partial": "partial (see per-key results)",
     "tmp_batch_summary": "{n} key/language queries · checked {time}",
-    "tmp_batch_item": "{key} [{lang}] · records: {records} · ICE hits: {hits}",
+    "tmp_batch_item": "{key} [{lang}] · TM pairs: {shared} · records: {records} · ICE hits: {hits}",
 })
 STRINGS["zh"].update({
     "tmp_query": "OPUS ID / Key（每行一个）",
@@ -273,7 +273,28 @@ STRINGS["zh"].update({
     "tmp_batch_limit": "最多 100 个 Key、30 种语言、200 组 Key/语言组合。",
     "tmp_status_partial": "部分完成（查看各 Key 结果）",
     "tmp_batch_summary": "{n} 组 Key/语言查询 · 查询时间 {time}",
-    "tmp_batch_item": "{key} [{lang}] · 翻译记录：{records} · ICE 命中：{hits}",
+    "tmp_batch_item": "{key} [{lang}] · TM 库记录：{shared} · 翻译记录：{records} · ICE 命中：{hits}",
+})
+
+STRINGS["en"].update({
+    "tmp_hint": "Search live Shared TM by key (one per line). ICE matching uses the returned ID and source. Enter target languages separated by commas; leave blank for all. Ctrl+Enter searches.",
+    "tmp_kpi_shared": "Shared TM store (live)",
+    "tmp_kpi_shared_n": "{n} live TM pairs",
+    "tmp_col_created": "Created / TM updated",
+    "tmp_status_truncated": "partial: result limit reached",
+    "tmp_partial_failure": "Some queries could not complete. See the details below.",
+    "tmp_status_no_probe": "Not queried: no source available for ICE matching",
+    "tmp_help_body": "Shared TM reads current translation pairs directly from the Platform TM search API. Every Search makes fresh requests. It is separate from historical Tranzor records and ICE matching.\n\nEnter one partial key or full OPUS ID per line. Target languages accept commas or spaces; blank means all. Ctrl+Enter searches.\n\nThe backend /api/v1/translation-memory/search endpoint must be deployed. An unavailable API is an error, never proof that TM is empty. Select a TM row for the full source, target, pair ID and update/check timestamps. ICE can return a different translation and is shown separately.",
+})
+STRINGS["zh"].update({
+    "tmp_hint": "按 Key 查询实时 Shared TM（每行一个）。ICE 使用查询所得的 ID 和源文进行匹配。多个目标语言用逗号分隔，留空查询所有语言。Ctrl+Enter 开始搜索。",
+    "tmp_kpi_shared": "Shared TM 实时库",
+    "tmp_kpi_shared_n": "{n} 条实时 TM 记录",
+    "tmp_col_created": "创建 / TM 更新时间",
+    "tmp_status_truncated": "部分结果：已达查询上限",
+    "tmp_partial_failure": "部分查询未能完成，请查看下方详情。",
+    "tmp_status_no_probe": "未查询：没有可供 ICE 匹配的源文",
+    "tmp_help_body": "Shared TM 从 Platform 查询接口直接读取当前库记录。每次搜索都会重新请求，与翻译历史和 ICE 匹配结果分开展示。\n\n每行输入一个部分 Key 或完整 OPUS ID；目标语言用逗号或空格分隔，留空代表所有语言。Ctrl+Enter 开始搜索。\n\n后端需要部署 /api/v1/translation-memory/search。接口不可用会显示错误，不表示 TM 没有数据。选中 TM 行可查看完整源文、译文、记录 ID 和更新/查询时间。ICE 可能返回不同译文，将单独显示。",
 })
 
 _MATCH_KEYS = ("ignore_hash", "fuzzy", "exact")
@@ -293,6 +314,7 @@ _STATUS_KEYS = {
     "unavailable": "tmp_status_unavailable",
     "no_probe": "tmp_status_no_probe",
     "partial": "tmp_status_partial",
+    "truncated": "tmp_status_truncated",
     "no_api": "tmp_status_no_api",
 }
 
@@ -691,9 +713,7 @@ class TmPanelTab:
                         base_url=base_url, **kw),
                     ice_fn=lambda items, langs: tm.default_ice_match(
                         items, langs),
-                    local_fn=tm.default_local_search,
-                    provenance_fn=lambda **kw: tm.default_provenance(
-                        base_url=base_url, **kw),
+                    store_fn=lambda **kw: tm.default_search_store(base_url=base_url, **kw),
                 )
             except Exception as exc:  # noqa: BLE001
                 fail = str(exc)[:160]
@@ -734,7 +754,7 @@ class TmPanelTab:
             for item in results:
                 lines.append(self._t("tmp_batch_item").format(
                     key=item["query"] or "(source/product)", lang=item["language"] or "all",
-                    records=item["records"], hits=item["ice_hits"]))
+                    records=item["records"], shared=item.get("shared_pairs", 0), hits=item["ice_hits"]))
                 lines.append("  " + " · ".join(
                     f"{layer}: {self._status_label(state)}"
                     for layer, state in item["status"].items()))
@@ -776,7 +796,11 @@ class TmPanelTab:
         for family in lineages:
             self._insert_family(family)
 
-        if not lineages:
+        if errors:
+            self._idle(self._t("tmp_partial_failure"))
+        elif status.get("ice") == "no_probe" and not lineages:
+            self._idle(self._t("tmp_status_no_probe"))
+        elif not lineages:
             self._idle(self._t("tmp_empty"))
         else:
             self._idle(self._t("tmp_done").format(
@@ -878,13 +902,17 @@ class TmPanelTab:
         if "records" not in layers and "shared" not in layers:
             return
         for row in bucket.get("records") or []:
+            if row.get("origin") == "shared_tm" and "shared" not in layers:
+                continue
             if "records" not in layers and not (
-                "shared" in layers and tm.is_shared_tm_hit(row)
+                "shared" in layers and row.get("origin") == "shared_tm"
             ):
                 continue
             badges = []
-            if row.get("tm_match") or row.get("file_tm"):
-                badges.append("Shared")
+            if row.get("origin") == "shared_tm":
+                badges.append("TM live")
+            elif row.get("tm_match") or row.get("file_tm"):
+                badges.append("TM provenance")
             if row.get("ice_match"):
                 badges.append("ICE*")
             if row.get("cached"):
@@ -929,6 +957,10 @@ class TmPanelTab:
         if kind == "record":
             row = data.get("row") or {}
             lines = [
+                f"Store:    {row.get('origin') or ''}",
+                f"Pair ID:  {row.get('pair_id') or ''}",
+                f"Updated:  {row.get('updated_at') or ''}",
+                f"Checked:  {row.get('checked_at') or ''}",
                 f"OPUS ID:  {row.get('opus_id') or ''}",
                 f"Hash:     {row.get('path_hash') or ''}   "
                 f"({self._role_label((data.get('bucket') or {}).get('role') or '')})",
