@@ -480,5 +480,44 @@ class TestListMergeRequests(unittest.TestCase):
             "/api/v4/projects/web%2Fbui/merge_requests",
             session.calls[0])
 
+
+class _PagingSession:
+    def __init__(self, pages):
+        self._pages = list(pages)
+        self.calls = []
+        self.headers = {}
+
+    def get(self, url, **kwargs):
+        self.calls.append((url, kwargs.get("params") or {}))
+        page = int((kwargs.get("params") or {}).get("page") or 1)
+        payload = self._pages[page - 1] if 0 < page <= len(self._pages) else []
+        return _FakeResponse(payload, 200)
+
+
+class TestListMrDiffs(unittest.TestCase):
+    def test_paginates_and_caches(self):
+        page1 = [{"new_path": f"f{i}.ts"} for i in range(2)]
+        page2 = [{"new_path": "last.ts"}]
+        session = _PagingSession([page1, page2])
+        client = _make_client_with_session(session)
+
+        diffs = client.list_mr_diffs("common/uns", 4184, per_page=2)
+        self.assertEqual([d["new_path"] for d in diffs],
+                         ["f0.ts", "f1.ts", "last.ts"])
+        self.assertEqual(len(session.calls), 2)
+        self.assertIn("/merge_requests/4184/diffs", session.calls[0][0])
+
+        again = client.list_mr_diffs("common/uns", 4184, per_page=2)
+        self.assertEqual(again, diffs)
+        self.assertEqual(len(session.calls), 2)
+
+    def test_accepts_wrapped_diffs_object(self):
+        session = _FakeSession({"diffs": [{"new_path": "a.ts"}]})
+        client = _make_client_with_session(session)
+        diffs = client.list_mr_diffs("web/web", 1)
+        self.assertEqual(diffs[0]["new_path"], "a.ts")
+
+
 if __name__ == "__main__":
     unittest.main()
+

@@ -515,6 +515,16 @@ except Exception as _bf_e:  # pragma: no cover
 else:
     _bf_import_error = None
 
+# 🔁 MR → TM — extract locale-only Git MR diffs and upsert Tranzor TM via
+# blob-based Bug Fix. Pure-additive, appended last.
+try:
+    import gui_tab_mr_tm_sync as _mts_tab_mod
+except Exception as _mts_e:  # pragma: no cover
+    _mts_tab_mod = None
+    _mts_import_error = _mts_e
+else:
+    _mts_import_error = None
+
 _boot_mark("optional_tabs_imported")
 
 # ---------------------------------------------------------------------------
@@ -1012,6 +1022,13 @@ if _tmp_tab_mod is not None:
 if _bf_tab_mod is not None:
     try:
         for _lang_code, _extra in _bf_tab_mod.STRINGS.items():
+            STRINGS.setdefault(_lang_code, {}).update(_extra)
+    except Exception:
+        pass
+
+if _mts_tab_mod is not None:
+    try:
+        for _lang_code, _extra in _mts_tab_mod.STRINGS.items():
             STRINGS.setdefault(_lang_code, {}).update(_extra)
     except Exception:
         pass
@@ -1921,6 +1938,31 @@ class ExportApp:
                         pass
         _boot_mark("tab_bugfix")
 
+        # --- Tab: 🔁 MR → TM (optional, pure additive) ---
+        self.mts_tab = None
+        self._mts_tab_index = None
+        self._mts_tab_initialized = False
+        tab_mts = None
+        if _mts_tab_mod is not None:
+            try:
+                tab_mts = ttk.Frame(self.notebook, style="App.TFrame")
+                self.notebook.add(tab_mts, text="")
+                self.mts_tab = _mts_tab_mod.MrTmSyncTab(tab_mts, self)
+                self._mts_tab_index = self.notebook.index(tab_mts)
+            except Exception as _e:
+                print(f"[MR→TM tab] init failed: {_e}")
+                self.mts_tab = None
+                if tab_mts is not None:
+                    try:
+                        self.notebook.forget(tab_mts)
+                    except Exception:
+                        pass
+                    try:
+                        tab_mts.destroy()
+                    except Exception:
+                        pass
+        _boot_mark("tab_mr_tm_sync")
+
         # ═══════════════════════════════════════════
         # TAB 1 CONTENTS (File Translation)
         # ═══════════════════════════════════════════
@@ -2417,6 +2459,13 @@ class ExportApp:
                 _register_tab_refresh(self.bf_tab, self._bf_tab_index)
             except Exception:
                 pass
+        if self.mts_tab is not None and self._mts_tab_index is not None:
+            try:
+                self.notebook.tab(
+                    self._mts_tab_index, text=self._t("tab_mr_tm_sync"))
+                _register_tab_refresh(self.mts_tab, self._mts_tab_index)
+            except Exception:
+                pass
 
         # Summary panel texts
         self.lbl_summary_title.configure(text=self._t("summary_title"))
@@ -2860,6 +2909,15 @@ class ExportApp:
                 self._bf_tab_initialized = True
                 try:
                     self.bf_tab.on_first_show()
+                except Exception:
+                    pass
+            elif (self.mts_tab is not None
+                  and self._mts_tab_index is not None
+                  and tab_idx == self._mts_tab_index
+                  and not self._mts_tab_initialized):
+                self._mts_tab_initialized = True
+                try:
+                    self.mts_tab.on_first_show()
                 except Exception:
                     pass
 
