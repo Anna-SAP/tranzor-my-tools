@@ -149,9 +149,12 @@ import subprocess
 import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor
 from tkinter import ttk, messagebox
+from tkinter import font as tkfont
 from datetime import date, datetime, timedelta
 
 from time_display import format_display_datetime, format_tz_label
+import app_theme
+import tab_labels
 
 _boot_mark("stdlib_imports_done")
 
@@ -570,6 +573,9 @@ STRINGS = {
         "log_header":         "Log Output",
         "footer":             "Tranzor Platform · Internal Tool · v2.0",
         "lang_toggle":        "中文",
+        "theme_toggle_light": "☀ Light",
+        "theme_toggle_dark":  "🌙 Dark",
+        "theme_toggle_tip":   "Switch between the dark and light theme (remembered for next launch)",
         # Summary panel
         "summary_title":      "📋 Platform Task Overview",
         "summary_total":      "Total Tasks",
@@ -742,6 +748,9 @@ STRINGS = {
         "log_header":         "运行日志",
         "footer":             "Tranzor Platform · Internal Tool · v2.0",
         "lang_toggle":        "English",
+        "theme_toggle_light": "☀ 亮色",
+        "theme_toggle_dark":  "🌙 暗色",
+        "theme_toggle_tip":   "在暗色 / 亮色主题间切换（下次启动自动记住）",
         # Summary panel
         "summary_title":      "📋 平台任务概览",
         "summary_total":      "总任务数",
@@ -1263,6 +1272,21 @@ class ExportApp:
         # Current language
         self.lang = "en"
 
+        # Theme (dark = the original look; light remaps the palette). The
+        # engine is installed in main() before any widget exists; installing
+        # again here is a no-op safety net for embedders / tests.
+        app_theme.install()
+        self.theme_mode = app_theme.current_mode()
+
+        # Notebook tab titles: full text per index (the visible text may be
+        # truncated with "…" to fit the window; hover shows the full one).
+        self._tab_full_titles = {}
+        self._tab_truncated = set()
+        self._tab_layout_job = None
+        self._tab_hover_idx = None
+        self._tab_tip = None
+        self._tab_tip_job = None
+
         # State
         self.running = False
         self.last_output_path = None
@@ -1593,6 +1617,16 @@ class ExportApp:
             activeforeground="#fff", padx=12, pady=2)
         self.btn_lang.pack(side="right", anchor="ne")
 
+        # Light / Dark theme toggle (left of the language toggle).
+        self.btn_theme = self._create_button(
+            header, text="", command=self._toggle_theme,
+            style_name="Secondary",
+            font=(FONT_FAMILY, 10),
+            bg=self.ACCENT, fg="#ccc", activebackground="#1a3a6a",
+            activeforeground="#fff", padx=12, pady=2)
+        self.btn_theme.pack(side="right", anchor="ne", padx=(0, 8))
+        self._theme_tip = Tooltip(self.btn_theme, "")
+
         # Platform sign-in button (top-right, left of the language toggle).
         # The platform now requires Bearer-JWT auth; this lets the user
         # sign in / re-sign-in (token lasts 7 days) without restarting.
@@ -1631,6 +1665,10 @@ class ExportApp:
         # ── Notebook (tabbed layout) ──
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill="both", expand=True, padx=24, pady=(8, 0))
+        # Tab-title fitting: re-layout on resize, full title on hover.
+        self.notebook.bind("<Configure>", self._schedule_tab_layout, add="+")
+        self.notebook.bind("<Motion>", self._on_tab_motion, add="+")
+        self.notebook.bind("<Leave>", self._on_tab_leave, add="+")
 
         # --- Tab 1: File Translation (existing content) ---
         tab1 = ttk.Frame(self.notebook, style="App.TFrame")
@@ -2259,6 +2297,7 @@ class ExportApp:
         self.lbl_log_header.configure(text=self._t("log_header"))
         self.lbl_footer.configure(text=self._t("footer"))
         self.btn_lang.configure(text=self._t("lang_toggle"))
+        self._refresh_theme_button()
         self._update_account_button()
 
         # PR-L: LAZY per-tab refresh — the real fix for the ~57s
@@ -2304,12 +2343,12 @@ class ExportApp:
                 self._pending_tab_refresh.add(tab)
 
         # Notebook tab titles (synchronous — these are cheap, single calls).
-        self.notebook.tab(0, text=self._t("tab_file_translation"))
-        self.notebook.tab(1, text=self._t("tab_mr_pipeline"))
-        self.notebook.tab(2, text=self._t("tab_quality_overview"))
+        self._set_tab_title(0, self._t("tab_file_translation"))
+        self._set_tab_title(1, self._t("tab_mr_pipeline"))
+        self._set_tab_title(2, self._t("tab_quality_overview"))
         if self.ft_tab is not None:
             try:
-                self.notebook.tab(3, text=self._t("tab_full_translations"))
+                self._set_tab_title(3, self._t("tab_full_translations"))
                 _register_tab_refresh(self.ft_tab, 3)
             except Exception:
                 pass
@@ -2317,71 +2356,69 @@ class ExportApp:
             try:
                 # HR tab index depends on whether Full Translations tab exists
                 hr_idx = 4 if self.ft_tab is not None else 3
-                self.notebook.tab(hr_idx, text=self._t("tab_human_revisions"))
+                self._set_tab_title(hr_idx, self._t("tab_human_revisions"))
                 _register_tab_refresh(self.hr_tab, hr_idx)
             except Exception:
                 pass
         if self.st_tab is not None and self._st_tab_index is not None:
             try:
-                self.notebook.tab(self._st_tab_index, text=self._t("tab_scan_tasks"))
+                self._set_tab_title(self._st_tab_index, self._t("tab_scan_tasks"))
                 _register_tab_refresh(self.st_tab, self._st_tab_index)
             except Exception:
                 pass
         if self.tw_tab is not None and self._tw_tab_index is not None:
             try:
-                self.notebook.tab(self._tw_tab_index, text=self._t("tab_term_watchtower"))
+                self._set_tab_title(self._tw_tab_index, self._t("tab_term_watchtower"))
                 _register_tab_refresh(self.tw_tab, self._tw_tab_index)
             except Exception:
                 pass
         if self.tci_tab is not None and self._tci_tab_index is not None:
             try:
-                self.notebook.tab(self._tci_tab_index, text=self._t("tab_tm_context_insight"))
+                self._set_tab_title(self._tci_tab_index, self._t("tab_tm_context_insight"))
                 _register_tab_refresh(self.tci_tab, self._tci_tab_index)
             except Exception:
                 pass
         if self.opus_tab is not None and self._opus_tab_index is not None:
             try:
-                self.notebook.tab(self._opus_tab_index, text=self._t("tab_opus_monitor"))
+                self._set_tab_title(self._opus_tab_index, self._t("tab_opus_monitor"))
                 _register_tab_refresh(self.opus_tab, self._opus_tab_index)
             except Exception:
                 pass
         if (self.opus_search_tab is not None
                 and self._opus_search_tab_index is not None):
             try:
-                self.notebook.tab(self._opus_search_tab_index, text=self._t("tab_opus_search"))
+                self._set_tab_title(self._opus_search_tab_index, self._t("tab_opus_search"))
                 _register_tab_refresh(self.opus_search_tab, self._opus_search_tab_index)
             except Exception:
                 pass
         if self.tc_tab is not None and self._tc_tab_index is not None:
             try:
-                self.notebook.tab(self._tc_tab_index, text=self._t("tab_tranzor_checks"))
+                self._set_tab_title(self._tc_tab_index, self._t("tab_tranzor_checks"))
                 _register_tab_refresh(self.tc_tab, self._tc_tab_index)
             except Exception:
                 pass
         if self.rw_tab is not None and self._rw_tab_index is not None:
             try:
-                self.notebook.tab(self._rw_tab_index, text=self._t("tab_review_worklist"))
+                self._set_tab_title(self._rw_tab_index, self._t("tab_review_worklist"))
                 _register_tab_refresh(self.rw_tab, self._rw_tab_index)
             except Exception:
                 pass
         if self.ptc_tab is not None and self._ptc_tab_index is not None:
             try:
-                self.notebook.tab(self._ptc_tab_index, text=self._t("tab_pretranslation_check"))
+                self._set_tab_title(self._ptc_tab_index, self._t("tab_pretranslation_check"))
                 _register_tab_refresh(self.ptc_tab, self._ptc_tab_index)
             except Exception:
                 pass
         if self.so_tab is not None and self._so_tab_index is not None:
             try:
-                self.notebook.tab(self._so_tab_index, text=self._t("tab_same_origin"))
+                self._set_tab_title(self._so_tab_index, self._t("tab_same_origin"))
                 _register_tab_refresh(self.so_tab, self._so_tab_index)
             except Exception:
                 pass
         if (self.mr_stage_tab is not None
                 and self._mr_stage_tab_index is not None):
             try:
-                self.notebook.tab(
-                    self._mr_stage_tab_index,
-                    text=self._t("tab_mr_pipeline_stage"))
+                self._set_tab_title(self._mr_stage_tab_index, self._t("tab_mr_pipeline_stage"))
                 _register_tab_refresh(
                     self.mr_stage_tab, self._mr_stage_tab_index)
             except Exception:
@@ -2389,34 +2426,32 @@ class ExportApp:
         if (self.ft_stage_tab is not None
                 and self._ft_stage_tab_index is not None):
             try:
-                self.notebook.tab(
-                    self._ft_stage_tab_index,
-                    text=self._t("tab_full_translations_stage"))
+                self._set_tab_title(self._ft_stage_tab_index, self._t("tab_full_translations_stage"))
                 _register_tab_refresh(
                     self.ft_stage_tab, self._ft_stage_tab_index)
             except Exception:
                 pass
         if self.ko_tab is not None and self._ko_tab_index is not None:
             try:
-                self.notebook.tab(
-                    self._ko_tab_index, text=self._t("tab_key_origin"))
+                self._set_tab_title(self._ko_tab_index, self._t("tab_key_origin"))
                 _register_tab_refresh(self.ko_tab, self._ko_tab_index)
             except Exception:
                 pass
         if self.tmp_tab is not None and self._tmp_tab_index is not None:
             try:
-                self.notebook.tab(
-                    self._tmp_tab_index, text=self._t("tab_tm_panel"))
+                self._set_tab_title(self._tmp_tab_index, self._t("tab_tm_panel"))
                 _register_tab_refresh(self.tmp_tab, self._tmp_tab_index)
             except Exception:
                 pass
         if self.bf_tab is not None and self._bf_tab_index is not None:
             try:
-                self.notebook.tab(
-                    self._bf_tab_index, text=self._t("tab_bugfix"))
+                self._set_tab_title(self._bf_tab_index, self._t("tab_bugfix"))
                 _register_tab_refresh(self.bf_tab, self._bf_tab_index)
             except Exception:
                 pass
+
+        # All tab titles are set — fit them to the current notebook width.
+        self._layout_tab_titles()
 
         # Summary panel texts
         self.lbl_summary_title.configure(text=self._t("summary_title"))
@@ -2459,6 +2494,177 @@ class ExportApp:
         """Toggle between English and Chinese."""
         self.lang = "zh" if self.lang == "en" else "en"
         self._refresh_ui_text()
+
+    # ── Theme (Light / Dark) ──
+    def _refresh_theme_button(self):
+        """The button names the theme you would switch *to*."""
+        key = ("theme_toggle_light" if self.theme_mode == app_theme.DARK
+               else "theme_toggle_dark")
+        try:
+            self.btn_theme.configure(text=self._t(key))
+            self._theme_tip.set_text(self._t("theme_toggle_tip"))
+        except tk.TclError:
+            pass
+
+    def _toggle_theme(self):
+        """Flip dark ↔ light, re-theme every live widget and persist."""
+        target = (app_theme.LIGHT if self.theme_mode == app_theme.DARK
+                  else app_theme.DARK)
+        self._hide_tab_tip()
+        try:
+            self.theme_mode = app_theme.switch(self.root, target)
+        except Exception as exc:  # pragma: no cover - never block the UI
+            print(f"[theme] switch to {target} failed: {exc!r}")
+            self.theme_mode = app_theme.current_mode()
+        self._refresh_theme_button()
+
+    # ── Notebook tab titles: ellipsis + hover ──
+    def _set_tab_title(self, idx, text):
+        """Record the full title and show it; ``_layout_tab_titles`` may
+        shorten the visible text with "…" once every title is known."""
+        try:
+            idx = self.notebook.index(idx)
+        except Exception:
+            pass
+        self._tab_full_titles[idx] = text
+        self.notebook.tab(idx, text=text)
+
+    def _schedule_tab_layout(self, _event=None):
+        if self._tab_layout_job is not None:
+            try:
+                self.root.after_cancel(self._tab_layout_job)
+            except Exception:
+                pass
+        self._tab_layout_job = self.root.after(80, self._layout_tab_titles)
+
+    def _tab_font(self):
+        """The font the notebook draws tab titles with."""
+        try:
+            spec = ttk.Style(self.root).lookup("TNotebook.Tab", "font")
+        except Exception:
+            spec = None
+        if spec:
+            try:
+                return tkfont.nametofont(str(spec))
+            except Exception:
+                try:
+                    return tkfont.Font(font=spec)
+                except Exception:
+                    pass
+        try:
+            return tkfont.nametofont("TkDefaultFont")
+        except Exception:
+            return None
+
+    def _tab_overhead_px(self):
+        """Per-tab non-text width: style padding + borders + safety."""
+        pad_px = 12.0
+        try:
+            pad = ttk.Style(self.root).lookup("TNotebook.Tab", "padding")
+            parts = [str(p) for p in self.root.tk.splitlist(str(pad))] if pad else []
+            if parts:
+                left = self.root.winfo_fpixels(parts[0])
+                right = self.root.winfo_fpixels(parts[2] if len(parts) > 2 else parts[0])
+                pad_px = left + right
+        except Exception:
+            pass
+        return int(pad_px) + 8
+
+    def _layout_tab_titles(self):
+        """Fit every tab title into the notebook width; overflow gets "…"."""
+        self._tab_layout_job = None
+        try:
+            if not self.notebook.winfo_exists():
+                return
+            count = self.notebook.index("end")
+        except Exception:
+            return
+        titles = [self._tab_full_titles.get(i, "") for i in range(count)]
+        if not any(titles):
+            return
+        available = self.notebook.winfo_width()
+        if available <= 1:
+            # Not mapped yet; <Configure> will call us once it is.
+            return
+        font = self._tab_font()
+        if font is None:
+            return
+        try:
+            display = tab_labels.fit_tab_titles(
+                titles, font.measure, available - 6, self._tab_overhead_px())
+        except Exception:
+            display = titles
+        self._tab_truncated = set()
+        for i, (full, shown) in enumerate(zip(titles, display)):
+            if shown != full:
+                self._tab_truncated.add(i)
+            try:
+                if self.notebook.tab(i, "text") != shown:
+                    self.notebook.tab(i, text=shown)
+            except tk.TclError:
+                pass
+        if (self._tab_hover_idx is not None
+                and self._tab_hover_idx not in self._tab_truncated):
+            self._hide_tab_tip()
+
+    def _tab_index_at(self, x, y):
+        try:
+            return self.notebook.index(f"@{x},{y}")
+        except Exception:
+            return None
+
+    def _on_tab_motion(self, event):
+        idx = self._tab_index_at(event.x, event.y)
+        if idx == self._tab_hover_idx:
+            return
+        self._hide_tab_tip()
+        self._tab_hover_idx = idx
+        if idx is not None and idx in self._tab_truncated:
+            full = self._tab_full_titles.get(idx, "")
+            if full:
+                x, y = event.x_root + 12, event.y_root + 18
+                self._tab_tip_job = self.root.after(
+                    400, lambda: self._show_tab_tip(full, x, y))
+
+    def _on_tab_leave(self, _event=None):
+        self._tab_hover_idx = None
+        self._hide_tab_tip()
+
+    def _show_tab_tip(self, text, x, y):
+        self._tab_tip_job = None
+        if self._tab_tip is not None:
+            return
+        try:
+            tw = tk.Toplevel(self.notebook)
+            tw.wm_overrideredirect(True)
+            tw.wm_geometry(f"+{x}+{y}")
+            try:
+                tw.wm_attributes("-topmost", True)
+            except Exception:
+                pass
+            tk.Label(
+                tw, text=text,
+                background="#1e2a44", foreground="#e4e7ef",
+                relief="solid", borderwidth=1,
+                font=(FONT_FAMILY, 9), padx=8, pady=4,
+            ).pack()
+            self._tab_tip = tw
+        except tk.TclError:
+            self._tab_tip = None
+
+    def _hide_tab_tip(self):
+        if self._tab_tip_job is not None:
+            try:
+                self.root.after_cancel(self._tab_tip_job)
+            except Exception:
+                pass
+            self._tab_tip_job = None
+        if self._tab_tip is not None:
+            try:
+                self._tab_tip.destroy()
+            except Exception:
+                pass
+            self._tab_tip = None
 
     def _schedule_summary_resize(self, event=None):
         """Debounce resize events before recalculating the summary page size."""
@@ -3603,6 +3809,10 @@ def main():
     # Must happen before the first window exists, or the taskbar has
     # already grouped this process under the shared exe-path identity.
     app_instance.ungroup_taskbar_icon()
+    # Theme engine must hook tkinter before the first widget (splash
+    # included) so a persisted light theme applies from the first paint.
+    app_theme.install()
+    app_theme.set_mode(app_theme.load_saved_mode())
     root = tk.Tk()
     _boot_mark("tk_Tk_done")
     try:
