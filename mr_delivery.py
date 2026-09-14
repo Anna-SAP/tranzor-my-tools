@@ -39,6 +39,8 @@ _MR_BANG_RE = re.compile(r"MR[!#](\d+)", re.IGNORECASE)
 
 # Branch baked by TaskExecutor._build_delivery_source_branch.
 DELIVERY_BRANCH_RE = re.compile(r"^tranzor/translate-(\d+)-")
+# Language Lead fix MR opened after the original translation MR merged.
+FIX_BRANCH_RE = re.compile(r"^tranzor-mr-fix-")
 
 # GitLab title search that survives the es_format split
 # ("Translations for MR" | "MR!3930").
@@ -126,13 +128,38 @@ def source_iid_from_delivery_mr(mr) -> Optional[int]:
     return None
 
 
+def is_fix_branch(branch) -> bool:
+    """True for Language Lead post-merge fix branches (``tranzor-mr-fix-*``)."""
+    return bool(FIX_BRANCH_RE.match(str(branch or "")))
+
+
 def is_delivery_candidate(mr, source_iid) -> bool:
-    """True when ``mr`` is a follow-up translation MR for ``source_iid``."""
+    """True when ``mr`` is the original translation-import MR for ``source_iid``.
+
+    Later Language Lead fix MRs reuse the same title template but live on
+    ``tranzor-mr-fix-*``; those are :func:`is_fix_mr_candidate`, not this.
+    """
     want = parse_mr_iid(source_iid)
     if want is None or not isinstance(mr, dict):
         return False
     iid = parse_mr_iid(mr.get("iid"))
     if iid is None or iid == want:
+        return False
+    if is_fix_branch(mr.get("source_branch")):
+        return False
+    got = source_iid_from_delivery_mr(mr)
+    return got == want
+
+
+def is_fix_mr_candidate(mr, source_iid) -> bool:
+    """True when ``mr`` is a post-merge Language Lead fix MR for ``source_iid``."""
+    want = parse_mr_iid(source_iid)
+    if want is None or not isinstance(mr, dict):
+        return False
+    iid = parse_mr_iid(mr.get("iid"))
+    if iid is None or iid == want:
+        return False
+    if not is_fix_branch(mr.get("source_branch")):
         return False
     got = source_iid_from_delivery_mr(mr)
     return got == want
@@ -162,6 +189,73 @@ def pick_delivery_mr(mrs, source_iid, task_id=None) -> Optional[dict]:
         return parse_mr_iid(mr.get("iid")) or 0
 
     return max(pool, key=_iid_key)
+
+
+def pick_fix_mr(mrs, source_iid, exclude_iid=None) -> Optional[dict]:
+    """Choose the latest Language Lead fix MR for one source iid.
+
+    Prefers an opened MR, then the highest iid. ``exclude_iid`` drops the
+    original translation-import MR when the same search hits both.
+    """
+    skip = parse_mr_iid(exclude_iid)
+    candidates = []
+    for mr in (mrs or []):
+        if not is_fix_mr_candidate(mr, source_iid):
+            continue
+        iid = parse_mr_iid(mr.get("iid"))
+        if skip is not None and iid == skip:
+            continue
+        candidates.append(mr)
+    if not candidates:
+        return None
+    opened = [
+        mr for mr in candidates
+        if str(mr.get("state") or "").lower() == "opened"
+    ]
+    pool = opened or candidates
+
+    def _iid_key(mr):
+        return parse_mr_iid(mr.get("iid")) or 0
+
+    return max(pool, key=_iid_key)
+
+
+def ref_from_iid(mrs, iid, fallback_project="") -> Optional[DeliveryRef]:
+    """Find ``iid`` in a GitLab MR list and wrap it as :class:`DeliveryRef`."""
+    want = parse_mr_iid(iid)
+    if want is None:
+        return None
+    for mr in (mrs or []):
+        if parse_mr_iid(mr.get("iid")) == want:
+            return delivery_ref_from_mr(mr, fallback_project=fallback_project)
+    return None
+
+
+def format_trans_mr_cell(delivery_iid, fix_iid=None) -> str:
+    """Visible Trans MR# cell: ``1224`` or ``1224 → 1225``."""
+    delivery = parse_mr_iid(delivery_iid)
+    fix = parse_mr_iid(fix_iid)
+    if delivery is None and fix is None:
+        return "—"
+    if delivery is None:
+        return str(fix)
+    if fix is None or fix == delivery:
+        return str(delivery)
+    return f"{delivery} → {fix}"
+
+
+def current_trans_mr_iid(delivery_iid, fix_iid=None) -> Optional[int]:
+    """The iid the Trans MR# click / status column should follow."""
+    return parse_mr_iid(fix_iid) or parse_mr_iid(delivery_iid)
+
+
+def trans_mr_sort_iid(cell) -> Optional[int]:
+    """Numeric sort key: the right-hand (current) iid in a Trans MR# cell."""
+    text = str(cell or "").strip()
+    if text in ("", "—", "…"):
+        return None
+    parts = re.findall(r"\d+", text)
+    return int(parts[-1]) if parts else parse_mr_iid(text)
 
 
 def delivery_from_task(task) -> Optional[DeliveryRef]:

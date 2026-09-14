@@ -681,6 +681,9 @@ STRINGS = {
         "mr_col_mr_status": "MR Status",
         "mr_col_delivery_mr": "Trans MR#",
         "mr_col_delivery_mr_status": "Trans MR Status",
+        "mr_trans_mr_tooltip": (
+            "Translations imported in !{import_iid} ({import_status}). "
+            "Later Language Lead fixes in !{fix_iid} ({fix_status})."),
         "mr_col_jira":      "JIRA",
         "mr_col_title":     "Title",
         "mr_col_release":   "Release",
@@ -858,6 +861,9 @@ STRINGS = {
         "mr_col_mr_status": "MR 状态",
         "mr_col_delivery_mr": "翻译 MR#",
         "mr_col_delivery_mr_status": "翻译 MR 状态",
+        "mr_trans_mr_tooltip": (
+            "翻译导入 !{import_iid}（{import_status}）。"
+            "后期修复 !{fix_iid}（{fix_status}）。"),
         "mr_col_jira":      "JIRA",
         "mr_col_title":     "标题",
         "mr_col_release":   "版本",

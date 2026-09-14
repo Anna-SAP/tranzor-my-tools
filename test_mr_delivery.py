@@ -162,6 +162,55 @@ class CandidateAndPickTests(unittest.TestCase):
             "source_branch": "RLZ-81787",
         }))
 
+    def test_fix_branch_is_not_the_import_delivery_mr(self):
+        mr = {
+            "iid": 1225,
+            "title": "[Tranzor] Translations for MR!1223",
+            "source_branch": "tranzor-mr-fix-20260911152000",
+            "state": "opened",
+        }
+        self.assertFalse(md.is_delivery_candidate(mr, 1223))
+        self.assertTrue(md.is_fix_mr_candidate(mr, 1223))
+
+    def test_pick_delivery_ignores_later_fix_mr(self):
+        mrs = [
+            {"iid": 1224, "title": "[Tranzor] Translations for MR!1223",
+             "source_branch": "tranzor/translate-1223-aaa-bbb-cccccccc",
+             "state": "merged"},
+            {"iid": 1225, "title": "[Tranzor] Translations for MR!1223",
+             "source_branch": "tranzor-mr-fix-20260911152000",
+             "state": "opened"},
+        ]
+        picked = md.pick_delivery_mr(mrs, 1223)
+        self.assertEqual(picked["iid"], 1224)
+
+    def test_pick_fix_mr_prefers_opened_successor(self):
+        mrs = [
+            {"iid": 1224, "title": "[Tranzor] Translations for MR!1223",
+             "source_branch": "tranzor/translate-1223-aaa-bbb-cccccccc",
+             "state": "merged"},
+            {"iid": 1225, "title": "[Tranzor] Translations for MR!1223",
+             "source_branch": "tranzor-mr-fix-20260911152000",
+             "state": "opened"},
+            {"iid": 1220, "title": "[Tranzor] Translations for MR!1223",
+             "source_branch": "tranzor-mr-fix-old",
+             "state": "merged"},
+        ]
+        picked = md.pick_fix_mr(mrs, 1223, exclude_iid=1224)
+        self.assertEqual(picked["iid"], 1225)
+
+    def test_format_trans_mr_cell_shows_successor_arrow(self):
+        self.assertEqual(md.format_trans_mr_cell(1224), "1224")
+        self.assertEqual(md.format_trans_mr_cell(1224, 1224), "1224")
+        self.assertEqual(md.format_trans_mr_cell(1224, 1225), "1224 → 1225")
+        self.assertEqual(md.format_trans_mr_cell(None, 1225), "1225")
+        self.assertEqual(md.format_trans_mr_cell(None), "—")
+        self.assertEqual(md.current_trans_mr_iid(1224, 1225), 1225)
+        self.assertEqual(md.current_trans_mr_iid(1224, None), 1224)
+        self.assertEqual(md.trans_mr_sort_iid("1224 → 1225"), 1225)
+        self.assertEqual(md.trans_mr_sort_iid("1224"), 1224)
+        self.assertIsNone(md.trans_mr_sort_iid("—"))
+
 
 class FilterMatchTests(unittest.TestCase):
 
