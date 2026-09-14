@@ -13,6 +13,7 @@ from datetime import date, datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import export_mr_pipeline as mr_api
+import mr_delivery as _delivery
 import mr_jira as _jira
 import quality_overview as qa
 import task_post_edit as _tpe
@@ -101,18 +102,21 @@ class MRPipelineTab:
 
     # Single source of truth for the task-list table columns. ``src_strings``
     # (distinct en-US source-string count) sits between Status and Avg Score
-    # so the two per-task metrics read together; ``mr_status`` (live GitLab
-    # Open/Merged/Closed) sits right after ``mr`` so the iid and its current
-    # GitLab state read as a pair; ``jira`` and its companion ``title``
+    # so the two per-task metrics read together; ``delivery_mr`` (the follow-up
+    # MR that actually received translation commits, when the source MR was
+    # already merged) sits right after ``mr``; ``mr_status`` is the live
+    # GitLab state of the *source* MR; ``jira`` and its companion ``title``
     # follow so same-origin tasks still group together. These insertions
     # keep the critical positional reads elsewhere valid (project @ idx 1
     # for the post-edit prefix, MR# @ idx 2 for the export filename).
     # ``ended`` is Tranzor ``updated_at`` (no separate completed_at exists).
-    _MR_COLUMNS = ("idx", "project", "mr", "mr_status", "jira", "title",
+    _MR_COLUMNS = ("idx", "project", "mr", "delivery_mr", "mr_status",
+                   "jira", "title",
                    "release", "status", "src_strings", "avg_score",
                    "created", "ended", "duration")
     # Columns whose cells sort numerically; everything else sorts as text.
-    _MR_NUMERIC_COLS = frozenset({"idx", "mr", "src_strings", "avg_score"})
+    _MR_NUMERIC_COLS = frozenset({
+        "idx", "mr", "delivery_mr", "src_strings", "avg_score"})
 
     def __init__(self, parent, app, *, base_url=None, env_key="prod"):
         self.app = app
@@ -151,6 +155,9 @@ class MRPipelineTab:
         # pipeline tasks (that's the whole same-origin premise), so a
         # single-iid mapping would light up only the last-inserted row.
         self._jira_row_iids: dict[tuple[str, int], list[str]] = {}
+        # tree iid → {project, source_iid, source_url, delivery_iid,
+        # delivery_url}. Drives the clickable MR# / Trans MR# cells.
+        self._mr_link_meta: dict[str, dict] = {}
         # Full Title stays outside Treeview values so sorting and Tooltip use
         # the lossless text while the visible cell can carry a width-specific
         # ``...`` rendering.
@@ -465,7 +472,8 @@ class MRPipelineTab:
         cols = self._MR_COLUMNS
         self.mr_tree = ttk.Treeview(tree_frame, columns=cols, show="headings",
                                      style="Summary.Treeview", height=14, selectmode="browse")
-        col_widths = {"idx": 35, "project": 140, "mr": 60, "mr_status": 90,
+        col_widths = {"idx": 35, "project": 140, "mr": 60, "delivery_mr": 80,
+                      "mr_status": 90,
                       "jira": 90, "title": 260, "release": 60, "status": 80,
                       "src_strings": 90, "avg_score": 70, "created": 185,
                       "ended": 185, "duration": 70}
@@ -500,9 +508,9 @@ class MRPipelineTab:
         scroll.pack(side="right", fill="y")
 
         # A ttk.Treeview cannot host a real HTML <a> element, so make the
-        # JIRA cell itself the hyperlink hit target. The pointer changes only
-        # over a resolved, valid ticket ID; clicking it opens the canonical
-        # RingCentral JIRA detail page in the user's default browser.
+        # JIRA / MR# / Trans MR# cells themselves the hyperlink hit targets.
+        # The pointer changes only over a resolved, valid target; clicking
+        # opens JIRA or the matching GitLab MR in the user's default browser.
         self.mr_tree.bind("<Motion>", self._on_mr_tree_motion, add="+")
         self.mr_tree.bind("<Leave>", self._on_mr_tree_leave, add="+")
         self.mr_tree.bind("<ButtonPress-1>", self._on_mr_tree_press, add="+")
@@ -922,6 +930,13 @@ class MRPipelineTab:
                 raise RuntimeError(
                     "A GitLab token is required to filter by JIRA ID.")
             hide_empty = self.mr_hide_empty_var.get()
+            matching_mr_iids = set()
+            if mr_iid_filter:
+                expand_projects = (
+                    list(proj_set) if proj_set
+                    else ([proj] if proj else []))
+                matching_mr_iids = _delivery.expand_mr_iid_filter(
+                    mr_iid_filter, project_ids=expand_projects)
 
             # Capture-and-clear the one-shot append flag set by
             # _load_more. _on_tasks_loaded uses ``append`` to decide
@@ -955,7 +970,8 @@ class MRPipelineTab:
                     if status and str(detail.get("status", "")) != status:
                         detail = None
                 if isinstance(detail, dict) and detail.get("task_id"):
-                    if mr_iid_filter and str(detail.get("merge_request_iid", "")) != mr_iid_filter:
+                    if (mr_iid_filter and not _delivery.task_matches_mr_iid(
+                            detail, matching_mr_iids)):
                         detail = None
                 if (isinstance(detail, dict) and detail.get("task_id")
                         and jira_filter):
@@ -1037,10 +1053,12 @@ class MRPipelineTab:
                         for task in batch:
                             task["_jira_ticket_id"] = jira_filter
 
-                    # MR# client-side filter first (cheap, no API call)
+                    # MR# client-side filter first (cheap, no API call).
+                    # Matches the source iid *or* the follow-up translation MR.
                     if mr_iid_filter:
                         batch = [t for t in batch
-                                 if str(t.get("merge_request_iid", "")) == mr_iid_filter]
+                                 if _delivery.task_matches_mr_iid(
+                                     t, matching_mr_iids)]
 
                     # Parallel check translation counts (4x faster than sequential)
                     if hide_empty and batch:
@@ -1097,6 +1115,7 @@ class MRPipelineTab:
                 self.mr_tree.delete(item)
             self._mr_row_iid_by_task = {}
             self._jira_row_iids = {}
+            self._mr_link_meta = {}
             self._jira_titles_by_iid = {}
             self._truncated_title_iids = set()
             self._hide_title_tooltip()
@@ -1203,12 +1222,25 @@ class MRPipelineTab:
                 if state_cached is not None
                 else ("…" if can_resolve else "—")
             )
+            delivery = _delivery.delivery_from_task(t)
+            if delivery is not None:
+                delivery_display = delivery.iid
+            elif can_resolve:
+                delivery_display = "…"
+            else:
+                delivery_display = "—"
+            source_url = (
+                str(t.get("mr_link") or "").strip()
+                or _delivery.gitlab_mr_url(raw_project, mr_iid)
+            )
+            delivery_url = delivery.url if delivery is not None else ""
 
             iid = self.mr_tree.insert(
                 "", "end",
                 iid=task_id or None,
                 values=(
-                    idx, display_project, mr_iid, mr_status_display,
+                    idx, display_project, mr_iid, delivery_display,
+                    mr_status_display,
                     jira_display, title_display,
                     t.get("release", ""), t.get("status", ""),
                     src_display,
@@ -1217,6 +1249,14 @@ class MRPipelineTab:
                 ),
                 tags=row_tags,
             )
+            self._mr_link_meta[iid] = {
+                "project": raw_project,
+                "source_iid": _delivery.parse_mr_iid(mr_iid),
+                "source_url": source_url,
+                "delivery_iid": delivery.iid if delivery is not None else None,
+                "delivery_url": delivery_url,
+                "task_id": task_id,
+            }
             normalized_title = _single_line_title(title_cached)
             if normalized_title:
                 self._jira_titles_by_iid[iid] = normalized_title
@@ -1578,7 +1618,109 @@ class MRPipelineTab:
     def _on_jira_prefetch_done(self):
         # If the user sorted a still-loading metadata column, fold the final
         # values into the requested order once all workers have returned.
-        if self._mr_sort and self._mr_sort[0] in ("jira", "title", "mr_status"):
+        if self._mr_sort and self._mr_sort[0] in (
+                "jira", "title", "mr_status", "delivery_mr"):
+            self._apply_sort(*self._mr_sort)
+        # Source-MR state is now known: only merged sources can have a
+        # follow-up translation MR that GET /tasks didn't name.
+        self._prefetch_missing_delivery_mrs()
+
+    def _prefetch_missing_delivery_mrs(self):
+        """GitLab-search follow-up MRs for merged source rows still showing …"""
+        groups = {}  # (project, source_iid) → [(tree_iid, task_id), ...]
+        try:
+            rows = list(self.mr_tree.get_children(""))
+        except tk.TclError:
+            return
+        for tree_iid in rows:
+            meta = self._mr_link_meta.get(tree_iid) or {}
+            if meta.get("delivery_iid"):
+                continue
+            try:
+                cell = str(self.mr_tree.set(tree_iid, "delivery_mr") or "")
+                status = str(self.mr_tree.set(tree_iid, "mr_status") or "")
+            except tk.TclError:
+                continue
+            if cell not in ("…",):
+                continue
+            if status == "Merged":
+                project = meta.get("project") or ""
+                source_iid = meta.get("source_iid")
+                if project and source_iid is not None:
+                    groups.setdefault(
+                        (str(project), int(source_iid)), []
+                    ).append((tree_iid, meta.get("task_id") or tree_iid))
+                else:
+                    try:
+                        self.mr_tree.set(tree_iid, "delivery_mr", "—")
+                    except tk.TclError:
+                        pass
+            elif status in ("Open", "Closed", "Locked", "—"):
+                try:
+                    self.mr_tree.set(tree_iid, "delivery_mr", "—")
+                except tk.TclError:
+                    pass
+        if not groups:
+            return
+
+        def _run():
+            client = None
+            try:
+                client = _tpe._shared_gitlab_client()
+            except Exception:
+                client = None
+
+            def _work(item):
+                (project, source_iid), row_jobs = item
+                try:
+                    if client is None or not client.has_token():
+                        mrs = []
+                    else:
+                        mrs = client.list_merge_requests(
+                            _delivery.DELIVERY_SEARCH_TERM.format(
+                                iid=source_iid),
+                            project_id=project, in_field="title") or []
+                except Exception:
+                    mrs = []
+                for tree_iid, task_id in row_jobs:
+                    picked = _delivery.pick_delivery_mr(
+                        mrs, source_iid, task_id=task_id)
+                    ref = _delivery.delivery_ref_from_mr(
+                        picked, fallback_project=project)
+                    try:
+                        self.parent.after(
+                            0, self._apply_delivery_mr, tree_iid, ref)
+                    except Exception:
+                        pass
+
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                list(pool.map(_work, list(groups.items())))
+            try:
+                self.parent.after(0, self._on_delivery_prefetch_done)
+            except Exception:
+                pass
+
+        threading.Thread(target=_run, name="mr-delivery-prefetch",
+                         daemon=True).start()
+
+    def _apply_delivery_mr(self, tree_iid, ref):
+        """Paint one Trans MR# cell. Runs on the Tk thread."""
+        meta = self._mr_link_meta.get(tree_iid)
+        if meta is None:
+            return
+        if ref is not None:
+            meta["delivery_iid"] = ref.iid
+            meta["delivery_url"] = ref.url
+            display = ref.iid
+        else:
+            display = "—"
+        try:
+            self.mr_tree.set(tree_iid, "delivery_mr", display)
+        except tk.TclError:
+            pass
+
+    def _on_delivery_prefetch_done(self):
+        if self._mr_sort and self._mr_sort[0] == "delivery_mr":
             self._apply_sort(*self._mr_sort)
 
     # ------------------------------------------------------------------
@@ -1629,22 +1771,34 @@ class MRPipelineTab:
             self._truncated_title_iids.discard(iid)
 
     # ------------------------------------------------------------------
-    # JIRA hyperlink + Title Tooltip interaction
+    # JIRA / MR# / Trans MR# hyperlink + Title Tooltip interaction
     # ------------------------------------------------------------------
-    def _jira_link_at(self, x, y):
-        """Return the JIRA URL under a Treeview pointer position, if any."""
+    def _col_ident(self, name):
+        return f"#{self._MR_COLUMNS.index(name) + 1}"
+
+    def _mr_tree_link_at(self, x, y):
+        """Return the URL under a Treeview pointer position, if any."""
         if self.mr_tree.identify_region(x, y) != "cell":
             return ""
-        jira_column = f"#{self._MR_COLUMNS.index('jira') + 1}"
-        if self.mr_tree.identify_column(x) != jira_column:
-            return ""
+        column = self.mr_tree.identify_column(x)
         iid = self.mr_tree.identify_row(y)
         if not iid:
             return ""
         try:
-            return _jira.jira_browse_url(self.mr_tree.set(iid, "jira"))
+            if column == self._col_ident("jira"):
+                return _jira.jira_browse_url(self.mr_tree.set(iid, "jira"))
+            meta = self._mr_link_meta.get(iid) or {}
+            if column == self._col_ident("mr"):
+                return str(meta.get("source_url") or "")
+            if column == self._col_ident("delivery_mr"):
+                return str(meta.get("delivery_url") or "")
         except tk.TclError:
             return ""
+        return ""
+
+    def _jira_link_at(self, x, y):
+        """Backward-compatible alias used by existing unit tests."""
+        return self._mr_tree_link_at(x, y)
 
     def _title_tooltip_at(self, x, y):
         """Return ``(iid, full_title)`` only for a truncated Title cell."""
@@ -1733,7 +1887,7 @@ class MRPipelineTab:
         self._title_tooltip_cell = None
 
     def _on_mr_tree_motion(self, event):
-        cursor = "hand2" if self._jira_link_at(event.x, event.y) else ""
+        cursor = "hand2" if self._mr_tree_link_at(event.x, event.y) else ""
         try:
             self.mr_tree.configure(cursor=cursor)
         except tk.TclError:
@@ -1754,7 +1908,7 @@ class MRPipelineTab:
         # Also catches a user-dragged column separator: recalculate against the
         # newly selected Title width after the heading interaction finishes.
         self._schedule_title_ellipsis()
-        url = self._jira_link_at(event.x, event.y)
+        url = self._mr_tree_link_at(event.x, event.y)
         if not url:
             return None
         webbrowser.open_new_tab(url)

@@ -473,17 +473,20 @@ class ColumnLayoutTests(unittest.TestCase):
         from gui_tabs import MRPipelineTab
         cols = MRPipelineTab._MR_COLUMNS
         # Positional reads elsewhere in gui_tabs: project @ 1 (post-edit
-        # prefix), mr @ 2 (export filename); MR Status sits beside MR#;
-        # JIRA and Title form a pair immediately after.
+        # prefix), mr @ 2 (export filename); Trans MR# sits beside source
+        # MR#; MR Status is the source MR's GitLab state; JIRA and Title
+        # form a pair immediately after.
         self.assertEqual(cols.index("project"), 1)
         self.assertEqual(cols.index("mr"), 2)
-        self.assertEqual(cols.index("mr_status"), 3)
-        self.assertEqual(cols.index("jira"), 4)
-        self.assertEqual(cols.index("title"), 5)
+        self.assertEqual(cols.index("delivery_mr"), 3)
+        self.assertEqual(cols.index("mr_status"), 4)
+        self.assertEqual(cols.index("jira"), 5)
+        self.assertEqual(cols.index("title"), 6)
         # Ended sits between Created and Duration (updated_at → end clock).
         self.assertEqual(cols.index("ended"), cols.index("created") + 1)
         self.assertEqual(cols.index("duration"), cols.index("ended") + 1)
         # GitLab metadata columns sort as text, not as numbers.
+        self.assertIn("delivery_mr", MRPipelineTab._MR_NUMERIC_COLS)
         self.assertNotIn("mr_status", MRPipelineTab._MR_NUMERIC_COLS)
         self.assertNotIn("jira", MRPipelineTab._MR_NUMERIC_COLS)
         self.assertNotIn("title", MRPipelineTab._MR_NUMERIC_COLS)
@@ -499,6 +502,8 @@ class ColumnLayoutTests(unittest.TestCase):
                     f"missing mr_col_{col} in STRINGS[{lang}]")
         self.assertEqual(STRINGS["en"]["mr_col_mr_status"], "MR Status")
         self.assertEqual(STRINGS["zh"]["mr_col_mr_status"], "MR 状态")
+        self.assertEqual(STRINGS["en"]["mr_col_delivery_mr"], "Trans MR#")
+        self.assertEqual(STRINGS["zh"]["mr_col_delivery_mr"], "翻译 MR#")
         self.assertEqual(STRINGS["en"]["mr_col_ended"], "Ended")
         self.assertEqual(STRINGS["zh"]["mr_col_ended"], "结束时间")
 
@@ -525,9 +530,16 @@ class TitleEllipsisTests(unittest.TestCase):
             ("First second", False))
 
 
+def _col(name):
+    from gui_tabs import MRPipelineTab
+    return f"#{MRPipelineTab._MR_COLUMNS.index(name) + 1}"
+
+
 class _FakeTree:
-    def __init__(self, *, region="cell", column="#5", row="task-1",
+    def __init__(self, *, region="cell", column=None, row="task-1",
                  jira="RA-132077"):
+        if column is None:
+            column = _col("jira")
         self.region = region
         self.column = column
         self.row = row
@@ -616,13 +628,67 @@ class ApplyGitlabMetadataTests(unittest.TestCase):
         self.assertEqual(tab.mr_tree.cells[("task-1", "mr_status")], "Merged")
 
 
+class ApplyDeliveryMrTests(unittest.TestCase):
+
+    def test_paints_follow_up_iid_and_stores_url(self):
+        from gui_tabs import MRPipelineTab
+        import mr_delivery as _delivery
+
+        class _Tree:
+            def __init__(self):
+                self.cells = {}
+
+            def set(self, iid, column, value=None):
+                if value is None:
+                    return self.cells.get((iid, column), "")
+                self.cells[(iid, column)] = value
+
+        tab = MRPipelineTab.__new__(MRPipelineTab)
+        tab.mr_tree = _Tree()
+        tab._mr_link_meta = {
+            "task-1": {"project": "common/uns", "source_iid": 3930,
+                       "delivery_iid": None, "delivery_url": ""},
+        }
+        tab._apply_delivery_mr(
+            "task-1",
+            _delivery.DeliveryRef(
+                project_id="common/uns", iid=4192,
+                url=("https://git.ringcentral.com/common/uns/"
+                     "-/merge_requests/4192"),
+                state="opened"),
+        )
+        self.assertEqual(tab.mr_tree.cells[("task-1", "delivery_mr")], 4192)
+        self.assertEqual(tab._mr_link_meta["task-1"]["delivery_iid"], 4192)
+        self.assertIn("/merge_requests/4192",
+                      tab._mr_link_meta["task-1"]["delivery_url"])
+
+    def test_missing_follow_up_paints_dash(self):
+        from gui_tabs import MRPipelineTab
+
+        class _Tree:
+            def __init__(self):
+                self.cells = {"task-1": {}}
+
+            def set(self, iid, column, value=None):
+                if value is None:
+                    return self.cells.get((iid, column), "")
+                self.cells[(iid, column)] = value
+
+        tab = MRPipelineTab.__new__(MRPipelineTab)
+        tab.mr_tree = _Tree()
+        tab._mr_link_meta = {"task-1": {"delivery_iid": None}}
+        tab._apply_delivery_mr("task-1", None)
+        self.assertEqual(tab.mr_tree.cells[("task-1", "delivery_mr")], "—")
+
+
 class JiraHyperlinkInteractionTests(unittest.TestCase):
 
     @staticmethod
-    def _tab(tree):
+    def _tab(tree, link_meta=None):
         from gui_tabs import MRPipelineTab
         tab = MRPipelineTab.__new__(MRPipelineTab)
         tab.mr_tree = tree
+        tab._mr_link_meta = link_meta or {}
         return tab
 
     def test_clicking_jira_cell_opens_exact_detail_url(self):
@@ -647,18 +713,54 @@ class JiraHyperlinkInteractionTests(unittest.TestCase):
         self.assertEqual(tree.cursor, "")
 
         tree.jira = "RA-132077"
-        tree.column = "#3"  # MR# — not the JIRA column
+        tree.column = _col("title")  # Title — not a hyperlink column
         with mock.patch("gui_tabs.webbrowser.open_new_tab") as opener:
             result = tab._on_mr_tree_click(SimpleNamespace(x=10, y=20))
         opener.assert_not_called()
         self.assertIsNone(result)
+
+    def test_clicking_source_mr_opens_gitlab(self):
+        tree = _FakeTree(column=_col("mr"))
+        tab = self._tab(tree, {
+            "task-1": {
+                "source_url": (
+                    "https://git.ringcentral.com/common/uns/"
+                    "-/merge_requests/3930"),
+                "delivery_url": (
+                    "https://git.ringcentral.com/common/uns/"
+                    "-/merge_requests/4192"),
+            }
+        })
+        with mock.patch("gui_tabs.webbrowser.open_new_tab") as opener:
+            result = tab._on_mr_tree_click(SimpleNamespace(x=10, y=20))
+        opener.assert_called_once_with(
+            "https://git.ringcentral.com/common/uns/-/merge_requests/3930")
+        self.assertEqual(result, "break")
+
+    def test_clicking_delivery_mr_opens_follow_up(self):
+        tree = _FakeTree(column=_col("delivery_mr"))
+        tab = self._tab(tree, {
+            "task-1": {
+                "source_url": (
+                    "https://git.ringcentral.com/common/uns/"
+                    "-/merge_requests/3930"),
+                "delivery_url": (
+                    "https://git.ringcentral.com/common/uns/"
+                    "-/merge_requests/4192"),
+            }
+        })
+        with mock.patch("gui_tabs.webbrowser.open_new_tab") as opener:
+            result = tab._on_mr_tree_click(SimpleNamespace(x=10, y=20))
+        opener.assert_called_once_with(
+            "https://git.ringcentral.com/common/uns/-/merge_requests/4192")
+        self.assertEqual(result, "break")
 
 
 class TitleTooltipInteractionTests(unittest.TestCase):
 
     def test_tooltip_only_targets_truncated_title_cell(self):
         from gui_tabs import MRPipelineTab
-        tree = _FakeTree(column="#6")
+        tree = _FakeTree(column=_col("title"))
         tab = MRPipelineTab.__new__(MRPipelineTab)
         tab.mr_tree = tree
         tab._jira_titles_by_iid = {"task-1": "Complete JIRA title"}
@@ -668,9 +770,9 @@ class TitleTooltipInteractionTests(unittest.TestCase):
             tab._title_tooltip_at(10, 20),
             ("task-1", "Complete JIRA title"))
 
-        tree.column = "#5"  # JIRA, not Title
+        tree.column = _col("jira")  # JIRA, not Title
         self.assertIsNone(tab._title_tooltip_at(10, 20))
-        tree.column = "#6"
+        tree.column = _col("title")
         tab._truncated_title_iids.clear()
         self.assertIsNone(tab._title_tooltip_at(10, 20))
 
