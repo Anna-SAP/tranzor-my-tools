@@ -473,21 +473,26 @@ class ColumnLayoutTests(unittest.TestCase):
         from gui_tabs import MRPipelineTab
         cols = MRPipelineTab._MR_COLUMNS
         # Positional reads elsewhere in gui_tabs: project @ 1 (post-edit
-        # prefix), mr @ 2 (export filename); Trans MR# sits beside source
-        # MR#; MR Status is the source MR's GitLab state; JIRA and Title
-        # form a pair immediately after.
+        # prefix), mr @ 2 (export filename). Source MR# + MR Status form a
+        # pair; Trans MR# + Trans MR Status form the next pair; JIRA and
+        # Title follow immediately after.
         self.assertEqual(cols.index("project"), 1)
         self.assertEqual(cols.index("mr"), 2)
-        self.assertEqual(cols.index("delivery_mr"), 3)
-        self.assertEqual(cols.index("mr_status"), 4)
-        self.assertEqual(cols.index("jira"), 5)
-        self.assertEqual(cols.index("title"), 6)
+        self.assertEqual(cols.index("mr_status"), 3)
+        self.assertEqual(cols.index("delivery_mr"), 4)
+        self.assertEqual(cols.index("delivery_mr_status"), 5)
+        self.assertEqual(cols.index("jira"), 6)
+        self.assertEqual(cols.index("title"), 7)
+        self.assertEqual(cols.index("mr_status"), cols.index("mr") + 1)
+        self.assertEqual(
+            cols.index("delivery_mr_status"), cols.index("delivery_mr") + 1)
         # Ended sits between Created and Duration (updated_at → end clock).
         self.assertEqual(cols.index("ended"), cols.index("created") + 1)
         self.assertEqual(cols.index("duration"), cols.index("ended") + 1)
         # GitLab metadata columns sort as text, not as numbers.
         self.assertIn("delivery_mr", MRPipelineTab._MR_NUMERIC_COLS)
         self.assertNotIn("mr_status", MRPipelineTab._MR_NUMERIC_COLS)
+        self.assertNotIn("delivery_mr_status", MRPipelineTab._MR_NUMERIC_COLS)
         self.assertNotIn("jira", MRPipelineTab._MR_NUMERIC_COLS)
         self.assertNotIn("title", MRPipelineTab._MR_NUMERIC_COLS)
         self.assertNotIn("ended", MRPipelineTab._MR_NUMERIC_COLS)
@@ -504,6 +509,10 @@ class ColumnLayoutTests(unittest.TestCase):
         self.assertEqual(STRINGS["zh"]["mr_col_mr_status"], "MR 状态")
         self.assertEqual(STRINGS["en"]["mr_col_delivery_mr"], "Trans MR#")
         self.assertEqual(STRINGS["zh"]["mr_col_delivery_mr"], "翻译 MR#")
+        self.assertEqual(
+            STRINGS["en"]["mr_col_delivery_mr_status"], "Trans MR Status")
+        self.assertEqual(
+            STRINGS["zh"]["mr_col_delivery_mr_status"], "翻译 MR 状态")
         self.assertEqual(STRINGS["en"]["mr_col_ended"], "Ended")
         self.assertEqual(STRINGS["zh"]["mr_col_ended"], "结束时间")
 
@@ -645,6 +654,7 @@ class ApplyDeliveryMrTests(unittest.TestCase):
 
         tab = MRPipelineTab.__new__(MRPipelineTab)
         tab.mr_tree = _Tree()
+        tab._delivery_row_iids = {}
         tab._mr_link_meta = {
             "task-1": {"project": "common/uns", "source_iid": 3930,
                        "delivery_iid": None, "delivery_url": ""},
@@ -658,6 +668,8 @@ class ApplyDeliveryMrTests(unittest.TestCase):
                 state="opened"),
         )
         self.assertEqual(tab.mr_tree.cells[("task-1", "delivery_mr")], 4192)
+        self.assertEqual(
+            tab.mr_tree.cells[("task-1", "delivery_mr_status")], "Open")
         self.assertEqual(tab._mr_link_meta["task-1"]["delivery_iid"], 4192)
         self.assertIn("/merge_requests/4192",
                       tab._mr_link_meta["task-1"]["delivery_url"])
@@ -676,9 +688,31 @@ class ApplyDeliveryMrTests(unittest.TestCase):
 
         tab = MRPipelineTab.__new__(MRPipelineTab)
         tab.mr_tree = _Tree()
+        tab._delivery_row_iids = {}
         tab._mr_link_meta = {"task-1": {"delivery_iid": None}}
         tab._apply_delivery_mr("task-1", None)
         self.assertEqual(tab.mr_tree.cells[("task-1", "delivery_mr")], "—")
+        self.assertEqual(
+            tab.mr_tree.cells[("task-1", "delivery_mr_status")], "—")
+
+    def test_apply_delivery_status_paints_merged(self):
+        from gui_tabs import MRPipelineTab
+
+        class _Tree:
+            def __init__(self):
+                self.cells = {}
+
+            def set(self, iid, column, value=None):
+                if value is None:
+                    return self.cells.get((iid, column), "")
+                self.cells[(iid, column)] = value
+
+        tab = MRPipelineTab.__new__(MRPipelineTab)
+        tab.mr_tree = _Tree()
+        tab._delivery_row_iids = {("common/uns", 4191): ["task-1"]}
+        tab._apply_delivery_status(("common/uns", 4191), "merged")
+        self.assertEqual(
+            tab.mr_tree.cells[("task-1", "delivery_mr_status")], "Merged")
 
 
 class JiraHyperlinkInteractionTests(unittest.TestCase):

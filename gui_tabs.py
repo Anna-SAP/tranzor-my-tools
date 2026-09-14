@@ -102,15 +102,16 @@ class MRPipelineTab:
 
     # Single source of truth for the task-list table columns. ``src_strings``
     # (distinct en-US source-string count) sits between Status and Avg Score
-    # so the two per-task metrics read together; ``delivery_mr`` (the follow-up
-    # MR that actually received translation commits, when the source MR was
-    # already merged) sits right after ``mr``; ``mr_status`` is the live
-    # GitLab state of the *source* MR; ``jira`` and its companion ``title``
-    # follow so same-origin tasks still group together. These insertions
-    # keep the critical positional reads elsewhere valid (project @ idx 1
-    # for the post-edit prefix, MR# @ idx 2 for the export filename).
+    # so the two per-task metrics read together. Source MR and its live GitLab
+    # state sit as a pair (``mr``, ``mr_status``); the follow-up translation
+    # MR and *its* live GitLab state sit as the next pair (``delivery_mr``,
+    # ``delivery_mr_status``). ``jira`` and ``title`` follow so same-origin
+    # tasks still group together. These insertions keep the critical
+    # positional reads elsewhere valid (project @ idx 1 for the post-edit
+    # prefix, MR# @ idx 2 for the export filename).
     # ``ended`` is Tranzor ``updated_at`` (no separate completed_at exists).
-    _MR_COLUMNS = ("idx", "project", "mr", "delivery_mr", "mr_status",
+    _MR_COLUMNS = ("idx", "project", "mr", "mr_status",
+                   "delivery_mr", "delivery_mr_status",
                    "jira", "title",
                    "release", "status", "src_strings", "avg_score",
                    "created", "ended", "duration")
@@ -158,6 +159,9 @@ class MRPipelineTab:
         # tree iid → {project, source_iid, source_url, delivery_iid,
         # delivery_url}. Drives the clickable MR# / Trans MR# cells.
         self._mr_link_meta: dict[str, dict] = {}
+        # (delivery_project, delivery_iid) → [row iids]. One GitLab fetch
+        # paints Trans MR Status for every row that shares that follow-up MR.
+        self._delivery_row_iids: dict[tuple[str, int], list[str]] = {}
         # Full Title stays outside Treeview values so sorting and Tooltip use
         # the lossless text while the visible cell can carry a width-specific
         # ``...`` rendering.
@@ -472,8 +476,8 @@ class MRPipelineTab:
         cols = self._MR_COLUMNS
         self.mr_tree = ttk.Treeview(tree_frame, columns=cols, show="headings",
                                      style="Summary.Treeview", height=14, selectmode="browse")
-        col_widths = {"idx": 35, "project": 140, "mr": 60, "delivery_mr": 80,
-                      "mr_status": 90,
+        col_widths = {"idx": 35, "project": 140, "mr": 60, "mr_status": 90,
+                      "delivery_mr": 80, "delivery_mr_status": 110,
                       "jira": 90, "title": 260, "release": 60, "status": 80,
                       "src_strings": 90, "avg_score": 70, "created": 185,
                       "ended": 185, "duration": 70}
@@ -1116,6 +1120,7 @@ class MRPipelineTab:
             self._mr_row_iid_by_task = {}
             self._jira_row_iids = {}
             self._mr_link_meta = {}
+            self._delivery_row_iids = {}
             self._jira_titles_by_iid = {}
             self._truncated_title_iids = set()
             self._hide_title_tooltip()
@@ -1138,6 +1143,9 @@ class MRPipelineTab:
         # Deduped because the same MR routinely triggers several tasks.
         jira_prefetch: list[tuple[str, int]] = []
         jira_seen: set[tuple[str, int]] = set()
+        # Distinct follow-up MRs whose live GitLab state fills Trans MR Status.
+        delivery_status_prefetch: list[tuple[str, int]] = []
+        delivery_status_seen: set[tuple[str, int]] = set()
         # Resolved once per repaint: when GitLab is unreachable (no token)
         # the JIRA / MR Status cells render "—" up front instead of a "…"
         # spinner that would never resolve.
@@ -1223,12 +1231,27 @@ class MRPipelineTab:
                 else ("…" if can_resolve else "—")
             )
             delivery = _delivery.delivery_from_task(t)
+            delivery_key = None
             if delivery is not None:
                 delivery_display = delivery.iid
+                delivery_key = _jira._normalize_key(
+                    delivery.project_id, delivery.iid)
+                delivery_state = (
+                    _jira.get_cached_state(*delivery_key)
+                    if delivery_key is not None else None)
+                if delivery_state is not None:
+                    delivery_status_display = (
+                        _jira.display_mr_state(delivery_state) or "—")
+                elif jira_fetchable:
+                    delivery_status_display = "…"
+                else:
+                    delivery_status_display = "—"
             elif can_resolve:
                 delivery_display = "…"
+                delivery_status_display = "…"
             else:
                 delivery_display = "—"
+                delivery_status_display = "—"
             source_url = (
                 str(t.get("mr_link") or "").strip()
                 or _delivery.gitlab_mr_url(raw_project, mr_iid)
@@ -1239,8 +1262,8 @@ class MRPipelineTab:
                 "", "end",
                 iid=task_id or None,
                 values=(
-                    idx, display_project, mr_iid, delivery_display,
-                    mr_status_display,
+                    idx, display_project, mr_iid, mr_status_display,
+                    delivery_display, delivery_status_display,
                     jira_display, title_display,
                     t.get("release", ""), t.get("status", ""),
                     src_display,
@@ -1257,6 +1280,11 @@ class MRPipelineTab:
                 "delivery_url": delivery_url,
                 "task_id": task_id,
             }
+            if delivery_key is not None:
+                self._delivery_row_iids.setdefault(delivery_key, []).append(iid)
+                if jira_fetchable and delivery_key not in delivery_status_seen:
+                    delivery_status_seen.add(delivery_key)
+                    delivery_status_prefetch.append(delivery_key)
             normalized_title = _single_line_title(title_cached)
             if normalized_title:
                 self._jira_titles_by_iid[iid] = normalized_title
@@ -1300,6 +1328,8 @@ class MRPipelineTab:
         # outlive the MR actually merging.
         if jira_prefetch:
             self._prefetch_jira_metadata(jira_prefetch)
+        if delivery_status_prefetch:
+            self._prefetch_delivery_status(delivery_status_prefetch)
 
         # Treeview clips text but does not draw an ellipsis itself. Repaint
         # after geometry settles so Title uses the final elastic column width.
@@ -1619,7 +1649,8 @@ class MRPipelineTab:
         # If the user sorted a still-loading metadata column, fold the final
         # values into the requested order once all workers have returned.
         if self._mr_sort and self._mr_sort[0] in (
-                "jira", "title", "mr_status", "delivery_mr"):
+                "jira", "title", "mr_status", "delivery_mr",
+                "delivery_mr_status"):
             self._apply_sort(*self._mr_sort)
         # Source-MR state is now known: only merged sources can have a
         # follow-up translation MR that GET /tasks didn't name.
@@ -1651,15 +1682,9 @@ class MRPipelineTab:
                         (str(project), int(source_iid)), []
                     ).append((tree_iid, meta.get("task_id") or tree_iid))
                 else:
-                    try:
-                        self.mr_tree.set(tree_iid, "delivery_mr", "—")
-                    except tk.TclError:
-                        pass
+                    self._clear_delivery_cells(tree_iid)
             elif status in ("Open", "Closed", "Locked", "—"):
-                try:
-                    self.mr_tree.set(tree_iid, "delivery_mr", "—")
-                except tk.TclError:
-                    pass
+                self._clear_delivery_cells(tree_iid)
         if not groups:
             return
 
@@ -1703,24 +1728,83 @@ class MRPipelineTab:
         threading.Thread(target=_run, name="mr-delivery-prefetch",
                          daemon=True).start()
 
-    def _apply_delivery_mr(self, tree_iid, ref):
-        """Paint one Trans MR# cell. Runs on the Tk thread."""
-        meta = self._mr_link_meta.get(tree_iid)
-        if meta is None:
-            return
-        if ref is not None:
-            meta["delivery_iid"] = ref.iid
-            meta["delivery_url"] = ref.url
-            display = ref.iid
-        else:
-            display = "—"
+    def _clear_delivery_cells(self, tree_iid):
         try:
-            self.mr_tree.set(tree_iid, "delivery_mr", display)
+            self.mr_tree.set(tree_iid, "delivery_mr", "—")
+            self.mr_tree.set(tree_iid, "delivery_mr_status", "—")
         except tk.TclError:
             pass
 
+    def _apply_delivery_mr(self, tree_iid, ref):
+        """Paint one Trans MR# + Trans MR Status pair. Runs on the Tk thread."""
+        meta = self._mr_link_meta.get(tree_iid)
+        if meta is None:
+            return
+        if ref is None:
+            self._clear_delivery_cells(tree_iid)
+            return
+        meta["delivery_iid"] = ref.iid
+        meta["delivery_url"] = ref.url
+        if ref.state:
+            status_display = _jira.display_mr_state(ref.state) or "—"
+        else:
+            status_display = "…"
+        try:
+            self.mr_tree.set(tree_iid, "delivery_mr", ref.iid)
+            self.mr_tree.set(tree_iid, "delivery_mr_status", status_display)
+        except tk.TclError:
+            return
+        dkey = _jira._normalize_key(ref.project_id, ref.iid)
+        if dkey is None:
+            return
+        rows = self._delivery_row_iids.setdefault(dkey, [])
+        if tree_iid not in rows:
+            rows.append(tree_iid)
+        if not ref.state:
+            self._prefetch_delivery_status([dkey])
+
+    def _prefetch_delivery_status(self, keys):
+        """Refresh live GitLab state for known follow-up translation MRs."""
+        if not keys:
+            return
+
+        def _run():
+            def _work(key):
+                metadata = _jira.fetch_jira_metadata(
+                    *key, force_refresh=True)
+                raw = metadata.state if metadata is not None else None
+                if raw is None:
+                    raw = _jira.get_cached_state(*key)
+                try:
+                    self.parent.after(
+                        0, self._apply_delivery_status, key, raw)
+                except Exception:
+                    pass
+
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                list(pool.map(_work, keys))
+            try:
+                self.parent.after(0, self._on_delivery_prefetch_done)
+            except Exception:
+                pass
+
+        threading.Thread(target=_run, name="mr-delivery-status-prefetch",
+                         daemon=True).start()
+
+    def _apply_delivery_status(self, key, raw_state):
+        status_display = (
+            (_jira.display_mr_state(raw_state) or "—")
+            if raw_state is not None else "—"
+        )
+        for iid in self._delivery_row_iids.get(key, ()):
+            try:
+                self.mr_tree.set(iid, "delivery_mr_status", status_display)
+            except tk.TclError:
+                pass
+
     def _on_delivery_prefetch_done(self):
-        if self._mr_sort and self._mr_sort[0] == "delivery_mr":
+        if self._mr_sort and self._mr_sort[0] in (
+                "delivery_mr", "delivery_mr_status"):
             self._apply_sort(*self._mr_sort)
 
     # ------------------------------------------------------------------
