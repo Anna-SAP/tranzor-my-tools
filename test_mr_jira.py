@@ -667,7 +667,7 @@ class ApplyDeliveryMrTests(unittest.TestCase):
                      "-/merge_requests/4192"),
                 state="opened"),
         )
-        self.assertEqual(tab.mr_tree.cells[("task-1", "delivery_mr")], 4192)
+        self.assertEqual(tab.mr_tree.cells[("task-1", "delivery_mr")], "4192")
         self.assertEqual(
             tab.mr_tree.cells[("task-1", "delivery_mr_status")], "Open")
         self.assertEqual(tab._mr_link_meta["task-1"]["delivery_iid"], 4192)
@@ -710,9 +710,50 @@ class ApplyDeliveryMrTests(unittest.TestCase):
         tab = MRPipelineTab.__new__(MRPipelineTab)
         tab.mr_tree = _Tree()
         tab._delivery_row_iids = {("common/uns", 4191): ["task-1"]}
+        tab._mr_link_meta = {"task-1": {"delivery_iid": 4191}}
         tab._apply_delivery_status(("common/uns", 4191), "merged")
         self.assertEqual(
             tab.mr_tree.cells[("task-1", "delivery_mr_status")], "Merged")
+
+    def test_successor_fix_mr_paints_arrow_and_current_status(self):
+        from gui_tabs import MRPipelineTab
+        import mr_delivery as _delivery
+
+        class _Tree:
+            def __init__(self):
+                self.cells = {}
+
+            def set(self, iid, column, value=None):
+                if value is None:
+                    return self.cells.get((iid, column), "")
+                self.cells[(iid, column)] = value
+
+        tab = MRPipelineTab.__new__(MRPipelineTab)
+        tab.mr_tree = _Tree()
+        tab._delivery_row_iids = {}
+        tab._mr_link_meta = {
+            "task-1": {"project": "web/i18n", "source_iid": 1223,
+                       "delivery_iid": None, "delivery_url": ""},
+        }
+        tab._apply_follow_ups(
+            "task-1",
+            _delivery.DeliveryRef(
+                project_id="web/i18n", iid=1224,
+                url=("https://git.ringcentral.com/web/i18n/"
+                     "-/merge_requests/1224"),
+                state="merged"),
+            _delivery.DeliveryRef(
+                project_id="web/i18n", iid=1225,
+                url=("https://git.ringcentral.com/web/i18n/"
+                     "-/merge_requests/1225"),
+                state="opened"),
+        )
+        self.assertEqual(
+            tab.mr_tree.cells[("task-1", "delivery_mr")], "1224 → 1225")
+        self.assertEqual(
+            tab.mr_tree.cells[("task-1", "delivery_mr_status")], "Open")
+        self.assertEqual(tab._mr_link_meta["task-1"]["delivery_iid"], 1224)
+        self.assertEqual(tab._mr_link_meta["task-1"]["fix_iid"], 1225)
 
 
 class JiraHyperlinkInteractionTests(unittest.TestCase):
@@ -787,6 +828,24 @@ class JiraHyperlinkInteractionTests(unittest.TestCase):
             result = tab._on_mr_tree_click(SimpleNamespace(x=10, y=20))
         opener.assert_called_once_with(
             "https://git.ringcentral.com/common/uns/-/merge_requests/4192")
+        self.assertEqual(result, "break")
+
+    def test_clicking_trans_mr_opens_later_fix_mr_when_present(self):
+        tree = _FakeTree(column=_col("delivery_mr"))
+        tab = self._tab(tree, {
+            "task-1": {
+                "delivery_url": (
+                    "https://git.ringcentral.com/web/i18n/"
+                    "-/merge_requests/1224"),
+                "fix_url": (
+                    "https://git.ringcentral.com/web/i18n/"
+                    "-/merge_requests/1225"),
+            }
+        })
+        with mock.patch("gui_tabs.webbrowser.open_new_tab") as opener:
+            result = tab._on_mr_tree_click(SimpleNamespace(x=10, y=20))
+        opener.assert_called_once_with(
+            "https://git.ringcentral.com/web/i18n/-/merge_requests/1225")
         self.assertEqual(result, "break")
 
 

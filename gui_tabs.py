@@ -477,7 +477,7 @@ class MRPipelineTab:
         self.mr_tree = ttk.Treeview(tree_frame, columns=cols, show="headings",
                                      style="Summary.Treeview", height=14, selectmode="browse")
         col_widths = {"idx": 35, "project": 140, "mr": 60, "mr_status": 90,
-                      "delivery_mr": 80, "delivery_mr_status": 110,
+                      "delivery_mr": 120, "delivery_mr_status": 110,
                       "jira": 90, "title": 260, "release": 60, "status": 80,
                       "src_strings": 90, "avg_score": 70, "created": 185,
                       "ended": 185, "duration": 70}
@@ -1652,37 +1652,43 @@ class MRPipelineTab:
                 "jira", "title", "mr_status", "delivery_mr",
                 "delivery_mr_status"):
             self._apply_sort(*self._mr_sort)
-        # Source-MR state is now known: only merged sources can have a
-        # follow-up translation MR that GET /tasks didn't name.
+        # Source-MR state is now known: merged sources may have a translation
+        # import MR, and a known import MR may have a later Language Lead
+        # fix MR on tranzor-mr-fix-*.
         self._prefetch_missing_delivery_mrs()
 
     def _prefetch_missing_delivery_mrs(self):
-        """GitLab-search follow-up MRs for merged source rows still showing …"""
-        groups = {}  # (project, source_iid) → [(tree_iid, task_id), ...]
+        """GitLab-search the original Trans MR and any later fix successor."""
+        groups = {}  # (project, source_iid) → [(tree_iid, task_id, known_iid)]
         try:
             rows = list(self.mr_tree.get_children(""))
         except tk.TclError:
             return
         for tree_iid in rows:
             meta = self._mr_link_meta.get(tree_iid) or {}
-            if meta.get("delivery_iid"):
-                continue
+            project = meta.get("project") or ""
+            source_iid = meta.get("source_iid")
+            known_iid = meta.get("delivery_iid")
             try:
                 cell = str(self.mr_tree.set(tree_iid, "delivery_mr") or "")
                 status = str(self.mr_tree.set(tree_iid, "mr_status") or "")
             except tk.TclError:
                 continue
+            if not project or source_iid is None:
+                if not known_iid and cell == "…":
+                    self._clear_delivery_cells(tree_iid)
+                continue
+            if known_iid:
+                groups.setdefault(
+                    (str(project), int(source_iid)), []
+                ).append((tree_iid, meta.get("task_id") or tree_iid, known_iid))
+                continue
             if cell not in ("…",):
                 continue
             if status == "Merged":
-                project = meta.get("project") or ""
-                source_iid = meta.get("source_iid")
-                if project and source_iid is not None:
-                    groups.setdefault(
-                        (str(project), int(source_iid)), []
-                    ).append((tree_iid, meta.get("task_id") or tree_iid))
-                else:
-                    self._clear_delivery_cells(tree_iid)
+                groups.setdefault(
+                    (str(project), int(source_iid)), []
+                ).append((tree_iid, meta.get("task_id") or tree_iid, None))
             elif status in ("Open", "Closed", "Locked", "—"):
                 self._clear_delivery_cells(tree_iid)
         if not groups:
@@ -1707,14 +1713,29 @@ class MRPipelineTab:
                             project_id=project, in_field="title") or []
                 except Exception:
                     mrs = []
-                for tree_iid, task_id in row_jobs:
-                    picked = _delivery.pick_delivery_mr(
+                for tree_iid, task_id, known_iid in row_jobs:
+                    picked_import = _delivery.pick_delivery_mr(
                         mrs, source_iid, task_id=task_id)
-                    ref = _delivery.delivery_ref_from_mr(
-                        picked, fallback_project=project)
+                    if known_iid:
+                        import_ref = (
+                            _delivery.ref_from_iid(
+                                mrs, known_iid, fallback_project=project)
+                            or _delivery.DeliveryRef(
+                                project_id=project, iid=int(known_iid),
+                                url=_delivery.gitlab_mr_url(project, known_iid))
+                        )
+                    else:
+                        import_ref = _delivery.delivery_ref_from_mr(
+                            picked_import, fallback_project=project)
+                    exclude = import_ref.iid if import_ref is not None else known_iid
+                    picked_fix = _delivery.pick_fix_mr(
+                        mrs, source_iid, exclude_iid=exclude)
+                    fix_ref = _delivery.delivery_ref_from_mr(
+                        picked_fix, fallback_project=project)
                     try:
                         self.parent.after(
-                            0, self._apply_delivery_mr, tree_iid, ref)
+                            0, self._apply_follow_ups,
+                            tree_iid, import_ref, fix_ref)
                     except Exception:
                         pass
 
@@ -1729,6 +1750,14 @@ class MRPipelineTab:
                          daemon=True).start()
 
     def _clear_delivery_cells(self, tree_iid):
+        meta = self._mr_link_meta.get(tree_iid)
+        if meta is not None:
+            meta["delivery_iid"] = None
+            meta["delivery_url"] = ""
+            meta["delivery_state"] = ""
+            meta["fix_iid"] = None
+            meta["fix_url"] = ""
+            meta["fix_state"] = ""
         try:
             self.mr_tree.set(tree_iid, "delivery_mr", "—")
             self.mr_tree.set(tree_iid, "delivery_mr_status", "—")
@@ -1737,30 +1766,57 @@ class MRPipelineTab:
 
     def _apply_delivery_mr(self, tree_iid, ref):
         """Paint one Trans MR# + Trans MR Status pair. Runs on the Tk thread."""
+        self._apply_follow_ups(tree_iid, ref, None)
+
+    def _apply_follow_ups(self, tree_iid, import_ref, fix_ref=None):
+        """Paint original import MR plus an optional later Language Lead fix MR."""
         meta = self._mr_link_meta.get(tree_iid)
         if meta is None:
             return
-        if ref is None:
+        if import_ref is None and not meta.get("delivery_iid") and fix_ref is None:
             self._clear_delivery_cells(tree_iid)
             return
-        meta["delivery_iid"] = ref.iid
-        meta["delivery_url"] = ref.url
-        if ref.state:
-            status_display = _jira.display_mr_state(ref.state) or "—"
+        if import_ref is not None:
+            meta["delivery_iid"] = import_ref.iid
+            meta["delivery_url"] = import_ref.url
+            meta["delivery_state"] = import_ref.state
+        if (fix_ref is not None
+                and fix_ref.iid != meta.get("delivery_iid")):
+            meta["fix_iid"] = fix_ref.iid
+            meta["fix_url"] = fix_ref.url
+            meta["fix_state"] = fix_ref.state
         else:
+            meta["fix_iid"] = None
+            meta["fix_url"] = ""
+            meta["fix_state"] = ""
+        self._paint_delivery_row(tree_iid)
+
+    def _paint_delivery_row(self, tree_iid):
+        meta = self._mr_link_meta.get(tree_iid) or {}
+        display = _delivery.format_trans_mr_cell(
+            meta.get("delivery_iid"), meta.get("fix_iid"))
+        current_iid = _delivery.current_trans_mr_iid(
+            meta.get("delivery_iid"), meta.get("fix_iid"))
+        current_state = meta.get("fix_state") or meta.get("delivery_state")
+        if current_state:
+            status_display = _jira.display_mr_state(current_state) or "—"
+        elif current_iid is not None:
             status_display = "…"
+        else:
+            status_display = "—"
         try:
-            self.mr_tree.set(tree_iid, "delivery_mr", ref.iid)
+            self.mr_tree.set(tree_iid, "delivery_mr", display)
             self.mr_tree.set(tree_iid, "delivery_mr_status", status_display)
         except tk.TclError:
             return
-        dkey = _jira._normalize_key(ref.project_id, ref.iid)
+        project = meta.get("project") or ""
+        dkey = _jira._normalize_key(project, current_iid)
         if dkey is None:
             return
         rows = self._delivery_row_iids.setdefault(dkey, [])
         if tree_iid not in rows:
             rows.append(tree_iid)
-        if not ref.state:
+        if current_iid is not None and not current_state:
             self._prefetch_delivery_status([dkey])
 
     def _prefetch_delivery_status(self, keys):
@@ -1796,7 +1852,17 @@ class MRPipelineTab:
             (_jira.display_mr_state(raw_state) or "—")
             if raw_state is not None else "—"
         )
+        want_iid = key[1] if isinstance(key, tuple) and len(key) > 1 else None
         for iid in self._delivery_row_iids.get(key, ()):
+            meta = getattr(self, "_mr_link_meta", {}).get(iid) or {}
+            current = _delivery.current_trans_mr_iid(
+                meta.get("delivery_iid"), meta.get("fix_iid"))
+            if current is None or want_iid not in (None, current):
+                continue
+            if meta.get("fix_iid") == current:
+                meta["fix_state"] = raw_state or ""
+            elif meta.get("delivery_iid") == current:
+                meta["delivery_state"] = raw_state or ""
             try:
                 self.mr_tree.set(iid, "delivery_mr_status", status_display)
             except tk.TclError:
@@ -1875,7 +1941,7 @@ class MRPipelineTab:
             if column == self._col_ident("mr"):
                 return str(meta.get("source_url") or "")
             if column == self._col_ident("delivery_mr"):
-                return str(meta.get("delivery_url") or "")
+                return str(meta.get("fix_url") or meta.get("delivery_url") or "")
         except tk.TclError:
             return ""
         return ""
@@ -1885,17 +1951,41 @@ class MRPipelineTab:
         return self._mr_tree_link_at(x, y)
 
     def _title_tooltip_at(self, x, y):
-        """Return ``(iid, full_title)`` only for a truncated Title cell."""
+        """Return ``(iid, text)`` for a truncated Title or a Trans MR successor."""
         if self.mr_tree.identify_region(x, y) != "cell":
             return None
-        title_column = f"#{self._MR_COLUMNS.index('title') + 1}"
-        if self.mr_tree.identify_column(x) != title_column:
-            return None
+        column = self.mr_tree.identify_column(x)
         iid = self.mr_tree.identify_row(y)
-        if not iid or iid not in self._truncated_title_iids:
+        if not iid:
             return None
-        title = self._jira_titles_by_iid.get(iid, "")
-        return (iid, title) if title else None
+        if column == self._col_ident("title"):
+            if iid not in self._truncated_title_iids:
+                return None
+            title = self._jira_titles_by_iid.get(iid, "")
+            return (iid, title) if title else None
+        if column == self._col_ident("delivery_mr"):
+            text = self._delivery_tooltip_text(iid)
+            return (iid, text) if text else None
+        return None
+
+    def _delivery_tooltip_text(self, iid):
+        meta = getattr(self, "_mr_link_meta", {}).get(iid) or {}
+        import_iid = meta.get("delivery_iid")
+        fix_iid = meta.get("fix_iid")
+        if not import_iid or not fix_iid or import_iid == fix_iid:
+            return ""
+        import_status = (
+            _jira.display_mr_state(meta.get("delivery_state")) or "—")
+        fix_status = _jira.display_mr_state(meta.get("fix_state")) or "—"
+        try:
+            template = self._t("mr_trans_mr_tooltip")
+        except Exception:
+            template = (
+                "Translations imported in !{import_iid} ({import_status}). "
+                "Later Language Lead fixes in !{fix_iid} ({fix_status}).")
+        return template.format(
+            import_iid=import_iid, import_status=import_status,
+            fix_iid=fix_iid, fix_status=fix_status)
 
     def _update_title_tooltip_hover(self, event):
         target = self._title_tooltip_at(event.x, event.y)
@@ -1921,8 +2011,10 @@ class MRPipelineTab:
         if not target:
             return
         iid, title = target
-        if (iid not in self._truncated_title_iids
-                or self._jira_titles_by_iid.get(iid) != title):
+        is_title = (iid in self._truncated_title_iids
+                    and self._jira_titles_by_iid.get(iid) == title)
+        is_delivery = title == self._delivery_tooltip_text(iid)
+        if not is_title and not is_delivery:
             return
 
         tw = tk.Toplevel(self.mr_tree)
@@ -2038,6 +2130,11 @@ class MRPipelineTab:
                 if col == "title":
                     return self._jira_titles_by_iid.get(
                         iid, self.mr_tree.set(iid, col))
+                if col == "delivery_mr":
+                    parsed = _delivery.trans_mr_sort_iid(
+                        self.mr_tree.set(iid, col))
+                    return parsed if parsed is not None else self.mr_tree.set(
+                        iid, col)
                 return self.mr_tree.set(iid, col)
 
             rows.sort(
