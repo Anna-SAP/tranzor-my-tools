@@ -67,6 +67,119 @@ def _ellipsize_text(value, max_width, measure):
     return text[:lo].rstrip() + suffix, True
 
 
+# MR Pipeline right sidebar: grow with the window so a maximized desktop
+# no longer leaves the filter card empty while project paths clip at 280px.
+# Floor / cap keep the 15-column table readable on the 1280px default size.
+_MR_SIDEBAR_MIN_PX = 320
+_MR_SIDEBAR_MAX_PX = 500
+_MR_SIDEBAR_RATIO = 0.22
+_MR_SIDEBAR_TABLE_RESERVE = 0.58
+_MR_SIDEBAR_INNER_PAD_PX = 24
+# Room for the longest relative-time string ("59 分钟前" / "12 个月前") plus
+# a small gap so the project path wraps instead of colliding with the age.
+_MR_RECENT_AGE_RESERVE_PX = 96
+
+
+def _mr_sidebar_width(content_width):
+    """Pixel width of the MR Pipeline right sidebar for a given pane width."""
+    try:
+        pane = max(0, int(content_width))
+    except (TypeError, ValueError):
+        pane = 0
+    if pane <= 0:
+        return _MR_SIDEBAR_MIN_PX
+    target = int(pane * _MR_SIDEBAR_RATIO)
+    hard_max = min(
+        _MR_SIDEBAR_MAX_PX,
+        max(180, pane - int(pane * _MR_SIDEBAR_TABLE_RESERVE)),
+    )
+    width = min(hard_max, max(_MR_SIDEBAR_MIN_PX, target))
+    return max(180, width)
+
+
+def _mr_sidebar_wraplength(sidebar_width, reserve=0):
+    """``wraplength`` for labels inside the sidebar so text wraps, not clips."""
+    try:
+        width = int(sidebar_width)
+    except (TypeError, ValueError):
+        width = 0
+    try:
+        extra = int(reserve)
+    except (TypeError, ValueError):
+        extra = 0
+    return max(80, width - _MR_SIDEBAR_INNER_PAD_PX - extra)
+
+
+def _recent_project_tooltip(project_id, relative="", absolute=""):
+    """Hover text for a Recently Added row: full path + relative + absolute."""
+    parts = [str(project_id or "").strip()]
+    if relative:
+        parts.append(str(relative).strip())
+    if absolute:
+        parts.append(str(absolute).strip())
+    return "\n".join(p for p in parts if p)
+
+
+def _split_project_path_tokens(text):
+    """Split a GitLab path, keeping ``/`` and ``-`` as their own tokens."""
+    tokens = []
+    buf = []
+    for ch in str(text or ""):
+        if ch in "/-":
+            if buf:
+                tokens.append("".join(buf))
+                buf = []
+            tokens.append(ch)
+        else:
+            buf.append(ch)
+    if buf:
+        tokens.append("".join(buf))
+    return tokens
+
+
+def _break_project_path(text, max_width, measure):
+    """Insert newlines at ``/`` or ``-`` so each line fits ``max_width``.
+
+    ttk.Label ``wraplength`` wraps on character width when there is no
+    space, which is how ``copilot-platform/business`` became
+    ``copilot-platfo`` / ``rm/busine``. Breaking on path separators keeps
+    the full path visible and readable. ``measure`` is injected
+    (normally ``tkinter.font.Font.measure``).
+    """
+    text = str(text or "")
+    if not text:
+        return ""
+    try:
+        available = max(0, int(max_width))
+    except (TypeError, ValueError):
+        available = 0
+    if available <= 0:
+        return text
+    try:
+        if measure(text) <= available:
+            return text
+    except Exception:
+        return text
+    lines = []
+    current = ""
+    for tok in _split_project_path_tokens(text):
+        candidate = current + tok
+        fits = True
+        if current:
+            try:
+                fits = measure(candidate) <= available
+            except Exception:
+                fits = True
+        if not fits:
+            lines.append(current)
+            current = tok
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    return "\n".join(lines) if lines else text
+
+
 def _mr_time_cells(task, *, tz=None):
     """Created / Ended / Duration cells for one MR Pipeline task.
 
@@ -145,6 +258,9 @@ class MRPipelineTab:
         self.mr_loading = False
         self.mr_overview_loading = False
         self._recent_projects_loading = False
+        self._recent_name_labels = []
+        self._recent_name_paths = []
+        self._recent_tooltips = []
         self._loading_anim_id = None
         self._loading_dot_count = 0
         # task_id → Treeview iid; populated each time _on_tasks_loaded
@@ -201,13 +317,17 @@ class MRPipelineTab:
     def _build(self, parent):
         content = ttk.Frame(parent, style="App.TFrame")
         content.pack(fill="both", expand=True, padx=16, pady=8)
+        self._mr_content = content
 
         left = ttk.Frame(content, style="App.TFrame")
         left.pack(side="left", fill="both", expand=True)
 
-        right = ttk.Frame(content, style="App.TFrame", width=280)
-        right.pack(side="right", fill="y", padx=(12, 0))
+        right = ttk.Frame(
+            content, style="App.TFrame", width=_MR_SIDEBAR_MIN_PX)
+        right.pack(side="right", fill="y", padx=(8, 0))
         right.pack_propagate(False)
+        self._mr_sidebar_frame = right
+        content.bind("<Configure>", self._sync_mr_sidebar_width, add="+")
 
         # ── Filter bar ──
         filt = ttk.Frame(left, style="Card.TFrame")
@@ -544,72 +664,218 @@ class MRPipelineTab:
         panel.pack(fill="both", expand=True)
         panel.configure(borderwidth=1, relief="solid")
         inner = ttk.Frame(panel, style="Summary.TFrame")
-        inner.pack(fill="both", expand=True, padx=14, pady=14)
+        inner.pack(fill="both", expand=True, padx=10, pady=10)
+        self._mr_sidebar_inner = inner
 
-        self.lbl_mr_sidebar_title = ttk.Label(inner, text="", style="SummaryTitle.TLabel")
-        self.lbl_mr_sidebar_title.pack(anchor="w")
-        tk.Frame(inner, bg="#2a2a4a", height=1).pack(fill="x", pady=(8, 10))
+        self.lbl_mr_sidebar_title = ttk.Label(
+            inner, text="", style="SummaryTitle.TLabel",
+            wraplength=_mr_sidebar_wraplength(_MR_SIDEBAR_MIN_PX),
+            justify="left", anchor="w")
+        self.lbl_mr_sidebar_title.pack(anchor="w", fill="x")
+        tk.Frame(inner, bg="#2a2a4a", height=1).pack(fill="x", pady=(6, 8))
 
-        # Stats
+        # 2×2 KPI grid — uses the extra sidebar width instead of four
+        # stacked rows, and leaves more vertical room for project paths.
         stats = ttk.Frame(inner, style="Summary.TFrame")
         stats.pack(fill="x")
-
+        stats.columnconfigure(0, weight=1)
+        stats.columnconfigure(1, weight=1)
         self.mr_stat_labels = {}
-        for key in ("total", "completed", "failed", "avg_score"):
-            row = ttk.Frame(stats, style="Summary.TFrame")
-            row.pack(fill="x", pady=3)
-            lbl = ttk.Label(row, text="", style="Card.TLabel")
-            lbl.pack(side="left")
-            val = ttk.Label(row, text="—", style="CardBold.TLabel")
-            val.pack(side="right")
+        for i, key in enumerate(("total", "completed", "failed", "avg_score")):
+            r, c = divmod(i, 2)
+            cell = ttk.Frame(stats, style="Summary.TFrame")
+            cell.grid(
+                row=r, column=c, sticky="nsew",
+                padx=(0, 8) if c == 0 else (8, 0), pady=(0, 6))
+            val = ttk.Label(
+                cell, text="—", style="SummaryCount.TLabel",
+                font=(FONT_FAMILY, 16, "bold"))
+            val.pack(anchor="w")
+            lbl = ttk.Label(
+                cell, text="", style="SummaryCountLabel.TLabel",
+                wraplength=max(80, _mr_sidebar_wraplength(
+                    _MR_SIDEBAR_MIN_PX) // 2),
+                justify="left", anchor="w")
+            lbl.pack(anchor="w")
             self.mr_stat_labels[key] = (lbl, val)
 
-        # ── Recently Added Projects section ──
-        # Separator + section title live near the top of the remaining area.
-        tk.Frame(inner, bg="#2a2a4a", height=1).pack(fill="x", pady=(14, 10))
+        tk.Frame(inner, bg="#2a2a4a", height=1).pack(fill="x", pady=(4, 8))
         self.lbl_mr_recent_projects_title = ttk.Label(
-            inner, text="", style="SummarySection.TLabel")
-        self.lbl_mr_recent_projects_title.pack(anchor="w", pady=(0, 6))
+            inner, text="", style="SummarySection.TLabel",
+            wraplength=_mr_sidebar_wraplength(_MR_SIDEBAR_MIN_PX),
+            justify="left", anchor="w")
+        self.lbl_mr_recent_projects_title.pack(anchor="w", fill="x", pady=(0, 4))
 
-        # Pack status + refresh button at the BOTTOM first so the recent
-        # projects frame can take every pixel between section title and
-        # these anchors via fill="both", expand=True.
+        # Status + refresh sit at the BOTTOM first so the project list
+        # expands into every remaining pixel.
         self.btn_mr_sidebar_refresh = self.app._create_button(
             inner, text="", command=self._load_overview,
             style_name="SecondaryTiny",
             font=(FONT_FAMILY, 9), bg="#0f3460", fg="#ccc",
             padx=10, pady=3)
-        self.btn_mr_sidebar_refresh.pack(side="bottom", anchor="e", pady=(8, 0))
+        self.btn_mr_sidebar_refresh.pack(side="bottom", anchor="e", pady=(6, 0))
 
         self.lbl_mr_sidebar_status = ttk.Label(
-            inner, text="", style="SummaryStatus.TLabel")
-        self.lbl_mr_sidebar_status.pack(side="bottom", anchor="w", pady=(8, 0))
+            inner, text="", style="SummaryStatus.TLabel",
+            wraplength=_mr_sidebar_wraplength(_MR_SIDEBAR_MIN_PX),
+            justify="left", anchor="w")
+        self.lbl_mr_sidebar_status.pack(side="bottom", anchor="w", fill="x",
+                                        pady=(6, 0))
 
-        # Recent projects Treeview — expands to fill all remaining sidebar
-        # height so as many rows as possible are visible without scrolling.
         recent_frame = ttk.Frame(inner, style="Summary.TFrame")
         recent_frame.pack(fill="both", expand=True)
-        self.mr_recent_tree = ttk.Treeview(
-            recent_frame,
-            columns=("project", "added"),
-            show="headings",
-            style="Summary.Treeview",
-            height=3,  # initial request only — fill/expand will override
-            selectmode="browse",
-        )
-        self.mr_recent_tree.heading("project", text="")
-        self.mr_recent_tree.heading("added", text="")
-        self.mr_recent_tree.column(
-            "project", width=160, minwidth=90, stretch=True)
-        self.mr_recent_tree.column(
-            "added", width=78, minwidth=60, stretch=False, anchor="e")
+        self._recent_canvas = tk.Canvas(
+            recent_frame, highlightthickness=0, bd=0,
+            bg=self.app.BG_CARD, takefocus=0)
         recent_scroll = ttk.Scrollbar(
             recent_frame, orient="vertical",
-            command=self.mr_recent_tree.yview)
-        self.mr_recent_tree.configure(yscrollcommand=recent_scroll.set)
-        self.mr_recent_tree.pack(side="left", fill="both", expand=True)
+            command=self._recent_canvas.yview)
+        self._recent_canvas.configure(yscrollcommand=recent_scroll.set)
         recent_scroll.pack(side="right", fill="y")
+        self._recent_canvas.pack(side="left", fill="both", expand=True)
+        self._recent_inner = ttk.Frame(
+            self._recent_canvas, style="Summary.TFrame")
+        self._recent_inner_id = self._recent_canvas.create_window(
+            (0, 0), window=self._recent_inner, anchor="nw")
+        self._recent_inner.bind(
+            "<Configure>", self._on_recent_inner_configure, add="+")
+        self._recent_canvas.bind(
+            "<Configure>", self._on_recent_canvas_configure, add="+")
+        self._bind_recent_mousewheel(self._recent_canvas)
+        self._bind_recent_mousewheel(self._recent_inner)
+        self._recent_name_font = tkfont.Font(
+            root=self._recent_canvas, font=(FONT_FAMILY, 10))
         self._last_recent_projects = []
+        self._recent_name_labels = []
+        self._recent_name_paths = []
+        self._recent_tooltips = []
+
+    def _sync_mr_sidebar_width(self, event=None):
+        """Grow/shrink the sidebar with the pane so extra monitor width is
+        spent on project paths instead of an empty filter card."""
+        frame = getattr(self, "_mr_sidebar_frame", None)
+        content = getattr(self, "_mr_content", None)
+        if frame is None or content is None:
+            return
+        try:
+            pane_w = int(content.winfo_width() or 0)
+        except tk.TclError:
+            return
+        if pane_w < 200:
+            return
+        width = _mr_sidebar_width(pane_w)
+        try:
+            current = int(str(frame.cget("width") or 0))
+        except (TypeError, ValueError, tk.TclError):
+            current = 0
+        if abs(current - width) >= 2:
+            frame.configure(width=width)
+        self._apply_sidebar_wraplengths(width)
+
+    def _apply_sidebar_wraplengths(self, sidebar_width=None):
+        """Keep every sidebar label wrapping inside the live pane width."""
+        if sidebar_width is None:
+            frame = getattr(self, "_mr_sidebar_frame", None)
+            if frame is None:
+                return
+            try:
+                sidebar_width = int(str(frame.cget("width") or 0))
+            except (TypeError, ValueError, tk.TclError):
+                sidebar_width = _MR_SIDEBAR_MIN_PX
+        wrap = _mr_sidebar_wraplength(sidebar_width)
+        for attr in (
+                "lbl_mr_sidebar_title",
+                "lbl_mr_recent_projects_title",
+                "lbl_mr_sidebar_status"):
+            lbl = getattr(self, attr, None)
+            if lbl is not None:
+                try:
+                    lbl.configure(wraplength=wrap)
+                except tk.TclError:
+                    pass
+        caption_wrap = max(80, wrap // 2)
+        for pair in getattr(self, "mr_stat_labels", {}).values():
+            try:
+                pair[0].configure(wraplength=caption_wrap)
+            except (tk.TclError, TypeError, IndexError):
+                pass
+        self._apply_recent_name_wraplengths()
+
+    def _apply_recent_name_wraplengths(self, canvas_width=None):
+        labels = getattr(self, "_recent_name_labels", None) or []
+        if not labels:
+            return
+        if canvas_width is None:
+            canvas = getattr(self, "_recent_canvas", None)
+            if canvas is None:
+                return
+            try:
+                canvas_width = int(canvas.winfo_width() or 0)
+            except tk.TclError:
+                canvas_width = 0
+        if canvas_width < 40:
+            frame = getattr(self, "_mr_sidebar_frame", None)
+            try:
+                canvas_width = int(str(frame.cget("width") or 0)) - (
+                    _MR_SIDEBAR_INNER_PAD_PX + 18)
+            except (TypeError, ValueError, tk.TclError, AttributeError):
+                canvas_width = _MR_SIDEBAR_MIN_PX - _MR_SIDEBAR_INNER_PAD_PX
+        wrap = max(80, int(canvas_width) - _MR_RECENT_AGE_RESERVE_PX)
+        paths = getattr(self, "_recent_name_paths", None) or []
+        font = getattr(self, "_recent_name_font", None)
+        measure = font.measure if font is not None else len
+        for i, lbl in enumerate(labels):
+            try:
+                pid = paths[i] if i < len(paths) else lbl.cget("text")
+                lbl.configure(
+                    wraplength=wrap,
+                    text=_break_project_path(pid, wrap, measure))
+            except tk.TclError:
+                pass
+
+    def _on_recent_inner_configure(self, _event=None):
+        canvas = getattr(self, "_recent_canvas", None)
+        if canvas is None:
+            return
+        try:
+            bbox = canvas.bbox("all")
+        except tk.TclError:
+            return
+        if bbox:
+            canvas.configure(scrollregion=bbox)
+
+    def _on_recent_canvas_configure(self, event):
+        canvas = getattr(self, "_recent_canvas", None)
+        inner_id = getattr(self, "_recent_inner_id", None)
+        if canvas is None or inner_id is None:
+            return
+        try:
+            canvas.itemconfigure(inner_id, width=event.width)
+        except tk.TclError:
+            return
+        self._apply_recent_name_wraplengths(event.width)
+
+    def _bind_recent_mousewheel(self, widget):
+        widget.bind("<MouseWheel>", self._on_recent_mousewheel, add="+")
+        widget.bind("<Button-4>", self._on_recent_mousewheel, add="+")
+        widget.bind("<Button-5>", self._on_recent_mousewheel, add="+")
+
+    def _on_recent_mousewheel(self, event):
+        canvas = getattr(self, "_recent_canvas", None)
+        if canvas is None:
+            return
+        try:
+            if getattr(event, "num", None) == 4:
+                canvas.yview_scroll(-1, "units")
+            elif getattr(event, "num", None) == 5:
+                canvas.yview_scroll(1, "units")
+            else:
+                delta = int(getattr(event, "delta", 0) or 0)
+                if delta:
+                    canvas.yview_scroll(-1 if delta > 0 else 1, "units")
+        except tk.TclError:
+            return
+        return "break"
 
     def refresh_text(self):
         """Update all text for current language."""
@@ -650,13 +916,12 @@ class MRPipelineTab:
         self.btn_mr_sidebar_refresh.configure(text=t("summary_refresh"))
         self.lbl_mr_recent_projects_title.configure(
             text=t("mr_recent_projects_title"))
-        self.mr_recent_tree.heading("project", text=t("mr_recent_col_project"))
-        self.mr_recent_tree.heading("added", text=t("mr_recent_col_added"))
         # Re-render relative timestamps / placeholders in the new language
         if self._recent_projects_loading:
             self._show_recent_projects_loading()
         else:
             self._render_recent_projects(self._last_recent_projects)
+        self._apply_sidebar_wraplengths()
 
     def load_initial_tasks(self):
         """Load the latest ``mr_page_size`` tasks (no filters) on first tab selection."""
@@ -2518,27 +2783,97 @@ class MRPipelineTab:
         self._recent_projects_loading = False
         self._render_recent_projects(recent)
 
+    def _clear_recent_project_rows(self):
+        inner = getattr(self, "_recent_inner", None)
+        if inner is None:
+            return
+        for child in inner.winfo_children():
+            try:
+                child.destroy()
+            except tk.TclError:
+                pass
+        self._recent_name_labels = []
+        self._recent_name_paths = []
+        self._recent_tooltips = []
+
     def _show_recent_projects_loading(self):
-        tree = self.mr_recent_tree
-        for item in tree.get_children():
-            tree.delete(item)
-        tree.insert("", "end", values=(self._t("summary_loading"), ""))
+        self._render_recent_message(self._t("summary_loading"))
+
+    def _render_recent_message(self, text):
+        inner = getattr(self, "_recent_inner", None)
+        if inner is None:
+            return
+        self._clear_recent_project_rows()
+        frame = getattr(self, "_mr_sidebar_frame", None)
+        try:
+            pane_w = int(str(frame.cget("width") or 0)) if frame else 0
+        except (TypeError, ValueError, tk.TclError):
+            pane_w = 0
+        wrap = _mr_sidebar_wraplength(pane_w or _MR_SIDEBAR_MIN_PX)
+        lbl = ttk.Label(
+            inner, text=text, style="SummaryStatus.TLabel",
+            wraplength=max(80, wrap), justify="left", anchor="w")
+        lbl.pack(anchor="w", fill="x")
+        self._bind_recent_mousewheel(lbl)
+        self._on_recent_inner_configure()
 
     def _render_recent_projects(self, recent):
-        """Repaint the Recently Added Projects treeview. Caches data for
-        language re-render."""
+        """Repaint the Recently Added list. Paths wrap to the live sidebar
+        width (no Treeview clipping); hover still shows the full identity."""
         self._last_recent_projects = list(recent or [])
-        tree = self.mr_recent_tree
-        for item in tree.get_children():
-            tree.delete(item)
-        if not self._last_recent_projects:
-            tree.insert("", "end",
-                        values=(self._t("mr_recent_empty"), ""))
+        inner = getattr(self, "_recent_inner", None)
+        if inner is None:
             return
+        if not self._last_recent_projects:
+            self._render_recent_message(self._t("mr_recent_empty"))
+            return
+        self._clear_recent_project_rows()
+        try:
+            from export_gui import Tooltip
+        except Exception:
+            Tooltip = None
+        canvas_w = 0
+        canvas = getattr(self, "_recent_canvas", None)
+        if canvas is not None:
+            try:
+                canvas_w = int(canvas.winfo_width() or 0)
+            except tk.TclError:
+                canvas_w = 0
+        name_wrap = max(80, (canvas_w or _MR_SIDEBAR_MIN_PX) - _MR_RECENT_AGE_RESERVE_PX)
         for r in self._last_recent_projects:
             pid = r.get("project_id", "") or ""
             ts = r.get("first_seen", "") or ""
-            tree.insert("", "end", values=(pid, self._relative_time(ts)))
+            rel = self._relative_time(ts)
+            row = ttk.Frame(inner, style="Summary.TFrame")
+            row.pack(fill="x", pady=(0, 5))
+            age = ttk.Label(
+                row, text=rel, style="SummaryStatus.TLabel", anchor="ne")
+            age.pack(side="right", padx=(8, 0), anchor="ne")
+            font = getattr(self, "_recent_name_font", None)
+            measure = font.measure if font is not None else len
+            name = ttk.Label(
+                row,
+                text=_break_project_path(pid, name_wrap, measure),
+                style="Card.TLabel",
+                font=(FONT_FAMILY, 10),
+                wraplength=name_wrap, justify="left", anchor="w")
+            name.pack(side="left", fill="x", expand=True, anchor="w")
+            self._recent_name_labels.append(name)
+            self._recent_name_paths.append(pid)
+            abs_ts = format_display_datetime(ts, empty="") if ts else ""
+            tip = _recent_project_tooltip(pid, rel, abs_ts)
+            if Tooltip is not None and tip:
+                try:
+                    self._recent_tooltips.append(Tooltip(name, tip))
+                    if rel:
+                        self._recent_tooltips.append(Tooltip(age, tip))
+                except Exception:
+                    pass
+            self._bind_recent_mousewheel(row)
+            self._bind_recent_mousewheel(name)
+            self._bind_recent_mousewheel(age)
+        self._apply_recent_name_wraplengths(canvas_w or None)
+        self._on_recent_inner_configure()
 
     def _relative_time(self, iso_ts):
         """Format an ISO-ish timestamp as i18n-aware relative time."""
