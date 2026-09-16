@@ -1902,6 +1902,7 @@ def write_mr_html(results_data, filename, label, bridge_info=None,
 <head>
 <meta charset="UTF-8">
 <title>MR Pipeline Translations - {html_mod.escape(label)}</title>
+{th.HIGHLIGHT_TOGGLE_HEAD}
 <style>
     {th.HIGHLIGHT_CSS}
     * {{ margin:0; padding:0; box-sizing:border-box; }}
@@ -2087,6 +2088,7 @@ def write_mr_html(results_data, filename, label, bridge_info=None,
     <div class="toolbar-sep"></div>
     <button class="btn btn-filter" id="btnFilterToggle" onclick="toggleFilterPanel()">🔍 Filters</button>
     <span class="filter-info" id="filterInfo"></span>
+    {th.HIGHLIGHT_TOGGLE_HTML}
 </div>
 
     <h1>MR Pipeline Translations <span class="count" style="background:#4472C4;">{total_items} entries</span></h1>
@@ -2793,6 +2795,7 @@ if (TF_INITIAL) {{
     try {{ toggleFilterPanel(); applyFilters(); }} catch (e) {{}}
 }}
 </script>
+{th.HIGHLIGHT_TOGGLE_SCRIPT}
 </body>
 </html>"""
 

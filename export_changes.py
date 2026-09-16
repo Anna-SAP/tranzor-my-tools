@@ -505,6 +505,7 @@ def write_html(rows, filename, label, bridge_info=None):
 <head>
 <meta charset="UTF-8">
 <title>Tranzor Changes - {html.escape(label)}</title>
+{th.HIGHLIGHT_TOGGLE_HEAD}
 <style>
     {th.HIGHLIGHT_CSS}
     * {{ margin: 0; padding: 0; box-sizing: border-box; }}
@@ -710,6 +711,7 @@ def write_html(rows, filename, label, bridge_info=None):
     <div class="toolbar-sep"></div>
     <button class="btn btn-filter" id="btnFilterToggle" onclick="toggleFilterPanel()">🔍 Filters</button>
     <span class="filter-info" id="filterInfo"></span>
+    {th.HIGHLIGHT_TOGGLE_HTML}
 </div>
 
     <h1>Tranzor Translation Changes <span class="count" style="background:#4472C4;">{len(rows)} edits</span></h1>
@@ -1351,6 +1353,7 @@ async function sendToTranzor() {{
     window.open(openUrl, 'tranzor_bridge_target', 'noopener,noreferrer');
 }}
 </script>
+{th.HIGHLIGHT_TOGGLE_SCRIPT}
 </body>
 </html>"""
 
