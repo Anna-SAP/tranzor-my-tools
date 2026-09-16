@@ -19,11 +19,44 @@ class _Button:
 class TestBugFixSorting(unittest.TestCase):
     def setUp(self):
         self.tab = object.__new__(gui.BugFixTab)
-        self.tab._sort_column = ""
-        self.tab._sort_descending = False
+        self.tab._sort_column = gui.BugFixTab._DEFAULT_SORT_COLUMN
+        self.tab._sort_descending = gui.BugFixTab._DEFAULT_SORT_DESCENDING
         self.tab._t = lambda key: gui.STRINGS["en"][key]
         self.tab.tree = mock.Mock()
         self.tab._apply_filters = mock.Mock()
+
+    def test_default_sort_is_created_newest_first(self):
+        self.assertEqual(gui.BugFixTab._DEFAULT_SORT_COLUMN, "created")
+        self.assertTrue(gui.BugFixTab._DEFAULT_SORT_DESCENDING)
+        self.assertEqual(self.tab._sort_column, "created")
+        self.assertTrue(self.tab._sort_descending)
+        older = {
+            "submission_id": "old",
+            "created_at": "2026-06-01T16:00:31Z",
+            "attention": {"priority": 0, "level": "action"},
+        }
+        newer = {
+            "submission_id": "new",
+            "created_at": "2026-09-15T13:15:10Z",
+            "attention": {"priority": 4, "level": "done"},
+        }
+        mid = {
+            "submission_id": "mid",
+            "created_at": "2026-07-03T10:45:37Z",
+            "attention": {"priority": 0, "level": "action"},
+        }
+        self.assertEqual(
+            [row["submission_id"]
+             for row in self.tab._sort_rows([older, mid, newer])],
+            ["new", "mid", "old"],
+        )
+        self.tab._sort_column = ""
+        self.tab._sort_descending = False
+        self.assertEqual(
+            [row["submission_id"]
+             for row in self.tab._sort_rows([older, mid, newer])],
+            ["new", "mid", "old"],
+        )
 
     def test_every_requested_header_toggles_and_marks_direction(self):
         self.tab._refresh_sort_headings()
@@ -36,6 +69,8 @@ class TestBugFixSorting(unittest.TestCase):
         n_cols = len(gui.BugFixTab._COLS)
         for column in sortable:
             with self.subTest(column=column):
+                self.tab._sort_column = ""
+                self.tab._sort_descending = False
                 commands[column]()
                 self.assertEqual(self.tab._sort_column, column)
                 self.assertEqual(self.tab._sort_descending, column == "created")
@@ -79,6 +114,7 @@ class TestBugFixSorting(unittest.TestCase):
         invalid = {"created_at": "invalid"}
         missing = {}
         self.tab._sort_column = "created"
+        self.tab._sort_descending = False
         rows = [late, invalid, early, tie, missing]
         self.assertEqual(self.tab._sort_rows(rows), [early, late, tie, invalid, missing])
         self.tab._sort_descending = True
@@ -89,6 +125,35 @@ class TestBugFixSorting(unittest.TestCase):
             for descending in (False, True):
                 self.tab._sort_descending = descending
                 self.assertEqual(self.tab._sort_rows([missing, populated]), [populated, missing])
+
+    def test_filter_render_defaults_to_newest_created_first(self):
+        tab = self.tab
+        del tab._apply_filters
+        tab._filter_raw = {"project": "", "workflow": "", "mr": ""}
+        tab._all_rows = [
+            {
+                "submission_id": "old",
+                "created_at": "2026-06-01T16:00:31Z",
+                "attention": {"level": "action", "code": "workflow_failed"},
+            },
+            {
+                "submission_id": "new",
+                "created_at": "2026-09-15T13:15:10Z",
+                "attention": {"level": "done", "code": "no_action"},
+            },
+        ]
+        tab._row_by_iid = {}
+        tab.var_search = _ValueVar()
+        tab._selected_submission_id = lambda: ""
+        tab._update_kpis = mock.Mock()
+        tab._show_detail = mock.Mock()
+        tab.tree.get_children.return_value = []
+        tab._apply_filters()
+        self.assertEqual(list(tab._row_by_iid), ["new", "old"])
+        tab._refresh_sort_headings()
+        headings = {call.args[0]: call.kwargs["text"]
+                    for call in tab.tree.heading.call_args_list}
+        self.assertTrue(headings["created"].endswith(" ▼"))
 
     def test_filter_render_retains_sort_and_selection(self):
         tab = self.tab
@@ -118,16 +183,18 @@ class TestBugFixSorting(unittest.TestCase):
         self.assertEqual(tab._sort_column, "strings")
         tab.tree.selection_set.assert_called_with("A")
 
-    def test_reset_restores_default_order(self):
+    def test_reset_restores_default_newest_created_order(self):
         tab = self.tab
-        tab._sort_by("created")
+        tab._sort_by("strings")
         tab.var_search = _ValueVar("LOC-9")
         tab._refresh_filter_values = mock.Mock()
         tab._reset_filters()
-        self.assertEqual(tab._sort_column, "")
+        self.assertEqual(tab._sort_column, "created")
+        self.assertTrue(tab._sort_descending)
         self.assertEqual(tab.var_search.get(), "")
-        rows = [{"submission_id": "B"}, {"submission_id": "A"}]
-        self.assertEqual(tab._sort_rows(rows), rows)
+        older = {"submission_id": "old", "created_at": "2026-06-01T16:00:31Z"}
+        newer = {"submission_id": "new", "created_at": "2026-09-15T13:15:10Z"}
+        self.assertEqual(tab._sort_rows([older, newer]), [newer, older])
 
     def test_submitter_column_renders_created_by_and_placeholder(self):
         tab = self.tab
