@@ -32,7 +32,7 @@ STRINGS = {
         "bf_project": "Project",
         "bf_workflow": "Bug Fix status",
         "bf_mr_state": "MR status",
-        "bf_search": "Search Bug ID, MR, submission…",
+        "bf_search": "Search Bug ID, MR, submitter…",
         "bf_all": "All",
         "bf_refresh": "⟳ Refresh live",
         "bf_reset": "Reset",
@@ -70,6 +70,7 @@ STRINGS = {
         "bf_col_locale": "Locale",
         "bf_col_strings": "Strings",
         "bf_col_workflow": "Bug Fix / TM",
+        "bf_col_submitter": "Submitter",
         "bf_col_mr": "MR",
         "bf_col_mr_state": "MR state",
         "bf_col_activity": "MR activity",
@@ -95,7 +96,7 @@ STRINGS = {
         "bf_detail_project": "Project",
         "bf_detail_branch": "Target branch",
         "bf_detail_locales": "Locales",
-        "bf_detail_created_by": "Created by",
+        "bf_detail_created_by": "Submitter",
         "bf_detail_created": "Created",
         "bf_detail_axes": "TWO INDEPENDENT STATUS AXES",
         "bf_detail_workflow": "Bug Fix / TM",
@@ -156,7 +157,7 @@ STRINGS = {
         "bf_project": "项目",
         "bf_workflow": "Bug Fix 状态",
         "bf_mr_state": "MR 状态",
-        "bf_search": "搜索 Bug ID、MR、Submission…",
+        "bf_search": "搜索 Bug ID、MR、提交人…",
         "bf_all": "全部",
         "bf_refresh": "⟳ 实时刷新",
         "bf_reset": "重置",
@@ -193,6 +194,7 @@ STRINGS = {
         "bf_col_locale": "语种",
         "bf_col_strings": "字符串",
         "bf_col_workflow": "Bug Fix / TM",
+        "bf_col_submitter": "提交人",
         "bf_col_mr": "MR",
         "bf_col_mr_state": "MR 状态",
         "bf_col_activity": "MR 动态",
@@ -215,7 +217,7 @@ STRINGS = {
         "bf_detail_project": "项目",
         "bf_detail_branch": "目标分支",
         "bf_detail_locales": "语种",
-        "bf_detail_created_by": "创建人",
+        "bf_detail_created_by": "提交人",
         "bf_detail_created": "创建时间",
         "bf_detail_axes": "两条独立状态轴",
         "bf_detail_workflow": "Bug Fix / TM",
@@ -397,11 +399,12 @@ class BugFixTab:
 
     _COLS = (
         "attention", "bug", "project", "locale", "strings",
-        "workflow", "mr", "mr_state", "activity", "created",
+        "workflow", "submitter", "mr", "mr_state", "activity", "created",
     )
 
     _SORTABLE_COLS = {
         "created", "mr_state", "mr", "strings", "locale", "project", "bug",
+        "submitter",
     }
 
     def __init__(self, parent, app):
@@ -550,7 +553,8 @@ class BugFixTab:
         widths = {
             "attention": 105, "bug": 90, "project": 135,
             "locale": 90, "strings": 60, "workflow": 105,
-            "mr": 70, "mr_state": 90, "activity": 135, "created": 135,
+            "submitter": 130, "mr": 70, "mr_state": 90,
+            "activity": 135, "created": 135,
         }
         anchors = {"strings": "center", "mr": "center"}
         for col in self._COLS:
@@ -633,6 +637,7 @@ class BugFixTab:
             "locale": "bf_col_locale",
             "strings": "bf_col_strings",
             "workflow": "bf_col_workflow",
+            "submitter": "bf_col_submitter",
             "mr": "bf_col_mr",
             "mr_state": "bf_col_mr_state",
             "activity": "bf_col_activity",
@@ -687,8 +692,12 @@ class BugFixTab:
                 value = self._mr_state_text(row)
             elif column == "locale":
                 value = ", ".join(row.get("target_languages") or [])
+            elif column == "submitter":
+                value = self._submitter_text(row, empty="")
+            elif column == "bug":
+                value = row.get("bug_id")
             else:
-                value = row.get("bug_id" if column == "bug" else "project_id")
+                value = row.get("project_id")
             if not value:
                 return None
             # Natural order keeps LOC-9 before LOC-10; ignore letter case.
@@ -1009,6 +1018,7 @@ class BugFixTab:
                     locale,
                     row.get("string_count") or 0,
                     self._platform_status_text(row),
+                    self._submitter_text(row),
                     mr_number,
                     self._mr_state_text(row),
                     _display_time(row.get("mr_updated_at")),
@@ -1157,6 +1167,9 @@ class BugFixTab:
         raw = str(row.get("mr_state") or "unknown").strip().lower()
         key = _MR_STATE_KEYS.get(raw, "bf_state_unknown")
         return self._t(key)
+
+    def _submitter_text(self, row, empty="—"):
+        return str(row.get("created_by") or "").strip() or empty
 
     def _detail_line(self, label_key, value):
         return f"{self._t(label_key)}: {value}"

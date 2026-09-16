@@ -59,6 +59,19 @@ def _normal(value: Any) -> str:
     return re.sub(r"[\s-]+", "_", str(value or "").strip().lower())
 
 
+def _person_label(value: Any) -> str:
+    """Best-effort display name for a Platform submitter field."""
+    if isinstance(value, Mapping):
+        return str(
+            value.get("name")
+            or value.get("display_name")
+            or value.get("username")
+            or value.get("email")
+            or ""
+        ).strip()
+    return str(value or "").strip()
+
+
 def _label(value: Any) -> str:
     raw = str(value or "").strip()
     if not raw:
@@ -240,6 +253,13 @@ def normalize_submission(submission: Mapping[str, Any]) -> dict[str, Any]:
     if row.get("merged_at"):
         mr_state = "merged"
 
+    created_by = (
+        _person_label(row.get("created_by"))
+        or _person_label(row.get("submitter"))
+        or _person_label(row.get("submitted_by"))
+        or _person_label(row.get("creator"))
+    )
+
     row.update({
         "summary": dict(summary),
         "records": [dict(item) for item in records
@@ -248,6 +268,7 @@ def normalize_submission(submission: Mapping[str, Any]) -> dict[str, Any]:
         "platform_status_label": _label(status),
         "target_languages": langs,
         "string_count": int(summary.get("total") or len(records)),
+        "created_by": created_by,
         "mr_project_id": identity["project_id"],
         "mr_iid": identity["mr_iid"],
         "mr_url": identity["mr_url"],

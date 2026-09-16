@@ -127,6 +127,28 @@ class TestNormalization(unittest.TestCase):
         self.assertEqual(row["mr_state_label"], "Direct / no MR")
         self.assertEqual(row["attention"]["level"], "direct")
 
+    def test_submitter_is_canonicalized_onto_created_by(self):
+        named = bp.normalize_submission({
+            "submission_id": "named",
+            "created_by": "Derek Yan",
+            "submitter": "ignored-fallback",
+        })
+        self.assertEqual(named["created_by"], "Derek Yan")
+
+        fallback = bp.normalize_submission({
+            "submission_id": "fallback",
+            "submitter": {"name": "Amelia Cai", "email": "amelia@rc"},
+        })
+        self.assertEqual(fallback["created_by"], "Amelia Cai")
+
+        blank = bp.normalize_submission({"submission_id": "blank"})
+        self.assertEqual(blank["created_by"], "")
+        self.assertEqual(
+            [item["submission_id"] for item in bp.filter_submissions(
+                [named, fallback, blank], query="amelia")],
+            ["fallback"],
+        )
+
     def test_extracts_iid_from_url_when_field_is_missing(self):
         identity = bp.extract_mr_identity({
             "project_id": "x",

@@ -29,7 +29,12 @@ class TestBugFixSorting(unittest.TestCase):
         self.tab._refresh_sort_headings()
         commands = {call.args[0]: call.kwargs["command"]
                     for call in self.tab.tree.heading.call_args_list}
-        for column in ("created", "mr_state", "mr", "strings", "locale", "project", "bug"):
+        sortable = (
+            "created", "mr_state", "mr", "strings", "locale", "project",
+            "bug", "submitter",
+        )
+        n_cols = len(gui.BugFixTab._COLS)
+        for column in sortable:
             with self.subTest(column=column):
                 commands[column]()
                 self.assertEqual(self.tab._sort_column, column)
@@ -37,11 +42,16 @@ class TestBugFixSorting(unittest.TestCase):
                 commands[column]()
                 self.assertEqual(self.tab._sort_descending, column != "created")
                 current = {call.args[0]: call.kwargs["text"]
-                           for call in self.tab.tree.heading.call_args_list[-10:]}
+                           for call in self.tab.tree.heading.call_args_list[-n_cols:]}
                 arrow = " ▼" if column != "created" else " ▲"
                 self.assertTrue(current[column].endswith(arrow))
                 self.assertEqual(sum(text.endswith((" ▲", " ▼")) for text in current.values()), 1)
-        self.assertEqual(self.tab._apply_filters.call_count, 14)
+        self.assertEqual(self.tab._apply_filters.call_count, len(sortable) * 2)
+        self.assertIn("submitter", gui.BugFixTab._COLS)
+        self.assertEqual(
+            gui.STRINGS["en"]["bf_col_submitter"], "Submitter")
+        self.assertEqual(
+            gui.STRINGS["zh"]["bf_col_submitter"], "提交人")
 
     def test_numeric_natural_and_localized_state_order(self):
         cases = [
@@ -51,6 +61,8 @@ class TestBugFixSorting(unittest.TestCase):
             ("project", {"project_id": "common/uns"}, {"project_id": "Web/jedi"}),
             ("locale", {"target_languages": ["de-DE", "fr-FR"]}, {"target_languages": ["en-US"]}),
             ("mr_state", {"mr_state": "closed"}, {"mr_state": "opened"}),
+            ("submitter", {"created_by": "anna.su@ringcentral.com"},
+             {"created_by": "derek.yan@ringcentral.com"}),
         ]
         for column, first, last in cases:
             with self.subTest(column=column):
@@ -116,6 +128,42 @@ class TestBugFixSorting(unittest.TestCase):
         self.assertEqual(tab.var_search.get(), "")
         rows = [{"submission_id": "B"}, {"submission_id": "A"}]
         self.assertEqual(tab._sort_rows(rows), rows)
+
+    def test_submitter_column_renders_created_by_and_placeholder(self):
+        tab = self.tab
+        del tab._apply_filters
+        tab._filter_raw = {"project": "", "workflow": "", "mr": ""}
+        tab._all_rows = [
+            {
+                "submission_id": "named",
+                "created_by": "Derek Yan",
+                "attention": {"level": "done", "code": "no_action"},
+            },
+            {
+                "submission_id": "blank",
+                "attention": {"level": "done", "code": "no_action"},
+            },
+        ]
+        tab._row_by_iid = {}
+        tab.var_search = _ValueVar()
+        tab._selected_submission_id = lambda: ""
+        tab._update_kpis = mock.Mock()
+        tab._show_detail = mock.Mock()
+        tab.tree.get_children.return_value = []
+        tab._apply_filters()
+        inserted = {
+            call.kwargs["iid"]: call.kwargs["values"]
+            for call in tab.tree.insert.call_args_list
+        }
+        submitter_index = gui.BugFixTab._COLS.index("submitter")
+        self.assertEqual(inserted["named"][submitter_index], "Derek Yan")
+        self.assertEqual(inserted["blank"][submitter_index], "—")
+        tab._sort_column = "submitter"
+        tab._sort_descending = False
+        self.assertEqual(
+            [row["submission_id"] for row in tab._sort_rows(tab._all_rows)],
+            ["named", "blank"],
+        )
 
     def test_double_click_header_does_not_open_selected_mr(self):
         self.tab._open_selected_mr = mock.Mock()
@@ -465,6 +513,14 @@ class TestBugFixTabResilience(unittest.TestCase):
         self.assertEqual(
             export_gui.STRINGS["zh"]["tab_bugfix"], "🐞 BugFix 面板")
         self.assertIn("bf_hint", export_gui.STRINGS["en"])
+        self.assertEqual(
+            export_gui.STRINGS["en"]["bf_col_submitter"], "Submitter")
+        self.assertEqual(
+            export_gui.STRINGS["zh"]["bf_col_submitter"], "提交人")
+        self.assertEqual(
+            export_gui.STRINGS["en"]["bf_detail_created_by"], "Submitter")
+        self.assertEqual(
+            export_gui.STRINGS["zh"]["bf_detail_created_by"], "提交人")
 
 
 class TestLatestTaskRunner(unittest.TestCase):
