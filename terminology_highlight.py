@@ -20,6 +20,10 @@ Both functions accept ALREADY-HTML-ESCAPED text and return text with
 ``<mark>`` tags inserted. Safe to call even if loading failed — they
 degrade to returning the input unchanged.
 
+Reports that embed :data:`HIGHLIGHT_CSS` should also embed the toggle
+snippets (head / toolbar HTML / closing script) so the reader can turn
+highlights off without re-exporting.
+
 Markup:
     <mark class="term-hl">term</mark>           regular term
     <mark class="term-hl dnt">term</mark>       DNT (do not translate)
@@ -47,25 +51,160 @@ HL_CLASS_DNT = "term-hl dnt"
 # wins the "most eye-catching" mandate — its white-on-magenta contrast
 # is impossible to miss next to the softer amber used for regular terms.
 #
-# Braces are pre-doubled ("{{" / "}}") because every report writer in
-# this codebase builds its <style> block inside an f-string. Embedding
-# raw "{ ... }" would trip f-string parsing. Don't strip the doubling.
+# Single braces. Reports insert this via ``{th.HIGHLIGHT_CSS}`` as an
+# f-string *value*, which is not re-parsed, so doubled braces would
+# leak into the HTML and break the off-state (UA ``mark`` stays yellow).
 HIGHLIGHT_CSS = """
-mark.term-hl {{
+mark.term-hl {
     background: #fef3c7;
     color: #78350f;
     padding: 0 3px;
     border-radius: 3px;
     box-shadow: inset 0 -2px 0 0 #fbbf24;
     font-weight: 500;
-}}
-mark.term-hl.dnt {{
+}
+mark.term-hl.dnt {
     background: #ec4899;
     color: #ffffff;
     box-shadow: inset 0 -2px 0 0 #be185d, 0 0 0 1px #be185d;
     font-weight: 600;
-}}
+}
+html.term-hl-off mark.term-hl,
+html.term-hl-off mark.term-hl.dnt {
+    background: transparent;
+    color: inherit;
+    padding: 0;
+    border-radius: 0;
+    box-shadow: none;
+    font-weight: inherit;
+}
+.term-hl-toggle {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    user-select: none;
+    font-size: 12px;
+    font-weight: 600;
+    color: #555;
+    white-space: nowrap;
+}
+.term-hl-toggle input {
+    position: absolute;
+    opacity: 0;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+}
+.term-hl-switch {
+    width: 36px;
+    height: 20px;
+    background: #c5ccd6;
+    border-radius: 999px;
+    position: relative;
+    flex-shrink: 0;
+    transition: background .15s;
+    box-shadow: inset 0 0 0 1px rgba(0,0,0,.06);
+}
+.term-hl-switch::after {
+    content: "";
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 16px;
+    height: 16px;
+    background: #fff;
+    border-radius: 50%;
+    box-shadow: 0 1px 2px rgba(0,0,0,.2);
+    transition: transform .15s;
+}
+.term-hl-toggle input:checked + .term-hl-switch {
+    background: #f59e0b;
+}
+.term-hl-toggle input:checked + .term-hl-switch::after {
+    transform: translateX(16px);
+}
+.term-hl-toggle input:focus-visible + .term-hl-switch {
+    box-shadow: 0 0 0 2px #fff, 0 0 0 4px #4472C4;
+}
+body > .term-hl-toggle {
+    position: fixed;
+    top: 14px;
+    right: 20px;
+    z-index: 1100;
+    margin-left: 0;
+    background: #fff;
+    border: 1px solid #dde;
+    border-radius: 8px;
+    padding: 6px 10px 6px 12px;
+    box-shadow: 0 2px 8px rgba(0,0,0,.08);
+}
 """
+
+# Head snippet: apply a stored "off" preference before first paint so the
+# page does not flash yellow highlights. Single braces — this string is
+# interpolated as a value (``{th.HIGHLIGHT_TOGGLE_HEAD}``), not parsed as
+# an f-string template.
+HIGHLIGHT_TOGGLE_HEAD = """<script>
+try {
+  if (localStorage.getItem("tranzor-term-highlight") === "off")
+    document.documentElement.classList.add("term-hl-off");
+} catch (e) {}
+</script>
+"""
+
+HIGHLIGHT_TOGGLE_HTML = (
+    '<label class="term-hl-toggle" title="Highlight glossary terms in '
+    'source and translation. Turn off for a clean screen.">'
+    '<span class="term-hl-label">Term highlight</span>'
+    '<input type="checkbox" id="termHlToggle" checked>'
+    '<span class="term-hl-switch" aria-hidden="true"></span>'
+    '</label>'
+)
+
+HIGHLIGHT_TOGGLE_JS = """
+(function () {
+  var KEY = "tranzor-term-highlight";
+  function prefOn() {
+    try {
+      var v = localStorage.getItem(KEY);
+      if (v === "off") return false;
+      if (v === "on") return true;
+    } catch (e) {}
+    return true;
+  }
+  function savePref(on) {
+    try { localStorage.setItem(KEY, on ? "on" : "off"); } catch (e) {}
+  }
+  function apply(on) {
+    document.documentElement.classList.toggle("term-hl-off", !on);
+    var box = document.getElementById("termHlToggle");
+    if (box && box.checked !== !!on) box.checked = !!on;
+  }
+  window.setTermHighlight = function (on) {
+    apply(!!on);
+    savePref(!!on);
+  };
+  function bind() {
+    var box = document.getElementById("termHlToggle");
+    if (!box || box.getAttribute("data-bound")) return;
+    box.setAttribute("data-bound", "1");
+    box.addEventListener("change", function () {
+      window.setTermHighlight(box.checked);
+    });
+    apply(prefOn());
+  }
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", bind);
+  } else {
+    bind();
+  }
+})();
+"""
+
+HIGHLIGHT_TOGGLE_SCRIPT = "<script>\n" + HIGHLIGHT_TOGGLE_JS + "\n</script>\n"
 
 def _parse_dnt(value: Any) -> bool:
     """Robustly interpret the API's DNT flag.

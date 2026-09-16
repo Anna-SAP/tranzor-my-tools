@@ -799,6 +799,7 @@ def write_quality_html(aggregated, filename, label):
 <head>
 <meta charset="UTF-8">
 <title>Quality Overview - {html_mod.escape(label)}</title>
+{th.HIGHLIGHT_TOGGLE_HEAD}
 <style>
     {th.HIGHLIGHT_CSS}
     * {{ margin:0; padding:0; box-sizing:border-box; }}
@@ -830,6 +831,7 @@ def write_quality_html(aggregated, filename, label):
 </style>
 </head>
 <body>
+    {th.HIGHLIGHT_TOGGLE_HTML}
     <h1>Quality Overview</h1>
     <p class="meta">{html_mod.escape(label)}</p>
 
@@ -896,6 +898,7 @@ def write_quality_html(aggregated, filename, label):
         </tr></thead>
         <tbody>{low_rows if low_rows else '<tr><td colspan="10" style="text-align:center;color:#888;">No low-score items</td></tr>'}</tbody>
     </table>
+{th.HIGHLIGHT_TOGGLE_SCRIPT}
 </body>
 </html>"""
 

@@ -674,6 +674,7 @@ def _render_html_report(items, params):
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
 <title>Human Revisions Report</title>
+{th.HIGHLIGHT_TOGGLE_HEAD}
 <style>
 {th.HIGHLIGHT_CSS}
 *{{box-sizing:border-box;margin:0;padding:0}}
@@ -707,6 +708,7 @@ vertical-align:top}}
 font-size:0.75rem}}.card-meta strong{{color:#1e3a5f}}
 @media print{{body{{background:#fff}}.revision-card{{break-inside:avoid}}}}
 </style></head><body>
+{th.HIGHLIGHT_TOGGLE_HTML}
 <header><h1>Human Revisions Report</h1>
 <table class="meta">
 <tr><th>Time Range</th><td>{_esc(time_range)}</td></tr>
@@ -714,6 +716,7 @@ font-size:0.75rem}}.card-meta strong{{color:#1e3a5f}}
 <tr><th>Generated At</th><td>{_esc(now)}</td></tr>
 </table></header>
 {"".join(sections)}
+{th.HIGHLIGHT_TOGGLE_SCRIPT}
 </body></html>""".encode("utf-8")
 
 
