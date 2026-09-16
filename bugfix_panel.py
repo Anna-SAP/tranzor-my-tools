@@ -638,13 +638,13 @@ def enrich_submissions(
 def stable_sort_submissions(
     submissions: Iterable[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
+    """Newest created_at first; attention then id break ties."""
     rows = [normalize_submission(item) for item in submissions]
     return sorted(
         rows,
         key=lambda row: (
+            -_timestamp(row.get("created_at")),
             int((row.get("attention") or {}).get("priority", 9)),
-            -_timestamp(
-                row.get("mr_updated_at") or row.get("created_at")),
             str(row.get("submission_id") or ""),
         ),
     )

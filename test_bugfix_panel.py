@@ -416,6 +416,61 @@ class TestCacheAndSync(unittest.TestCase):
             self.assertEqual(bp.load_cache(path)["source"], "cache")
 
 
+class TestStableSort(unittest.TestCase):
+
+    def test_newest_created_precedes_attention_priority(self):
+        rows = bp.stable_sort_submissions([
+            {
+                "submission_id": "old-action",
+                "created_at": "2026-06-01T16:00:31Z",
+                "summary": {"aggregate_status": "MR creation failed"},
+            },
+            {
+                "submission_id": "new-done",
+                "created_at": "2026-09-15T13:15:10Z",
+                "summary": {"aggregate_status": "Applied"},
+                "mr_state": "merged",
+                "has_mr": True,
+                "merged_at": "2026-09-15T14:00:00Z",
+            },
+            {
+                "submission_id": "mid-action",
+                "created_at": "2026-07-03T10:45:37Z",
+                "summary": {"aggregate_status": "MR creation failed"},
+            },
+            {
+                "submission_id": "missing-date",
+                "summary": {"aggregate_status": "Applied"},
+            },
+        ])
+        self.assertEqual(
+            [row["submission_id"] for row in rows],
+            ["new-done", "mid-action", "old-action", "missing-date"],
+        )
+
+    def test_same_created_time_keeps_action_ahead_of_done(self):
+        rows = bp.stable_sort_submissions([
+            {
+                "submission_id": "done",
+                "created_at": "2026-09-15T13:15:10Z",
+                "summary": {"aggregate_status": "Applied"},
+                "project_id": "web/web",
+                "mr_iid": 1,
+                "mr_url": "https://git/web/web/-/merge_requests/1",
+                "mr_state": "merged",
+                "merged_at": "2026-09-15T14:00:00Z",
+            },
+            {
+                "submission_id": "action",
+                "created_at": "2026-09-15T13:15:10Z",
+                "summary": {"aggregate_status": "MR creation failed"},
+            },
+        ])
+        self.assertEqual(
+            [row["submission_id"] for row in rows],
+            ["action", "done"],
+        )
+
 
 class TestAttentionStatusMatrix(unittest.TestCase):
 

@@ -406,12 +406,14 @@ class BugFixTab:
         "created", "mr_state", "mr", "strings", "locale", "project", "bug",
         "submitter",
     }
+    _DEFAULT_SORT_COLUMN = "created"
+    _DEFAULT_SORT_DESCENDING = True
 
     def __init__(self, parent, app):
         self.parent = parent
         self.app = app
-        self._sort_column = ""
-        self._sort_descending = False
+        self._sort_column = self._DEFAULT_SORT_COLUMN
+        self._sort_descending = self._DEFAULT_SORT_DESCENDING
         self._first_shown = False
         self._syncing = False
         self._cache_loading = False
@@ -664,11 +666,18 @@ class BugFixTab:
         self._refresh_sort_headings()
         self._apply_filters()
 
+    def _restore_default_sort(self):
+        self._sort_column = self._DEFAULT_SORT_COLUMN
+        self._sort_descending = self._DEFAULT_SORT_DESCENDING
+
     def _sort_rows(self, rows):
         """Sort full values, with missing/invalid values last in either direction."""
-        column = self._sort_column
-        if not column:
-            return rows
+        column = self._sort_column or self._DEFAULT_SORT_COLUMN
+        descending = (
+            self._sort_descending
+            if self._sort_column
+            else self._DEFAULT_SORT_DESCENDING
+        )
 
         def key(row):
             if column == "created":
@@ -711,7 +720,7 @@ class BugFixTab:
                 missing.append(row)
             else:
                 present.append((value, row))
-        present.sort(key=lambda item: item[0], reverse=self._sort_descending)
+        present.sort(key=lambda item: item[0], reverse=descending)
         return [row for _, row in present] + missing
 
     def _on_double_click(self, event):
@@ -1055,8 +1064,7 @@ class BugFixTab:
             self._kpis[key][1].configure(text=str(value))
 
     def _reset_filters(self):
-        self._sort_column = ""
-        self._sort_descending = False
+        self._restore_default_sort()
         self._refresh_sort_headings()
         self.var_search.set("")
         self._refresh_filter_values()
