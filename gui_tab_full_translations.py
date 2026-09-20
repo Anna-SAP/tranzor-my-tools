@@ -29,9 +29,10 @@ import tkinter as tk
 import zlib
 from pathlib import Path
 from tkinter import ttk, filedialog, messagebox, simpledialog
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 
 import atomic_io
+from date_picker import attach_calendar, parse_date
 
 try:
     import export_full_translations as _exp
@@ -187,6 +188,18 @@ STRINGS = {
         "ft_export_selected":     "📦 Export Selected",
         "ft_export_all":          "📦 Export All",
         "ft_merge_json":          "🧩 Merge to JSON",
+        "ft_merge_delta":         "📅 Merge to JSON (Delta Day2Day)",
+        "ft_delta_title":         "Delta Day2Day Export",
+        "ft_delta_subtitle":      "Choose two dates to export newly generated translations.",
+        "ft_delta_from":          "From date",
+        "ft_delta_to":            "To date",
+        "ft_delta_tz_hint":       "Dates are UTC+8 calendar days (start and end inclusive).",
+        "ft_delta_selection_hint": "Selected products and languages will be used.",
+        "ft_delta_cancel":        "Cancel",
+        "ft_delta_run":           "Run Export",
+        "ft_err_delta_dates":     "Please enter valid From and To dates (YYYY-MM-DD).",
+        "ft_err_delta_order":     "From date must be on or before To date.",
+        "ft_err_no_delta_data":   "No translations were generated in the selected date range.",
         "ft_products":            "Products",
         "ft_locales":             "Languages",
         "ft_col_product":         "Product",
@@ -274,6 +287,18 @@ STRINGS = {
         "ft_export_selected":     "📦 导出选中",
         "ft_export_all":          "📦 全部导出",
         "ft_merge_json":          "🧩 合并为 JSON",
+        "ft_merge_delta":         "📅 合并为 JSON（增量 Day2Day）",
+        "ft_delta_title":         "增量 Day2Day 导出",
+        "ft_delta_subtitle":      "选择两个日期，仅导出期间新生成的翻译。",
+        "ft_delta_from":          "起始日期",
+        "ft_delta_to":            "结束日期",
+        "ft_delta_tz_hint":       "日期按 UTC+8 自然日理解（含起止当天）。",
+        "ft_delta_selection_hint": "将使用当前已勾选的产品和语言。",
+        "ft_delta_cancel":        "取消",
+        "ft_delta_run":           "开始导出",
+        "ft_err_delta_dates":     "请输入有效的起始和结束日期（YYYY-MM-DD）。",
+        "ft_err_delta_order":     "起始日期不能晚于结束日期。",
+        "ft_err_no_delta_data":   "所选日期范围内没有新生成的翻译。",
         "ft_products":            "产品",
         "ft_locales":             "语言",
         "ft_col_product":         "产品",
@@ -347,6 +372,38 @@ STRINGS = {
         "ft_conn_dlg_note_unstable": "提示：平台近 10 分钟内出现过不稳定，请留意本次导出。",
     },
 }
+
+
+# ---------------------------------------------------------------------------
+# Delta Day2Day date helpers (pure — unit-tested without Tk)
+# ---------------------------------------------------------------------------
+
+TZ_UTC8 = timezone(timedelta(hours=8))
+_DELTA_DEFAULT_DAYS = 7
+
+
+def default_delta_date_range(now=None):
+    """Last 7 UTC+8 calendar days, inclusive. Returns ``(from_iso, to_iso)``."""
+    if now is None:
+        today = datetime.now(TZ_UTC8).date()
+    elif isinstance(now, datetime):
+        dt = now if now.tzinfo is not None else now.replace(tzinfo=TZ_UTC8)
+        today = dt.astimezone(TZ_UTC8).date()
+    else:
+        today = now
+    start = today - timedelta(days=_DELTA_DEFAULT_DAYS)
+    return start.isoformat(), today.isoformat()
+
+
+def validate_delta_dates(from_text, to_text):
+    """Return ``((from_date, to_date), None)`` or ``(None, i18n_key)``."""
+    d0 = parse_date(from_text)
+    d1 = parse_date(to_text)
+    if d0 is None or d1 is None:
+        return None, "ft_err_delta_dates"
+    if d0 > d1:
+        return None, "ft_err_delta_order"
+    return (d0, d1), None
 
 
 # ---------------------------------------------------------------------------
@@ -736,6 +793,165 @@ class _ExportProgressDialog:
 
 
 # ---------------------------------------------------------------------------
+# Delta Day2Day date-range dialog
+# ---------------------------------------------------------------------------
+
+class _DeltaDay2DayDialog:
+    """Modal date-range picker for incremental Merge-to-JSON export.
+
+    ``wait()`` blocks until the dialog closes and returns
+    ``(from_date, to_date)`` on Run Export, or ``None`` on Cancel.
+    """
+
+    def __init__(self, master, app, t_func, *,
+                 initial_from: str = "", initial_to: str = "") -> None:
+        self.master = master
+        self.app = app
+        self._t = t_func
+        self.result = None
+
+        top = tk.Toplevel(master)
+        self.top = top
+        top.title(self._t("ft_delta_title"))
+        top.transient(master.winfo_toplevel())
+        top.protocol("WM_DELETE_WINDOW", self._on_cancel)
+        top.minsize(380, 240)
+        try:
+            top.configure(bg="#1f1f2e")
+        except Exception:
+            pass
+        try:
+            top.grab_set()
+        except Exception:
+            pass
+
+        gui_mod = sys.modules.get(type(self.app).__module__)
+        font_family = getattr(gui_mod, "FONT_FAMILY", "Segoe UI")
+
+        pad = dict(padx=16)
+        self.lbl_title = ttk.Label(
+            top, text=self._t("ft_delta_title"), style="Title.TLabel")
+        self.lbl_title.pack(anchor="w", pady=(14, 4), **pad)
+        self.lbl_sub = ttk.Label(
+            top, text=self._t("ft_delta_subtitle"), style="Subtitle.TLabel",
+            wraplength=340)
+        self.lbl_sub.pack(anchor="w", pady=(0, 12), **pad)
+
+        form = ttk.Frame(top, style="App.TFrame")
+        form.pack(fill="x", **pad)
+
+        def _entry_setter(entry):
+            def _set(s):
+                entry.delete(0, "end")
+                entry.insert(0, s)
+            return _set
+
+        self.lbl_from = ttk.Label(form, text=self._t("ft_delta_from"))
+        self.lbl_from.grid(row=0, column=0, sticky="w", pady=4)
+        from_row = ttk.Frame(form, style="App.TFrame")
+        from_row.grid(row=0, column=1, sticky="w", padx=(12, 0), pady=4)
+        self.ent_from = ttk.Entry(from_row, width=14)
+        if initial_from:
+            self.ent_from.insert(0, initial_from)
+        self.ent_from.pack(side="left")
+        attach_calendar(
+            from_row, self.ent_from, font_family=font_family,
+            get_value=self.ent_from.get,
+            set_value=_entry_setter(self.ent_from),
+            lang=lambda: getattr(self.app, "lang", "en"),
+            padx=(4, 0))
+
+        self.lbl_to = ttk.Label(form, text=self._t("ft_delta_to"))
+        self.lbl_to.grid(row=1, column=0, sticky="w", pady=4)
+        to_row = ttk.Frame(form, style="App.TFrame")
+        to_row.grid(row=1, column=1, sticky="w", padx=(12, 0), pady=4)
+        self.ent_to = ttk.Entry(to_row, width=14)
+        if initial_to:
+            self.ent_to.insert(0, initial_to)
+        self.ent_to.pack(side="left")
+        attach_calendar(
+            to_row, self.ent_to, font_family=font_family,
+            get_value=self.ent_to.get,
+            set_value=_entry_setter(self.ent_to),
+            lang=lambda: getattr(self.app, "lang", "en"),
+            padx=(4, 0))
+
+        self.lbl_tz = ttk.Label(
+            top, text=self._t("ft_delta_tz_hint"), style="Subtitle.TLabel",
+            wraplength=340)
+        self.lbl_tz.pack(anchor="w", pady=(10, 0), **pad)
+        self.lbl_sel = ttk.Label(
+            top, text=self._t("ft_delta_selection_hint"),
+            style="Subtitle.TLabel", wraplength=340)
+        self.lbl_sel.pack(anchor="w", pady=(2, 8), **pad)
+
+        btns = ttk.Frame(top, style="App.TFrame")
+        btns.pack(fill="x", padx=16, pady=(4, 14))
+        self.btn_run = self.app._create_button(
+            btns, text=self._t("ft_delta_run"),
+            command=self._on_run,
+            style_name="Accent", padx=14, pady=4)
+        self.btn_run.pack(side="right")
+        self.btn_cancel = ttk.Button(
+            btns, text=self._t("ft_delta_cancel"),
+            command=self._on_cancel)
+        self.btn_cancel.pack(side="right", padx=(0, 8))
+
+        self._center_on_master()
+        try:
+            self.ent_from.focus_set()
+        except Exception:
+            pass
+
+    def _center_on_master(self) -> None:
+        try:
+            self.top.update_idletasks()
+            mw = self.master.winfo_toplevel()
+            x = mw.winfo_rootx() + (
+                mw.winfo_width() - self.top.winfo_width()) // 2
+            y = mw.winfo_rooty() + (
+                mw.winfo_height() - self.top.winfo_height()) // 2
+            self.top.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+        except Exception:
+            pass
+
+    def _on_cancel(self) -> None:
+        self.result = None
+        self._close()
+
+    def _on_run(self) -> None:
+        pair, err_key = validate_delta_dates(
+            self.ent_from.get(), self.ent_to.get())
+        if err_key:
+            try:
+                messagebox.showwarning(
+                    self._t("ft_delta_title"), self._t(err_key),
+                    parent=self.top)
+            except Exception:
+                pass
+            return
+        self.result = pair
+        self._close()
+
+    def _close(self) -> None:
+        try:
+            self.top.grab_release()
+        except Exception:
+            pass
+        try:
+            self.top.destroy()
+        except Exception:
+            pass
+
+    def wait(self):
+        try:
+            self.top.wait_window()
+        except Exception:
+            pass
+        return self.result
+
+
+# ---------------------------------------------------------------------------
 # Tab
 # ---------------------------------------------------------------------------
 
@@ -775,6 +991,10 @@ class FullTranslationsTab:
         self._all_prod_iids: list = []
         # Active export progress dialog (None when no export is running).
         self._progress_dlg: _ExportProgressDialog | None = None
+        # Last Delta Day2Day date range (YYYY-MM-DD), so reopening the
+        # dialog keeps the previous window instead of resetting to 7 days.
+        self._last_delta_from: str | None = None
+        self._last_delta_to: str | None = None
 
         # Product-group presets: persisted list of
         # {"name": str, "product_ids": [iid, ...]} dicts, loaded eagerly so
@@ -938,6 +1158,12 @@ class FullTranslationsTab:
             style_name="Accent", padx=14, pady=4)
         self.btn_merge_json.pack(side="left", padx=(8, 0))
 
+        self.btn_merge_delta = self.app._create_button(
+            top, text=self._t("ft_merge_delta"),
+            command=self._on_merge_delta,
+            style_name="Accent", padx=14, pady=4)
+        self.btn_merge_delta.pack(side="left", padx=(8, 0))
+
         # Body: two columns (products | languages)
         body = ttk.Frame(outer, style="App.TFrame")
         body.pack(fill="both", expand=True)
@@ -1084,8 +1310,7 @@ class FullTranslationsTab:
         if _exp is None:
             self.lbl_status.configure(
                 text=self._t("ft_err_module"), foreground="#e94560")
-            for w in (self.btn_refresh, self.btn_export_sel, self.btn_export_all,
-                      self.btn_merge_json):
+            for w in self._action_buttons():
                 try:
                     w.configure(state="disabled")
                 except Exception:
@@ -1119,6 +1344,7 @@ class FullTranslationsTab:
                 self.btn_export_sel.configure(text=self._t("ft_export_selected"))
                 self.btn_export_all.configure(text=self._t("ft_export_all"))
                 self.btn_merge_json.configure(text=self._t("ft_merge_json"))
+                self.btn_merge_delta.configure(text=self._t("ft_merge_delta"))
                 self.btn_prod_all.configure(text=self._t("ft_select_all"))
                 self.btn_prod_clear.configure(text=self._t("ft_clear_all"))
                 self.btn_prod_invert.configure(text=self._t("ft_invert_selection"))
@@ -1691,11 +1917,14 @@ class FullTranslationsTab:
         return bool(vals) and vals[0] == CHECK_ON
 
     # ---- actions ----------------------------------------------------
+    def _action_buttons(self):
+        return (self.btn_refresh, self.btn_export_sel, self.btn_export_all,
+                self.btn_merge_json, self.btn_merge_delta)
+
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
         state = "disabled" if busy else "normal"
-        for w in (self.btn_refresh, self.btn_export_sel, self.btn_export_all,
-                  self.btn_merge_json):
+        for w in self._action_buttons():
             try:
                 w.configure(state=state)
             except Exception:
@@ -1938,7 +2167,37 @@ class FullTranslationsTab:
         # can hit Select All on both panels first.
         self._do_export(all_selection=False, mode="json")
 
-    def _do_export(self, *, all_selection: bool, mode: str = "zip") -> None:
+    def _on_merge_delta(self) -> None:
+        """Open the Delta Day2Day date dialog, then merge selected JSON."""
+        if _exp is None or self._busy:
+            return
+        if not self._inv_loaded or self._light_inv is None:
+            messagebox.showwarning(
+                "Full Translations", self._t("ft_err_no_inv"))
+            return
+        if not self._selected_product_ids() or not self._selected_locales():
+            messagebox.showwarning(
+                "Full Translations", self._t("ft_err_no_selection"))
+            return
+        initial_from, initial_to = default_delta_date_range()
+        if self._last_delta_from and self._last_delta_to:
+            initial_from = self._last_delta_from
+            initial_to = self._last_delta_to
+        dlg = _DeltaDay2DayDialog(
+            self.parent, self.app, self._t,
+            initial_from=initial_from, initial_to=initial_to)
+        result = dlg.wait()
+        if result is None:
+            return
+        date_from, date_to = result
+        self._last_delta_from = date_from.isoformat()
+        self._last_delta_to = date_to.isoformat()
+        self._do_export(
+            all_selection=False, mode="json",
+            date_from=date_from, date_to=date_to)
+
+    def _do_export(self, *, all_selection: bool, mode: str = "zip",
+                   date_from=None, date_to=None) -> None:
         if _exp is None or self._busy:
             return
         if not self._inv_loaded or self._light_inv is None:
@@ -1993,11 +2252,23 @@ class FullTranslationsTab:
         # the export instant is the per-run identifier.
         run_stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
         stage = self._is_stage()
+        is_delta = date_from is not None or date_to is not None
         if mode == "json":
-            prefix = "StageMergedTranslations" if stage else "MergedTranslations"
-            default_name = f"{prefix}_{run_stamp}.json"
-            title = ("Save Stage Merged Translations JSON" if stage
-                     else "Save Merged Translations JSON")
+            if is_delta:
+                from_tag = (
+                    date_from.strftime("%Y%m%d") if date_from else "open")
+                to_tag = date_to.strftime("%Y%m%d") if date_to else "open"
+                prefix = ("StageDeltaTranslations" if stage
+                          else "DeltaTranslations")
+                default_name = f"{prefix}_{from_tag}_{to_tag}_{run_stamp}.json"
+                title = ("Save Stage Delta Day2Day JSON" if stage
+                         else "Save Delta Day2Day JSON")
+            else:
+                prefix = ("StageMergedTranslations" if stage
+                          else "MergedTranslations")
+                default_name = f"{prefix}_{run_stamp}.json"
+                title = ("Save Stage Merged Translations JSON" if stage
+                         else "Save Merged Translations JSON")
             out_path = filedialog.asksaveasfilename(
                 title=title,
                 defaultextension=".json",
@@ -2033,7 +2304,8 @@ class FullTranslationsTab:
         t = threading.Thread(
             target=self._run_export,
             args=(out_path, mode, effective_sources,
-                  legacy_filter, mr_filter, scan_filter, locales),
+                  legacy_filter, mr_filter, scan_filter, locales,
+                  date_from, date_to),
             daemon=True,
         )
         self._export_thread = t
@@ -2084,7 +2356,8 @@ class FullTranslationsTab:
             pass
 
     def _run_export(self, out_path, mode, sources,
-                    legacy_filter, mr_filter, scan_filter, locales) -> None:
+                    legacy_filter, mr_filter, scan_filter, locales,
+                    date_from=None, date_to=None) -> None:
         """Background: heavy fetch + (zip | merged-json) build, scoped by selection."""
         dlg = self._progress_dlg
         try:
@@ -2107,11 +2380,18 @@ class FullTranslationsTab:
                 # carry _all_sources + inconsistencies_in_new. The zip path
                 # doesn't need it (and skipping keeps its memory footprint low).
                 track_all_sources=(mode == "json"),
+                created_after=date_from,
+                created_before=date_to,
                 **self._api_kw(),
             )
             if not heavy_inv.data:
+                err_key = (
+                    "ft_err_no_delta_data"
+                    if (date_from is not None or date_to is not None)
+                    else "ft_err_no_data"
+                )
                 self.parent.after(
-                    0, self._on_export_done, None, self._t("ft_err_no_data"))
+                    0, self._on_export_done, None, self._t(err_key))
                 return
 
             writing_key = (
@@ -2161,7 +2441,7 @@ class FullTranslationsTab:
             self.parent.after(
                 0, self._on_export_auth_error,
                 (out_path, mode, sources, legacy_filter, mr_filter,
-                 scan_filter, locales))
+                 scan_filter, locales, date_from, date_to))
         except Exception as e:
             self.parent.after(0, self._on_export_done, None, str(e))
 
