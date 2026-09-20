@@ -277,8 +277,13 @@ def fetch_task_languages(task_id, base_url=None):
 # ---------------------------------------------------------------------------
 # 2) 获取 task 列表
 # ---------------------------------------------------------------------------
-def fetch_tasks(base_url=None):
-    """获取所有已完成的 task（分页遍历）"""
+def fetch_tasks(base_url=None, created_after=None, created_before=None):
+    """获取所有已完成的 task（分页遍历）。
+
+    ``created_after`` / ``created_before`` 是可选的服务端预过滤（``YYYY-MM-DD``
+    或 ISO 时间戳）。Delta Day2Day 导出会传入一个略宽于 UTC+8 窗口的范围，
+    真正的闭区间过滤仍在 ``export_full_translations.apply_created_window``。
+    """
     all_tasks = []
     offset = 0
     limit = 200
@@ -286,6 +291,10 @@ def fetch_tasks(base_url=None):
 
     while True:
         params = {"limit": limit, "offset": offset, "status": "Completed"}
+        if created_after:
+            params["created_after"] = created_after
+        if created_before:
+            params["created_before"] = created_before
         resp = _api_get(f"{api}/tasks", params=params)
         resp.raise_for_status()
         data = resp.json()

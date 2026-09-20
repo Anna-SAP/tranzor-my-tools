@@ -36,7 +36,7 @@ import time
 import zipfile
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 # 将本目录加入 sys.path，确保无论从哪里启动都能 import 同级模块
@@ -100,6 +100,159 @@ _ALLOW_PARTIAL = os.getenv(
 def _fwd(base_url):
     """Pass ``base_url`` only when set so production test fakes keep working."""
     return {"base_url": base_url} if base_url else {}
+
+
+# ---------------------------------------------------------------------------
+# Delta Day2Day date window (UTC+8 civil days)
+# ---------------------------------------------------------------------------
+# Calendar dates chosen in the GUI are UTC+8 days, inclusive on both ends.
+# Tranzor ``created_at`` values without an offset are UTC wall clocks (see
+# time_display.py). Convert both sides before comparing so a From date of
+# 2026-09-18 means 2026-09-17 16:00:00Z, not 2026-09-18 00:00:00Z.
+
+TZ_UTC8 = timezone(timedelta(hours=8))
+_OPEN_START = datetime(1970, 1, 1, tzinfo=timezone.utc)
+_OPEN_END = datetime(9999, 12, 31, tzinfo=timezone.utc)
+
+
+def _coerce_date(value) -> Optional[date]:
+    """Best-effort ``date`` from a ``date`` / ``datetime`` / ``YYYY-MM-DD``."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        dt = value
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=TZ_UTC8)
+        else:
+            dt = dt.astimezone(TZ_UTC8)
+        return dt.date()
+    if isinstance(value, date):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    text = text.replace("T", " ").split(" ")[0]
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None
+
+
+def resolve_created_window(created_after=None, created_before=None):
+    """Normalize caller dates to an aware ``[start, end)`` window.
+
+    ``created_after`` / ``created_before`` are inclusive UTC+8 calendar days
+    (``date``, ``datetime``, or ``YYYY-MM-DD``). Returns ``(None, None)``
+    when both inputs are empty so full-export callers stay unfiltered.
+    """
+    start_d = _coerce_date(created_after)
+    end_d = _coerce_date(created_before)
+    if start_d is None and end_d is None:
+        return None, None
+    if start_d is None:
+        start_dt = _OPEN_START
+    else:
+        start_dt = datetime.combine(
+            start_d, datetime.min.time()).replace(tzinfo=TZ_UTC8)
+    if end_d is None:
+        end_dt = _OPEN_END
+    else:
+        end_dt = datetime.combine(
+            end_d + timedelta(days=1), datetime.min.time()
+        ).replace(tzinfo=TZ_UTC8)
+    return start_dt, end_dt
+
+
+def parse_task_created_at(task) -> Optional[datetime]:
+    """Parse a task's ``created_at`` to an aware datetime.
+
+    Naive timestamps are treated as UTC, matching the rest of the exporter.
+    """
+    raw = task.get("created_at") if isinstance(task, dict) else task
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, datetime):
+        dt = raw
+    else:
+        text = str(raw).strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            dt = datetime.fromisoformat(text)
+        except (TypeError, ValueError):
+            try:
+                dt = datetime.strptime(
+                    text[:19].replace("T", " "), "%Y-%m-%d %H:%M:%S")
+            except (TypeError, ValueError):
+                return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def task_in_created_window(task, start, end) -> bool:
+    """True when ``task.created_at`` falls in ``[start, end)``.
+
+    Missing / unparseable timestamps are excluded from a delta window
+    (we only want newly generated work we can actually date). A ``None``
+    window (full export) accepts everything.
+    """
+    if start is None and end is None:
+        return True
+    dt = parse_task_created_at(task)
+    if dt is None:
+        return False
+    if start is not None and dt < start:
+        return False
+    if end is not None and dt >= end:
+        return False
+    return True
+
+
+def apply_created_window(tasks, start, end):
+    """Filter ``tasks`` to ``[start, end)``.
+
+    Returns ``(kept, hit_floor)``. ``hit_floor`` is True when any task is
+    strictly older than ``start`` — callers that page ``created_at DESC``
+    can stop requesting further pages. A ``None`` window is a no-op.
+    """
+    if start is None and end is None:
+        return list(tasks or []), False
+    kept: List[dict] = []
+    hit_floor = False
+    for t in tasks or []:
+        dt = parse_task_created_at(t)
+        if dt is None:
+            continue
+        if end is not None and dt >= end:
+            continue
+        if start is not None and dt < start:
+            hit_floor = True
+            continue
+        kept.append(t)
+    return kept, hit_floor
+
+
+def _legacy_list_date_params(created_start, created_end) -> dict:
+    """Slightly-wider-than-UTC+8 query params for the Legacy list endpoint.
+
+    The server filter is a prefilter only; :func:`apply_created_window` is
+    the source of truth. Widening by one civil day on each side avoids
+    dropping the UTC+8 morning hours of the From date if the backend
+    interprets ``YYYY-MM-DD`` as UTC midnight.
+    """
+    params = {}
+    if created_start is not None:
+        params["created_after"] = (
+            created_start.astimezone(TZ_UTC8).date() - timedelta(days=1)
+        ).isoformat()
+    if created_end is not None:
+        params["created_before"] = (
+            created_end.astimezone(TZ_UTC8).date()
+        ).isoformat()
+    return params
 
 
 class IncompleteExportError(RuntimeError):
@@ -827,10 +980,17 @@ def _collect_from_legacy(
     project_filter: Optional[Set[str]] = None,
     count_cb: ProgressCountCb = None,
     base_url: Optional[str] = None,
+    created_start=None,
+    created_end=None,
 ) -> int:
     """从 Legacy File Translation API 聚合。
 
     project_filter: 若非 None/空，则只抓取 project_name ∈ project_filter 的任务。
+
+    created_start / created_end: 可选的 aware ``[start, end)`` 窗口（UTC+8
+    自然日经 :func:`resolve_created_window` 归一化）。有窗口时只抓取
+    ``created_at`` 落在窗口内的任务，避免增量导出把历史 completed 任务
+    全部拉一遍。
 
     Per-task ``/translations`` fetches run in parallel (``_FETCH_WORKERS``
     threads) — they're independent HTTP calls and dominate wall-clock time on
@@ -839,7 +999,13 @@ def _collect_from_legacy(
     """
     _log(progress_cb, "  [Legacy] 获取 File Translation task 列表...")
     try:
-        tasks = _legacy.fetch_tasks(**_fwd(base_url))
+        fetch_kw = dict(_fwd(base_url))
+        fetch_kw.update(_legacy_list_date_params(created_start, created_end))
+        try:
+            tasks = _legacy.fetch_tasks(**fetch_kw)
+        except TypeError:
+            # Test fakes / older signatures without date kwargs.
+            tasks = _legacy.fetch_tasks(**_fwd(base_url))
     except Exception as e:
         if _is_auth_error(e):
             raise AuthRequiredError(e) from e
@@ -851,9 +1017,14 @@ def _collect_from_legacy(
             t for t in tasks
             if (t.get("project_name") or "(unknown)") in project_filter
         ]
+    if created_start is not None or created_end is not None:
+        tasks, _ = apply_created_window(tasks, created_start, created_end)
     tasks = _dedupe_tasks(tasks, "id")
     total = len(tasks)
-    _log(progress_cb, f"  [Legacy] 命中 {total} 个 Completed task")
+    if created_start is not None or created_end is not None:
+        _log(progress_cb, f"  [Legacy] 日期窗口内 {total} 个 Completed task")
+    else:
+        _log(progress_cb, f"  [Legacy] 命中 {total} 个 Completed task")
     if count_cb:
         try:
             count_cb("Legacy", 0, total)
@@ -941,11 +1112,17 @@ def _collect_from_mr(
     project_filter: Optional[Set[str]] = None,
     count_cb: ProgressCountCb = None,
     base_url: Optional[str] = None,
+    created_start=None,
+    created_end=None,
 ) -> int:
     """从 MR Pipeline API 聚合。
 
     project_filter: 若非 None/空，则按 project_id 一次只取该项目下的 completed
     任务，避免拉取整张 completed 任务列表后再做客户端过滤。
+
+    created_start / created_end: 可选的 aware ``[start, end)`` 窗口。列表接口
+    按 ``created_at DESC`` 分页，一旦翻到早于 ``start`` 的任务即可停翻，
+    这是增量导出相对全量的主要性能收益。
 
     Per-task ``/results`` fetches run in parallel (see ``_FETCH_WORKERS``).
     Pagination of the task list stays serial — the list endpoint is one
@@ -967,13 +1144,19 @@ def _collect_from_mr(
                     offset=offset,
                     **_fwd(base_url),
                 )
-                out.extend(batch)
+                kept, hit_floor = apply_created_window(
+                    batch, created_start, created_end)
+                out.extend(kept)
                 # Step by the actual returned count (not the requested limit):
                 # the backend orders by created_at DESC with no unique
                 # tiebreaker, so stepping by ``limit`` past a short page can
                 # skip rows. _dedupe_tasks below absorbs the duplicates that
                 # head-insertion drift can otherwise introduce.
                 offset += len(batch)
+                # Delta: list is newest-first, so a task older than From
+                # date means every later page is older still — stop paging.
+                if hit_floor:
+                    break
                 if not batch or offset >= total:
                     break
         except Exception as e:
@@ -990,7 +1173,10 @@ def _collect_from_mr(
 
     all_tasks = _dedupe_tasks(all_tasks, "task_id")
     total_tasks = len(all_tasks)
-    _log(progress_cb, f"  [MR] 命中 {total_tasks} 个 Completed task")
+    if created_start is not None or created_end is not None:
+        _log(progress_cb, f"  [MR] 日期窗口内 {total_tasks} 个 Completed task")
+    else:
+        _log(progress_cb, f"  [MR] 命中 {total_tasks} 个 Completed task")
     if count_cb:
         try:
             count_cb("MR", 0, total_tasks)
@@ -1092,11 +1278,16 @@ def _collect_from_scan(
     project_filter: Optional[Set[str]] = None,
     count_cb: ProgressCountCb = None,
     base_url: Optional[str] = None,
+    created_start=None,
+    created_end=None,
 ) -> int:
     """从 Missing Translation Scan API 聚合已完成扫描任务的全部译文。
 
     project_filter: 若非 None/空，则只拉取这些 project_id 下的 completed
     scan 任务，避免面板里只勾了 1 个产品却扫全量。
+
+    created_start / created_end: 同 :func:`_collect_from_mr`，按
+    ``created_at DESC`` 翻页并在越过 From date 时提前停翻。
 
     Per-task ``/results`` fetches run in parallel (see ``_FETCH_WORKERS``).
     """
@@ -1116,9 +1307,13 @@ def _collect_from_scan(
                     offset=offset,
                     **_fwd(base_url),
                 )
-                out.extend(batch)
+                kept, hit_floor = apply_created_window(
+                    batch, created_start, created_end)
+                out.extend(kept)
                 # Step by actual returned count; dedupe below absorbs drift.
                 offset += len(batch)
+                if hit_floor:
+                    break
                 if not batch or offset >= total:
                     break
         except Exception as e:
@@ -1135,7 +1330,10 @@ def _collect_from_scan(
 
     all_tasks = _dedupe_tasks(all_tasks, "task_id")
     total_tasks = len(all_tasks)
-    _log(progress_cb, f"  [Scan] 命中 {total_tasks} 个 Completed task")
+    if created_start is not None or created_end is not None:
+        _log(progress_cb, f"  [Scan] 日期窗口内 {total_tasks} 个 Completed task")
+    else:
+        _log(progress_cb, f"  [Scan] 命中 {total_tasks} 个 Completed task")
     if count_cb:
         try:
             count_cb("Scan", 0, total_tasks)
@@ -1230,6 +1428,8 @@ def collect_full_translations(
     strict_complete: bool = False,
     track_all_sources: bool = False,
     base_url: Optional[str] = None,
+    created_after=None,
+    created_before=None,
 ) -> FullTranslationInventory:
     """从指定数据源聚合全量翻译。
 
@@ -1257,6 +1457,11 @@ def collect_full_translations(
     base_url: 平台 origin。None / 省略 → 生产环境。Stage 面板传入
         ``TRANZOR_STAGE_URL``，使 Legacy / MR / Scan 三个源全部打到 Stage。
 
+    created_after / created_before: 可选的增量日期窗口（含起止当天）。日期按
+        UTC+8 自然日理解（``date`` / ``datetime`` / ``YYYY-MM-DD``）。传入后
+        只抓取 ``created_at`` 落在窗口内的任务——这是 Delta Day2Day 导出相对
+        全量导出的性能关键。两者都空时行为与原来完全一致。
+
     返回 FullTranslationInventory（其 ``fetch_failures`` 字段列出所有抓取失败的
     任务；非 strict 模式下也会填充）。
     """
@@ -1266,20 +1471,36 @@ def collect_full_translations(
     legacy_set = set(legacy_project_filter) if legacy_project_filter else None
     mr_set = set(mr_project_filter) if mr_project_filter else None
     scan_set = set(scan_project_filter) if scan_project_filter else None
+    created_start, created_end = resolve_created_window(
+        created_after, created_before)
+    window_kw = {}
+    if created_start is not None or created_end is not None:
+        window_kw = {
+            "created_start": created_start,
+            "created_end": created_end,
+        }
+        after_d = _coerce_date(created_after)
+        before_d = _coerce_date(created_before)
+        left = after_d.isoformat() if after_d else "…"
+        right = before_d.isoformat() if before_d else "…"
+        _log(progress_cb, f"  ⏱ Delta 日期窗口 UTC+8 {left} → {right}（含）")
 
     if "legacy" in sources:
         added = _collect_from_legacy(inv, progress_cb, legacy_set,
-                                     count_cb=count_cb, base_url=base_url)
+                                     count_cb=count_cb, base_url=base_url,
+                                     **window_kw)
         _log(progress_cb, f"  ✓ [Legacy] 写入 {added} 条")
 
     if "mr" in sources:
         added = _collect_from_mr(inv, progress_cb, mr_set,
-                                 count_cb=count_cb, base_url=base_url)
+                                 count_cb=count_cb, base_url=base_url,
+                                 **window_kw)
         _log(progress_cb, f"  ✓ [MR] 写入 {added} 条")
 
     if "scan" in sources:
         added = _collect_from_scan(inv, progress_cb, scan_set,
-                                   count_cb=count_cb, base_url=base_url)
+                                   count_cb=count_cb, base_url=base_url,
+                                   **window_kw)
         _log(progress_cb, f"  ✓ [Scan] 写入 {added} 条")
 
     _log(progress_cb, f"\n  ✓ 聚合完成：{len(inv.data)} 个产品 / "
