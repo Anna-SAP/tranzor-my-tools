@@ -1386,6 +1386,9 @@ class MRPipelineTab:
             self._jira_row_iids = {}
             self._mr_link_meta = {}
             self._delivery_row_iids = {}
+            # Every follow-up MR must be re-verified against GitLab on an
+            # explicit Search/Refresh (see _claim_delivery_status_refresh).
+            self._delivery_status_refreshed = set()
             self._jira_titles_by_iid = {}
             self._truncated_title_iids = set()
             self._hide_title_tooltip()
@@ -1410,7 +1413,6 @@ class MRPipelineTab:
         jira_seen: set[tuple[str, int]] = set()
         # Distinct follow-up MRs whose live GitLab state fills Trans MR Status.
         delivery_status_prefetch: list[tuple[str, int]] = []
-        delivery_status_seen: set[tuple[str, int]] = set()
         # Resolved once per repaint: when GitLab is unreachable (no token)
         # the JIRA / MR Status cells render "—" up front instead of a "…"
         # spinner that would never resolve.
@@ -1547,8 +1549,7 @@ class MRPipelineTab:
             }
             if delivery_key is not None:
                 self._delivery_row_iids.setdefault(delivery_key, []).append(iid)
-                if jira_fetchable and delivery_key not in delivery_status_seen:
-                    delivery_status_seen.add(delivery_key)
+                if self._claim_delivery_status_refresh(delivery_key):
                     delivery_status_prefetch.append(delivery_key)
             normalized_title = _single_line_title(title_cached)
             if normalized_title:
@@ -2081,8 +2082,34 @@ class MRPipelineTab:
         rows = self._delivery_row_iids.setdefault(dkey, [])
         if tree_iid not in rows:
             rows.append(tree_iid)
-        if current_iid is not None and not current_state:
+        # ``current_state`` is a *last-known* value, not a live one: it comes
+        # from the GitLab title search that resolved this follow-up MR, whose
+        # result set is cached (GitLabClient.list_merge_requests). Trusting it
+        # kept Trans MR Status pinned at "Open" for the rest of the session
+        # after the translation MR merged. Verify it against GitLab the same
+        # way the source MR Status column does — once per Search/Refresh.
+        if current_iid is not None and self._claim_delivery_status_refresh(dkey):
             self._prefetch_delivery_status([dkey])
+
+    def _claim_delivery_status_refresh(self, key) -> bool:
+        """True the first time ``key`` needs a live-state fetch this repaint.
+
+        One force-refresh per distinct follow-up MR per Search/Refresh: enough
+        to catch opened → merged, without re-asking GitLab on every repaint
+        (sorting, Load More, a late delivery-MR resolution). The ledger is
+        cleared when a replace render starts. ``False`` when GitLab is
+        unreachable, so no cell is left waiting on a fetch that cannot land.
+        """
+        if key is None or not _jira.can_fetch():
+            return False
+        seen = getattr(self, "_delivery_status_refreshed", None)
+        if seen is None:
+            seen = set()
+            self._delivery_status_refreshed = seen
+        if key in seen:
+            return False
+        seen.add(key)
+        return True
 
     def _prefetch_delivery_status(self, keys):
         """Refresh live GitLab state for known follow-up translation MRs."""
@@ -2123,6 +2150,12 @@ class MRPipelineTab:
             current = _delivery.current_trans_mr_iid(
                 meta.get("delivery_iid"), meta.get("fix_iid"))
             if current is None or want_iid not in (None, current):
+                continue
+            known = (meta.get("fix_state") if meta.get("fix_iid") == current
+                     else meta.get("delivery_state"))
+            if raw_state is None and known:
+                # Transient fetch failure. Keep the last known state rather
+                # than knocking a correct cell back to "—".
                 continue
             if meta.get("fix_iid") == current:
                 meta["fix_state"] = raw_state or ""
