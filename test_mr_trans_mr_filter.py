@@ -252,6 +252,128 @@ class TestScanControl(unittest.TestCase):
         tab.lbl_mr_status_bar.configure.assert_called_once_with(text="100/67436/3")
 
 
+class TestTransMrOpenFilter(unittest.TestCase):
+    """The narrower "Trans MR# is open" view of the same scan."""
+
+    def setUp(self):
+        import threading
+        self.tab = _Tab()
+        self.tab._delivery_probe_misses = set()
+        self.tab._delivery_probe_lock = threading.Lock()
+
+    def test_strings_present_in_both_languages(self):
+        import export_gui
+        for lang in ("en", "zh"):
+            table = export_gui.STRINGS[lang]
+            self.assertIn("mr_trans_mr_open", table, lang)
+            self.assertIn("mr_trans_mr_open_tip", table, lang)
+            self.assertNotEqual(table["mr_trans_mr_open"],
+                                table["mr_trans_mr_only"])
+
+    def test_open_trans_mr_passes(self):
+        import mr_jira
+        task = {"task_id": "t1", "project_id": "web/web",
+                "merge_request_iid": 42391, "delivery_mr_iid": 42392}
+        with mock.patch("mr_jira.fetch_jira_metadata",
+                        return_value=mr_jira.JiraMetadata("", "", "opened")):
+            self.tab._check_task_delivery_mr(task, want_open=True)
+        self.assertTrue(task["_has_delivery_mr"])
+        self.assertTrue(task["_trans_mr_open"])
+
+    def test_merged_trans_mr_is_filtered_out_but_still_exists(self):
+        import mr_jira
+        task = {"task_id": "t1", "project_id": "common/uns",
+                "merge_request_iid": 4215, "delivery_mr_iid": 4216}
+        with mock.patch("mr_jira.fetch_jira_metadata",
+                        return_value=mr_jira.JiraMetadata("", "", "merged")):
+            self.tab._check_task_delivery_mr(task, want_open=True)
+        self.assertTrue(task["_has_delivery_mr"])
+        self.assertFalse(task["_trans_mr_open"])
+
+    def test_state_follows_the_fix_mr_not_the_import_mr(self):
+        # 4213 -> 4214: the column's status follows 4214, so must the filter.
+        task = {
+            "_has_delivery_mr": True,
+            "_delivery_ref": _delivery.DeliveryRef(
+                project_id="common/uns", iid=4213, state="merged"),
+            "_fix_ref": _delivery.DeliveryRef(
+                project_id="common/uns", iid=4214, state="merged"),
+        }
+        asked = []
+
+        def _fetch(project, iid, **kw):
+            asked.append((project, iid, kw.get("force_refresh")))
+            return None
+
+        with mock.patch("mr_jira.fetch_jira_metadata", side_effect=_fetch):
+            self.tab._resolve_trans_mr_state(task)
+
+        self.assertEqual(asked, [("common/uns", 4214, True)])
+
+    def test_open_state_is_not_resolved_when_not_asked_for(self):
+        task = {"task_id": "t1", "project_id": "web/web",
+                "merge_request_iid": 42391, "delivery_mr_iid": 42392}
+        with mock.patch("mr_jira.fetch_jira_metadata") as fetch:
+            self.tab._check_task_delivery_mr(task)
+        self.assertTrue(task["_has_delivery_mr"])
+        self.assertFalse(task["_trans_mr_open"])
+        fetch.assert_not_called()
+
+    def test_task_without_a_trans_mr_never_counts_as_open(self):
+        task = {"task_id": "t1", "project_id": "RND/rcvnc",
+                "merge_request_iid": 6745}
+        self.tab._probe_mark_dead(("RND/rcvnc", 6745))
+        self.tab._check_task_delivery_mr(task, want_open=True)
+        self.assertFalse(task["_has_delivery_mr"])
+        self.assertFalse(task["_trans_mr_open"])
+
+
+class TestSkippedTaskPreFilter(unittest.TestCase):
+    """85% of the pipeline's history is skipped tasks; the payload says so."""
+
+    def setUp(self):
+        from gui_tabs import MRPipelineTab
+        self.ruled_out = MRPipelineTab._cannot_have_trans_mr
+
+    def test_skipped_task_is_ruled_out_from_the_payload(self):
+        self.assertTrue(self.ruled_out({"status": "skipped"}))
+        self.assertTrue(self.ruled_out({"status": "SKIPPED"}))
+
+    def test_every_other_status_still_gets_probed(self):
+        for status in ("completed", "failed", "cancelled", "running", "", None):
+            self.assertFalse(self.ruled_out({"status": status}), status)
+
+    def test_missing_payload_is_not_ruled_out(self):
+        self.assertFalse(self.ruled_out({}))
+        self.assertFalse(self.ruled_out(None))
+
+
+class TestScanScope(unittest.TestCase):
+    """Load More continues a scan; everything else starts a new one."""
+
+    def _tab(self, pending_append):
+        import threading
+        tab = _Tab()
+        tab._pending_append = pending_append
+        tab._scan_cursor = {"offset": 3200, "carry": [], "api_total": 67436,
+                            "matched": 25, "scanned": 3200}
+        tab._delivery_probe_misses = {("RND/rcvnc", 6745)}
+        tab._delivery_probe_lock = threading.Lock()
+        return tab
+
+    def test_load_more_keeps_the_cursor_and_the_dead_mr_memo(self):
+        tab = self._tab(pending_append=True)
+        self.assertFalse(tab._reset_scan_scope_if_new())
+        self.assertEqual(tab._scan_cursor["offset"], 3200)
+        self.assertTrue(tab._probe_is_dead(("RND/rcvnc", 6745)))
+
+    def test_a_fresh_search_drops_both(self):
+        tab = self._tab(pending_append=False)
+        self.assertTrue(tab._reset_scan_scope_if_new())
+        self.assertIsNone(tab._scan_cursor)
+        self.assertFalse(tab._probe_is_dead(("RND/rcvnc", 6745)))
+
+
 class TestFindFollowUpMrs(unittest.TestCase):
     """One title search must yield both the import MR and any later fix MR."""
 

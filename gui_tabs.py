@@ -309,6 +309,9 @@ class MRPipelineTab:
         # Bumped per load; every after() callback carries the generation it
         # was queued under so a superseded scan cannot paint into a newer one.
         self._fetch_generation = 0
+        # Where the running Trans MR# scan got to, so Load More resumes:
+        # {"offset", "carry", "api_total", "matched", "scanned"}.
+        self._scan_cursor = None
         # threading.Event while a streaming scan runs; Search doubles as Stop.
         self._scan_cancel = None
         # Replaces the "Loading…" text while a scan reports progress.
@@ -498,10 +501,19 @@ class MRPipelineTab:
             r2, text="", variable=self.mr_trans_mr_only_var,
             style="Card.TCheckbutton", command=self._on_search)
         self.chk_mr_trans_mr_only.pack(side="left", padx=(12, 0))
+        # "Trans MR# is open" — the narrower view of the same scan: only the
+        # translation MRs still waiting to land. Implies "exists".
+        self.mr_trans_mr_open_var = tk.BooleanVar(value=False)
+        self.chk_mr_trans_mr_open = ttk.Checkbutton(
+            r2, text="", variable=self.mr_trans_mr_open_var,
+            style="Card.TCheckbutton", command=self._on_search)
+        self.chk_mr_trans_mr_open.pack(side="left", padx=(12, 0))
         self._trans_mr_only_tip = None
+        self._trans_mr_open_tip = None
         try:
             from export_gui import Tooltip as _Tooltip
             self._trans_mr_only_tip = _Tooltip(self.chk_mr_trans_mr_only, "")
+            self._trans_mr_open_tip = _Tooltip(self.chk_mr_trans_mr_open, "")
         except Exception:
             pass
 
@@ -940,8 +952,11 @@ class MRPipelineTab:
         self.lbl_mr_post_edit_legend.configure(text=t("mr_post_edit_legend"))
         self.chk_mr_post_edit_only.configure(text=t("mr_post_edit_only"))
         self.chk_mr_trans_mr_only.configure(text=t("mr_trans_mr_only"))
+        self.chk_mr_trans_mr_open.configure(text=t("mr_trans_mr_open"))
         if getattr(self, "_trans_mr_only_tip", None) is not None:
             self._trans_mr_only_tip.set_text(t("mr_trans_mr_only_tip"))
+        if getattr(self, "_trans_mr_open_tip", None) is not None:
+            self._trans_mr_open_tip.set_text(t("mr_trans_mr_open_tip"))
         if self.adv_filter is not None:
             self.adv_filter.refresh_text()
 
@@ -1109,6 +1124,8 @@ class MRPipelineTab:
     def _next_page(self):
         filters_active = (
             self.mr_hide_empty_var.get()
+            or self.mr_trans_mr_only_var.get()
+            or self.mr_trans_mr_open_var.get()
             or self.mr_iid_var.get().strip()
             or self.mr_task_id_var.get().strip()
             or self.mr_jira_var.get().strip()
@@ -1152,7 +1169,7 @@ class MRPipelineTab:
         # Supersede anything a previous load still has queued on the Tk loop.
         self._fetch_generation += 1
         self._scan_progress_text = None
-        self._delivery_probe_misses = set()
+        self._reset_scan_scope_if_new()
         # Show prominent loading overlay in the data grid area
         self.mr_loading_overlay.configure(text=self._t("status_loading") + "...")
         self.mr_loading_overlay.place(relx=0.5, rely=0.4, anchor="center")
@@ -1162,6 +1179,23 @@ class MRPipelineTab:
         self._loading_dot_count = 0
         self._animate_loading()
         threading.Thread(target=self._fetch_tasks, daemon=True).start()
+
+    def _reset_scan_scope_if_new(self) -> bool:
+        """Drop the scan cursor and dead-MR memo unless this is a Load More.
+
+        Both are scoped to one Trans MR# scan. A Load More continues that same
+        scan, so it keeps them and resumes; anything else (Search, Reset, a
+        page jump) starts over, which also means retrying the source MRs
+        GitLab could not resolve last time.
+
+        Returns True when the scope was reset, for tests and callers that
+        want to know which of the two happened.
+        """
+        if self._pending_append:
+            return False
+        self._scan_cursor = None
+        self._delivery_probe_misses = set()
+        return True
 
     def _animate_loading(self):
         """Cycle dots in both status bar and overlay: Loading. → Loading.. → Loading..."""
@@ -1207,6 +1241,17 @@ class MRPipelineTab:
             self.btn_mr_prev.configure(state=state)
             self.btn_mr_next.configure(state=state)
             self.btn_mr_load_more.configure(state=state)
+
+    @staticmethod
+    def _cannot_have_trans_mr(task) -> bool:
+        """True when the task payload alone rules a Trans MR out.
+
+        A ``skipped`` task never ran translation, so it produced neither
+        translations nor an import MR. 85% of the pipeline's history is
+        skipped tasks, and probing one costs a full results fetch — the
+        status field answers for free.
+        """
+        return str((task or {}).get("status") or "").lower() == "skipped"
 
     def _warm_delivery_probe(self, tasks):
         """Resolve each distinct source MR once before the per-task probe.
@@ -1266,7 +1311,46 @@ class MRPipelineTab:
         with lock:
             self._delivery_probe_misses.add(key)
 
-    def _check_task_delivery_mr(self, t):
+    def _check_task_delivery_mr(self, t, want_open=False):
+        """Resolve a task's translation MR, and optionally whether it is open.
+
+        ``_has_delivery_mr`` answers "Trans MR# exists"; ``_trans_mr_open``
+        answers the narrower "Trans MR# is open". The open state is only
+        resolved when asked for, because it costs one extra GitLab call —
+        affordable precisely because it runs on the ~1% of scanned tasks that
+        got this far.
+        """
+        self._resolve_task_delivery_mr(t)
+        t["_trans_mr_state"] = ""
+        t["_trans_mr_open"] = False
+        if want_open and t.get("_has_delivery_mr"):
+            state = self._resolve_trans_mr_state(t)
+            t["_trans_mr_state"] = state
+            t["_trans_mr_open"] = state.lower() == "opened"
+
+    def _resolve_trans_mr_state(self, t) -> str:
+        """Live GitLab state of the Trans MR this task's row will show.
+
+        The Trans MR# cell follows the fix MR when there is one and the import
+        MR otherwise (:func:`mr_delivery.current_trans_mr_iid`), so the filter
+        has to ask about the same one. Force-refresh rather than reusing the
+        title search's copy of ``state``: that search is cached, and an
+        "is open" filter driven by a value that may be minutes stale would
+        list MRs that already merged — the exact bug #202 fixed in the column.
+        Seeding the state cache here also lets the column paint without its
+        own round trip.
+        """
+        current = t.get("_fix_ref") or t.get("_delivery_ref")
+        if current is None:
+            return ""
+        try:
+            metadata = _jira.fetch_jira_metadata(
+                current.project_id, current.iid, force_refresh=True)
+        except Exception:
+            return ""
+        return "" if metadata is None else str(metadata.state or "")
+
+    def _resolve_task_delivery_mr(self, t):
         """Resolve whether one task has a translation (Trans) MR.
 
         Runs only on the "Trans MR# exists" path, on the same worker pool as
@@ -1286,6 +1370,7 @@ class MRPipelineTab:
         Steps 2 and 3 are cached process-wide (mr_jira / GitLabClient), so
         tasks sharing a source MR cost one round trip between them.
         """
+        t["_fix_ref"] = None
         ref = _delivery.delivery_from_task(t)
         if ref is not None:
             t["_delivery_ref"] = ref
@@ -1314,6 +1399,8 @@ class MRPipelineTab:
         # Either one alone still renders a Trans MR# — a fix MR can outlive
         # an import MR the search no longer matches.
         t["_delivery_ref"] = import_ref or fix_ref
+        t["_fix_ref"] = fix_ref if (fix_ref is not None
+                                    and fix_ref is not t["_delivery_ref"]) else None
         t["_has_delivery_mr"] = t["_delivery_ref"] is not None
 
     def _check_task_translations(self, t):
@@ -1367,7 +1454,8 @@ class MRPipelineTab:
                 raise RuntimeError(
                     "A GitLab token is required to filter by JIRA ID.")
             hide_empty = self.mr_hide_empty_var.get()
-            trans_mr_only = self.mr_trans_mr_only_var.get()
+            trans_mr_open = self.mr_trans_mr_open_var.get()
+            trans_mr_only = self.mr_trans_mr_only_var.get() or trans_mr_open
             if trans_mr_only and not _jira.can_fetch():
                 raise RuntimeError(self._t("mr_trans_mr_token_required"))
             # Only the Trans MR# path streams: it is the one filter whose
@@ -1436,8 +1524,11 @@ class MRPipelineTab:
                             detail = None
                 if isinstance(detail, dict) and detail.get("task_id"):
                     if trans_mr_only:
-                        self._check_task_delivery_mr(detail)
+                        self._check_task_delivery_mr(
+                            detail, want_open=trans_mr_open)
                         if not detail.get("_has_delivery_mr"):
+                            detail = None
+                        elif trans_mr_open and not detail.get("_trans_mr_open"):
                             detail = None
                 if isinstance(detail, dict) and detail.get("task_id"):
                     collected.append(detail)
@@ -1490,6 +1581,21 @@ class MRPipelineTab:
                 total_matched = 0
                 total_scanned = 0
 
+                # Load More on a Trans MR# scan resumes where the last one
+                # stopped. Without this it restarts at offset 0 and re-scans
+                # every task it already rejected, only to throw the first
+                # page's matches away via skip_count — so page 2 costs page 1
+                # plus page 2, page 3 costs 1+2+3, and so on.
+                cursor = self._scan_cursor if (append and trans_mr_only) else None
+                carry = []
+                if cursor is not None:
+                    offset = cursor["offset"]
+                    skip_count = 0
+                    api_total = cursor["api_total"]
+                    total_matched = cursor["matched"]
+                    total_scanned = cursor["scanned"]
+                    carry = list(cursor["carry"])
+
                 # Streaming bookkeeping: rows are handed to the table batch
                 # by batch, so track where the next chunk's "#" column starts
                 # and whether the first chunk has replaced the old rows yet.
@@ -1497,7 +1603,19 @@ class MRPipelineTab:
                 streamed_any = False
                 cancelled = False
 
-                while True:
+                # Matches the previous scan found beyond its page boundary are
+                # already paid for — show them before asking the API again.
+                if carry:
+                    chunk, carry = carry[:target], carry[target:]
+                    collected.extend(chunk)
+                    self.parent.after(
+                        0, self._on_tasks_loaded, api_total, chunk,
+                        max(total_matched, len(collected)),
+                        append, stream_offset, gen)
+                    stream_offset += len(chunk)
+                    streamed_any = True
+
+                while len(collected) < target:
                     if self._scan_cancel is not None and self._scan_cancel.is_set():
                         cancelled = True
                         break
@@ -1523,10 +1641,23 @@ class MRPipelineTab:
                                  if _delivery.task_matches_mr_iid(
                                      t, matching_mr_iids)]
 
+                    # A Trans MR# scan can rule most of the batch out from
+                    # the payload alone, before paying for a results fetch.
+                    if trans_mr_only:
+                        for t in batch:
+                            if self._cannot_have_trans_mr(t):
+                                t["_translations_count"] = 0
+                                t["_has_delivery_mr"] = False
+                                t["_trans_mr_open"] = False
+
                     # Parallel check translation counts (4x faster than sequential)
                     if hide_empty and batch:
-                        with ThreadPoolExecutor(max_workers=4) as pool:
-                            list(pool.map(self._check_task_translations, batch))
+                        countable = [t for t in batch
+                                     if "_translations_count" not in t]
+                        if countable:
+                            with ThreadPoolExecutor(max_workers=4) as pool:
+                                list(pool.map(
+                                    self._check_task_translations, countable))
 
                     # Resolve Trans MR# for what survives the cheaper filters
                     # — no point asking GitLab about a task Hide empty MRs is
@@ -1536,14 +1667,17 @@ class MRPipelineTab:
                     if trans_mr_only and batch:
                         pending = [
                             t for t in batch
-                            if not hide_empty
-                            or t.get("_translations_count", 0) > 0
+                            if not self._cannot_have_trans_mr(t)
+                            and (not hide_empty
+                                 or t.get("_translations_count", 0) > 0)
                         ]
                         if pending:
                             self._warm_delivery_probe(pending)
                             with ThreadPoolExecutor(max_workers=8) as pool:
                                 list(pool.map(
-                                    self._check_task_delivery_mr, pending))
+                                    lambda task: self._check_task_delivery_mr(
+                                        task, want_open=trans_mr_open),
+                                    pending))
 
                     chunk = []
                     for t in batch:
@@ -1551,8 +1685,10 @@ class MRPipelineTab:
                         if hide_empty:
                             if t.get("_translations_count", 0) == 0:
                                 continue
-                        # Trans MR# exists: pre-resolved just above.
+                        # Trans MR# exists / is open: pre-resolved just above.
                         if trans_mr_only and not t.get("_has_delivery_mr"):
+                            continue
+                        if trans_mr_open and not t.get("_trans_mr_open"):
                             continue
 
                         total_matched += 1
@@ -1565,6 +1701,10 @@ class MRPipelineTab:
                         if len(collected) < target:
                             collected.append(t)
                             chunk.append(t)
+                        elif trans_mr_only:
+                            # Already paid for; hand it to the next Load More
+                            # instead of re-finding it (see _scan_cursor).
+                            carry.append(t)
 
                     offset += batch_size
 
@@ -1584,9 +1724,7 @@ class MRPipelineTab:
                             0, self._on_scan_progress, gen,
                             total_scanned, api_total, total_matched)
 
-                    # Stop as soon as we have enough items for this page
-                    if len(collected) >= target:
-                        break
+                    # The while condition stops us once the page is full.
                     if offset >= api_total:
                         break
 
@@ -1597,6 +1735,13 @@ class MRPipelineTab:
                     estimated_total = total_matched
 
                 if trans_mr_only:
+                    # Remember where to pick up, plus the matches already
+                    # found past this page, so Load More doesn't re-scan.
+                    self._scan_cursor = {
+                        "offset": offset, "carry": carry,
+                        "api_total": api_total,
+                        "matched": total_matched, "scanned": total_scanned,
+                    }
                     # Rows are already on screen; just close the scan out.
                     self.parent.after(
                         0, self._on_scan_done, gen, api_total, estimated_total,
