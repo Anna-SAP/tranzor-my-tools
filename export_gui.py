@@ -699,9 +699,15 @@ STRINGS = {
         "mr_trans_mr_only": "🔀 Trans MR# exists",
         "mr_trans_mr_only_tip": ("Keep only tasks whose translation was delivered "
                                  "as a follow-up MR (Trans MR# is not empty). "
-                                 "Needs a GitLab token."),
+                                 "Needs a GitLab token. Scans history in the "
+                                 "background — set Status to completed to search "
+                                 "a much smaller set."),
         "mr_trans_mr_token_required": ("A GitLab token is required to filter by "
                                        "Trans MR#."),
+        "mr_trans_mr_open": "🔀 Trans MR# is open",
+        "mr_trans_mr_open_tip": ("Keep only tasks whose current translation MR "
+                                 "is still open on GitLab — the work that has "
+                                 "not landed yet. Implies Trans MR# exists."),
         "mr_stop_scan": "■ Stop",
         "mr_scan_progress": "🔀 Scanning {scanned}/{total} tasks — {matched} with a Trans MR",
         "mr_scan_done": "🔀 {matched} of {scanned} scanned tasks have a Trans MR",
@@ -887,8 +893,10 @@ STRINGS = {
         "mr_post_edit_only": "✏️ 仅含 post-edit",
         "mr_post_edit_filter_status": "✏️ 已加载页中显示 {n} 个含 post-edit 的 MR",
         "mr_trans_mr_only": "🔀 仅含翻译 MR",
-        "mr_trans_mr_only_tip": "只保留翻译已通过后续 MR 交付的任务（Trans MR# 不为空）。需要 GitLab token。",
+        "mr_trans_mr_only_tip": "只保留翻译已通过后续 MR 交付的任务（Trans MR# 不为空）。需要 GitLab token。后台逐批扫描历史——把 Status 选成 completed 可大幅缩小搜索范围。",
         "mr_trans_mr_token_required": "按 Trans MR# 筛选需要配置 GitLab token。",
+        "mr_trans_mr_open": "🔀 翻译 MR 未合并",
+        "mr_trans_mr_open_tip": "只保留当前翻译 MR 在 GitLab 上仍为 Open 的任务（尚未落地的部分）。已隐含「仅含翻译 MR」。",
         "mr_stop_scan": "■ 停止",
         "mr_scan_progress": "🔀 已扫描 {scanned}/{total} 个任务 — {matched} 个含翻译 MR",
         "mr_scan_done": "🔀 已扫描 {scanned} 个任务，{matched} 个含翻译 MR",
