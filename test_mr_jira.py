@@ -659,6 +659,7 @@ class ApplyDeliveryMrTests(unittest.TestCase):
             "task-1": {"project": "common/uns", "source_iid": 3930,
                        "delivery_iid": None, "delivery_url": ""},
         }
+        tab._prefetch_delivery_status = lambda keys: None
         tab._apply_delivery_mr(
             "task-1",
             _delivery.DeliveryRef(
@@ -735,6 +736,7 @@ class ApplyDeliveryMrTests(unittest.TestCase):
             "task-1": {"project": "web/i18n", "source_iid": 1223,
                        "delivery_iid": None, "delivery_url": ""},
         }
+        tab._prefetch_delivery_status = lambda keys: None
         tab._apply_follow_ups(
             "task-1",
             _delivery.DeliveryRef(
@@ -754,6 +756,115 @@ class ApplyDeliveryMrTests(unittest.TestCase):
             tab.mr_tree.cells[("task-1", "delivery_mr_status")], "Open")
         self.assertEqual(tab._mr_link_meta["task-1"]["delivery_iid"], 1224)
         self.assertEqual(tab._mr_link_meta["task-1"]["fix_iid"], 1225)
+
+
+class DeliveryStatusFreshnessTests(unittest.TestCase):
+    """Trans MR Status must follow GitLab, not the cached title search."""
+
+    class _Tree:
+        def __init__(self):
+            self.cells = {}
+
+        def set(self, iid, column, value=None):
+            if value is None:
+                return self.cells.get((iid, column), "")
+            self.cells[(iid, column)] = value
+
+    def _tab(self):
+        from gui_tabs import MRPipelineTab
+        tab = MRPipelineTab.__new__(MRPipelineTab)
+        tab.mr_tree = self._Tree()
+        tab._delivery_row_iids = {}
+        tab._delivery_status_refreshed = set()
+        tab._mr_link_meta = {
+            "task-1": {"project": "common/uns", "source_iid": 4215,
+                       "delivery_iid": None, "delivery_url": ""},
+        }
+        return tab
+
+    def test_search_derived_state_is_verified_against_gitlab(self):
+        # The screenshot bug: the title search that resolved Trans MR 4216
+        # was cached while it was still open, so the cell read "Open" hours
+        # after the MR merged. Painting a search-derived state must still
+        # queue a live force-refresh for that MR.
+        import mr_delivery as _delivery
+
+        tab = self._tab()
+        queued = []
+        tab._prefetch_delivery_status = queued.extend
+
+        with mock.patch("mr_jira.can_fetch", return_value=True):
+            tab._apply_delivery_mr(
+                "task-1",
+                _delivery.DeliveryRef(
+                    project_id="common/uns", iid=4216,
+                    url="https://git.example.com/common/uns/-/merge_requests/4216",
+                    state="opened"),
+            )
+
+        self.assertEqual(
+            tab.mr_tree.cells[("task-1", "delivery_mr_status")], "Open")
+        self.assertEqual(queued, [("common/uns", 4216)])
+
+        # …and the live answer replaces it.
+        tab._apply_delivery_status(("common/uns", 4216), "merged")
+        self.assertEqual(
+            tab.mr_tree.cells[("task-1", "delivery_mr_status")], "Merged")
+
+    def test_current_fix_mr_state_is_verified_not_the_original(self):
+        # Row 2 of the report: 4213 → 4214, status must follow the fix MR.
+        import mr_delivery as _delivery
+
+        tab = self._tab()
+        queued = []
+        tab._prefetch_delivery_status = queued.extend
+
+        with mock.patch("mr_jira.can_fetch", return_value=True):
+            tab._apply_follow_ups(
+                "task-1",
+                _delivery.DeliveryRef(project_id="common/uns", iid=4213,
+                                      state="merged"),
+                _delivery.DeliveryRef(project_id="common/uns", iid=4214,
+                                      state="opened"),
+            )
+
+        self.assertEqual(
+            tab.mr_tree.cells[("task-1", "delivery_mr")], "4213 → 4214")
+        self.assertEqual(queued, [("common/uns", 4214)])
+
+        tab._apply_delivery_status(("common/uns", 4214), "merged")
+        self.assertEqual(
+            tab.mr_tree.cells[("task-1", "delivery_mr_status")], "Merged")
+
+    def test_refresh_is_claimed_once_per_repaint(self):
+        tab = self._tab()
+        with mock.patch("mr_jira.can_fetch", return_value=True):
+            self.assertTrue(
+                tab._claim_delivery_status_refresh(("common/uns", 4216)))
+            self.assertFalse(
+                tab._claim_delivery_status_refresh(("common/uns", 4216)))
+            # A new Search/Refresh clears the ledger and re-verifies.
+            tab._delivery_status_refreshed = set()
+            self.assertTrue(
+                tab._claim_delivery_status_refresh(("common/uns", 4216)))
+
+    def test_no_refresh_is_queued_when_gitlab_is_unreachable(self):
+        tab = self._tab()
+        with mock.patch("mr_jira.can_fetch", return_value=False):
+            self.assertFalse(
+                tab._claim_delivery_status_refresh(("common/uns", 4216)))
+
+    def test_failed_refresh_keeps_the_last_known_state(self):
+        tab = self._tab()
+        tab._delivery_row_iids = {("common/uns", 4216): ["task-1"]}
+        tab._mr_link_meta["task-1"].update(
+            {"delivery_iid": 4216, "delivery_state": "merged"})
+        tab.mr_tree.set("task-1", "delivery_mr_status", "Merged")
+
+        tab._apply_delivery_status(("common/uns", 4216), None)
+
+        self.assertEqual(
+            tab.mr_tree.cells[("task-1", "delivery_mr_status")], "Merged")
 
 
 class JiraHyperlinkInteractionTests(unittest.TestCase):

@@ -9,8 +9,10 @@ from __future__ import annotations
 import os
 import sys
 import threading
+import time
 import unittest
 from concurrent.futures import CancelledError
+from unittest import mock
 
 import requests
 
@@ -469,6 +471,34 @@ class TestListMergeRequests(unittest.TestCase):
         self.assertEqual(params["state"], "all")
         self.assertEqual(params["search"], "BUP-4360")
         self.assertEqual(params["in"], "title")
+
+    def test_stale_cache_entry_is_refetched_after_ttl(self):
+        # Regression: the MR Pipeline reads each entry's volatile ``state``
+        # out of this result set to fill Trans MR Status. A lifetime cache
+        # froze a translation MR at "Open" long after it merged.
+        session = _FakeSession([{"iid": 4216, "state": "opened"}])
+        client = _make_client_with_session(session)
+
+        self.assertEqual(
+            client.list_merge_requests("MR!4215")[0]["state"], "opened")
+        session._payload = [{"iid": 4216, "state": "merged"}]
+
+        fresh = time.time() + gitlab_client.MR_SEARCH_CACHE_TTL_SECS + 1
+        with mock.patch.object(gitlab_client.time, "time", lambda: fresh):
+            self.assertEqual(
+                client.list_merge_requests("MR!4215")[0]["state"], "merged")
+        self.assertEqual(len(session.calls), 2)
+
+    def test_force_refresh_bypasses_the_cache(self):
+        session = _FakeSession([{"iid": 4216, "state": "opened"}])
+        client = _make_client_with_session(session)
+
+        client.list_merge_requests("MR!4215")
+        session._payload = [{"iid": 4216, "state": "merged"}]
+        out = client.list_merge_requests("MR!4215", force_refresh=True)
+
+        self.assertEqual(out[0]["state"], "merged")
+        self.assertEqual(len(session.calls), 2)
 
     def test_project_search_url_encodes_project_path(self):
         session = _FakeSession([])

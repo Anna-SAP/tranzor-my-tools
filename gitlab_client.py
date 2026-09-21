@@ -18,6 +18,7 @@ commit diff 中恢复 Language Lead BATCH_FIX 的 pre-fix 原译文。
 import json
 import os
 import re
+import time
 from concurrent.futures import CancelledError
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
@@ -27,6 +28,12 @@ import atomic_io
 
 CONFIG_PATH = os.path.expanduser("~/.tranzor_exporter_config.json")
 DEFAULT_BASE_URL = "https://git.ringcentral.com"
+
+# How long one MR title-search result set may be reused (seconds). Short
+# enough that a translation MR merging, or a Language Lead opening a fix MR,
+# shows up on the next Search/Refresh of a long-running GUI session; long
+# enough that paging through one result page doesn't re-run every search.
+MR_SEARCH_CACHE_TTL_SECS = 300
 
 
 def load_config():
@@ -225,7 +232,9 @@ class GitLabClient:
         self._commit_diff_cache = {}   # sha -> diff list
         self._branches_cache = {}      # (project_id, search) -> branches list
         self._mr_cache = {}            # (project_id, mr_iid) -> mr dict
-        self._mr_search_cache = {}     # (project_id, search, in_field) -> MR list
+        # (project_id, search, in_field) -> (fetched_at, MR list). Bounded
+        # by MR_SEARCH_CACHE_TTL_SECS — see list_merge_requests.
+        self._mr_search_cache = {}
         self._mr_discussions_cache = {}  # (project, iid, page sizing) -> list
         self._mr_diffs_cache = {}      # (project, iid) -> diff list
 
@@ -397,14 +406,22 @@ class GitLabClient:
         return out
 
     def list_merge_requests(self, search, *, project_id=None,
-                            in_field="title", per_page=100, max_pages=10):
+                            in_field="title", per_page=100, max_pages=10,
+                            force_refresh=False):
         """Find merge requests by title/description text.
 
         ``project_id`` narrows the lookup to one GitLab project. Without it,
         GitLab's authenticated global MR endpoint is used, which lets the MR
         Pipeline JIRA filter find sibling MRs across projects in one search.
-        Results are cached for the client lifetime because MR titles are
-        effectively immutable for this app's task-history use case.
+
+        Results are cached, but only for :data:`MR_SEARCH_CACHE_TTL_SECS`.
+        An MR *title* is effectively immutable, yet callers also read the
+        volatile parts of the same payload — each entry's ``state``, and the
+        membership of the result set itself. The MR Pipeline resolves the
+        translation-delivery MR (and any later Language Lead fix MR) through
+        this search, so an unbounded cache would freeze a follow-up MR at
+        ``opened`` and hide one created after the first search for as long as
+        the app stays open. ``force_refresh=True`` bypasses the cache outright.
         """
         term = str(search or "").strip()
         if not term:
@@ -412,8 +429,11 @@ class GitLabClient:
         field = str(in_field or "title")
         project_key = str(project_id) if project_id else ""
         key = (project_key, term, field)
-        if key in self._mr_search_cache:
-            return self._mr_search_cache[key]
+        if not force_refresh:
+            hit = self._mr_search_cache.get(key)
+            if (hit is not None
+                    and time.time() - hit[0] < MR_SEARCH_CACHE_TTL_SECS):
+                return hit[1]
 
         if project_id:
             url = (f"{self.base_url}/api/v4/projects/"
@@ -438,7 +458,7 @@ class GitLabClient:
             if len(batch) < per_page:
                 break
 
-        self._mr_search_cache[key] = out
+        self._mr_search_cache[key] = (time.time(), out)
         return out
 
     def fetch_mr_labels(self, project_id, mr_iid):
