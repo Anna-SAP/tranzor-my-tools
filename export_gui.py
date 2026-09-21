@@ -696,6 +696,12 @@ STRINGS = {
         "mr_post_edit_legend": "✏️ = MR contains at least one human-edited translation (post-edit)",
         "mr_post_edit_only": "✏️ Post-edited only",
         "mr_post_edit_filter_status": "✏️ Showing {n} post-edited MR(s) on loaded pages",
+        "mr_trans_mr_only": "🔀 Trans MR# exists",
+        "mr_trans_mr_only_tip": ("Keep only tasks whose translation was delivered "
+                                 "as a follow-up MR (Trans MR# is not empty). "
+                                 "Needs a GitLab token."),
+        "mr_trans_mr_token_required": ("A GitLab token is required to filter by "
+                                       "Trans MR#."),
         "summary_post_edit_legend": "✏️ = task contains at least one human-edited translation (post-edit)",
         # Quality Overview tab
         "qa_language":      "Language",
@@ -876,6 +882,9 @@ STRINGS = {
         "mr_post_edit_legend": "✏️ = 该 MR 至少含一条经过人工编辑（post-edit）的翻译",
         "mr_post_edit_only": "✏️ 仅含 post-edit",
         "mr_post_edit_filter_status": "✏️ 已加载页中显示 {n} 个含 post-edit 的 MR",
+        "mr_trans_mr_only": "🔀 仅含翻译 MR",
+        "mr_trans_mr_only_tip": "只保留翻译已通过后续 MR 交付的任务（Trans MR# 不为空）。需要 GitLab token。",
+        "mr_trans_mr_token_required": "按 Trans MR# 筛选需要配置 GitLab token。",
         "summary_post_edit_legend": "✏️ = 该任务至少含一条经过人工编辑（post-edit）的翻译",
         # Quality Overview tab
         "qa_language":      "语言",

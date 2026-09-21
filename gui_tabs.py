@@ -470,6 +470,23 @@ class MRPipelineTab:
             style="Card.TCheckbutton", command=self._on_post_edit_only_toggle)
         self.chk_mr_post_edit_only.pack(side="left", padx=(12, 0))
 
+        # "Trans MR# exists" — keep only tasks whose translation went out as a
+        # follow-up MR. Unlike the ✏️ filter this runs inside the fetch loop
+        # (like Hide empty MRs), because a qualifying task is rare: filtering
+        # only the rows already on screen would leave a handful of rows per
+        # page. See _check_task_delivery_mr for the resolution order.
+        self.mr_trans_mr_only_var = tk.BooleanVar(value=False)
+        self.chk_mr_trans_mr_only = ttk.Checkbutton(
+            r2, text="", variable=self.mr_trans_mr_only_var,
+            style="Card.TCheckbutton", command=self._on_search)
+        self.chk_mr_trans_mr_only.pack(side="left", padx=(12, 0))
+        self._trans_mr_only_tip = None
+        try:
+            from export_gui import Tooltip as _Tooltip
+            self._trans_mr_only_tip = _Tooltip(self.chk_mr_trans_mr_only, "")
+        except Exception:
+            pass
+
         # ── Advanced Filters (collapsible) — content-level filter carried into
         #    the export (HTML pre-fills + auto-applies; Excel/JSON keep only
         #    matching rows). See advanced_filter.AdvancedFilterPanel. ──
@@ -904,6 +921,9 @@ class MRPipelineTab:
             self.mr_tree.heading(col, text=self._sort_heading_text(col))
         self.lbl_mr_post_edit_legend.configure(text=t("mr_post_edit_legend"))
         self.chk_mr_post_edit_only.configure(text=t("mr_post_edit_only"))
+        self.chk_mr_trans_mr_only.configure(text=t("mr_trans_mr_only"))
+        if getattr(self, "_trans_mr_only_tip", None) is not None:
+            self._trans_mr_only_tip.set_text(t("mr_trans_mr_only_tip"))
         if self.adv_filter is not None:
             self.adv_filter.refresh_text()
 
@@ -1149,6 +1169,54 @@ class MRPipelineTab:
             self.btn_mr_next.configure(state=state)
             self.btn_mr_load_more.configure(state=state)
 
+    def _check_task_delivery_mr(self, t):
+        """Resolve whether one task has a translation (Trans) MR.
+
+        Runs only on the "Trans MR# exists" path, on the same worker pool as
+        :meth:`_check_task_translations`, and mutates the task in place:
+        ``_has_delivery_mr`` drives the filter, ``_delivery_ref`` lets the
+        render paint Trans MR# straight away instead of resolving it a second
+        time asynchronously. Never raises — an unresolvable task is treated as
+        having no translation MR rather than failing the whole page.
+
+        Resolution mirrors what the table itself does, cheapest first:
+
+        1. the task payload (``delivery_mr_iid`` / ``import_mr_url``);
+        2. the source MR's state — IMPORT only opens a follow-up MR once the
+           source MR has merged, so a non-merged source is a free "no";
+        3. a GitLab title search for ``MR!{source_iid}``.
+
+        Steps 2 and 3 are cached process-wide (mr_jira / GitLabClient), so
+        tasks sharing a source MR cost one round trip between them.
+        """
+        ref = _delivery.delivery_from_task(t)
+        if ref is not None:
+            t["_delivery_ref"] = ref
+            t["_has_delivery_mr"] = True
+            return
+        t["_delivery_ref"] = None
+        t["_has_delivery_mr"] = False
+        project = str(t.get("project_id") or "").strip()
+        source_iid = _delivery.parse_mr_iid(t.get("merge_request_iid"))
+        if not project or source_iid is None:
+            return
+        try:
+            # Not force_refresh: this is a coarse "has it merged yet" gate,
+            # and it seeds the JIRA / Title / MR Status caches the render
+            # reads a moment later. The live state refresh still happens
+            # per Search (see _claim_delivery_status_refresh).
+            metadata = _jira.fetch_jira_metadata(project, source_iid)
+            if metadata is None or str(metadata.state).lower() != "merged":
+                return
+            import_ref, fix_ref = _delivery.find_follow_up_mrs(
+                project, source_iid, task_id=t.get("task_id"))
+        except Exception:
+            return
+        # Either one alone still renders a Trans MR# — a fix MR can outlive
+        # an import MR the search no longer matches.
+        t["_delivery_ref"] = import_ref or fix_ref
+        t["_has_delivery_mr"] = t["_delivery_ref"] is not None
+
     def _check_task_translations(self, t):
         """Check a task's translation count via API; attach _translations_count,
         _src_string_count and average_score.
@@ -1199,6 +1267,9 @@ class MRPipelineTab:
                 raise RuntimeError(
                     "A GitLab token is required to filter by JIRA ID.")
             hide_empty = self.mr_hide_empty_var.get()
+            trans_mr_only = self.mr_trans_mr_only_var.get()
+            if trans_mr_only and not _jira.can_fetch():
+                raise RuntimeError(self._t("mr_trans_mr_token_required"))
             matching_mr_iids = set()
             if mr_iid_filter:
                 expand_projects = (
@@ -1257,6 +1328,11 @@ class MRPipelineTab:
                         if detail.get("_translations_count", 0) == 0:
                             detail = None
                 if isinstance(detail, dict) and detail.get("task_id"):
+                    if trans_mr_only:
+                        self._check_task_delivery_mr(detail)
+                        if not detail.get("_has_delivery_mr"):
+                            detail = None
+                if isinstance(detail, dict) and detail.get("task_id"):
                     collected.append(detail)
                 matched_total = len(collected)
                 # Single result fits on page 0 — return directly. Force
@@ -1283,7 +1359,8 @@ class MRPipelineTab:
                     return
 
             need_filter = (
-                hide_empty or bool(mr_iid_filter) or bool(jira_filter))
+                hide_empty or trans_mr_only
+                or bool(mr_iid_filter) or bool(jira_filter))
 
             if not need_filter:
                 # Simple path: no client-side filtering needed
@@ -1334,11 +1411,30 @@ class MRPipelineTab:
                         with ThreadPoolExecutor(max_workers=4) as pool:
                             list(pool.map(self._check_task_translations, batch))
 
+                    # Resolve Trans MR# for what survives the cheaper filters
+                    # — no point asking GitLab about a task Hide empty MRs is
+                    # about to drop. Mostly GitLab round trips rather than
+                    # platform ones, and heavily cache-served, so this takes
+                    # the wider pool the ✏️ probe uses rather than the 4 above.
+                    if trans_mr_only and batch:
+                        pending = [
+                            t for t in batch
+                            if not hide_empty
+                            or t.get("_translations_count", 0) > 0
+                        ]
+                        if pending:
+                            with ThreadPoolExecutor(max_workers=8) as pool:
+                                list(pool.map(
+                                    self._check_task_delivery_mr, pending))
+
                     for t in batch:
                         # Hide empty MRs: use pre-fetched count from parallel check
                         if hide_empty:
                             if t.get("_translations_count", 0) == 0:
                                 continue
+                        # Trans MR# exists: pre-resolved just above.
+                        if trans_mr_only and not t.get("_has_delivery_mr"):
+                            continue
 
                         total_matched += 1
 
@@ -1497,7 +1593,10 @@ class MRPipelineTab:
                 if state_cached is not None
                 else ("…" if can_resolve else "—")
             )
-            delivery = _delivery.delivery_from_task(t)
+            # ``_delivery_ref`` is present when the "Trans MR# exists" filter
+            # already resolved this task — reuse it so Trans MR# paints with
+            # the row instead of flickering through "…".
+            delivery = t.get("_delivery_ref") or _delivery.delivery_from_task(t)
             delivery_key = None
             if delivery is not None:
                 delivery_display = delivery.iid
