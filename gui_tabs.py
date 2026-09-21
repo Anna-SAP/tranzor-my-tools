@@ -216,15 +216,18 @@ class MRPipelineTab:
     # Single source of truth for the task-list table columns. ``src_strings``
     # (distinct en-US source-string count) sits between Status and Avg Score
     # so the two per-task metrics read together. Source MR and its live GitLab
-    # state sit as a pair (``mr``, ``mr_status``); the follow-up translation
-    # MR and *its* live GitLab state sit as the next pair (``delivery_mr``,
-    # ``delivery_mr_status``). ``jira`` and ``title`` follow so same-origin
-    # tasks still group together. These insertions keep the critical
-    # positional reads elsewhere valid (project @ idx 1 for the post-edit
-    # prefix, MR# @ idx 2 for the export filename).
+    # state sit as a triple (``mr``, ``mr_branch``, ``mr_status``); the
+    # follow-up translation MR, its target branch and *its* live GitLab state
+    # sit as the next triple (``delivery_mr``, ``delivery_branch``,
+    # ``delivery_mr_status``). Reading the two branch cells together shows
+    # where the source landed and where the translation followed it.
+    # ``jira`` and ``title`` follow so same-origin tasks still group
+    # together. These insertions keep the critical positional reads elsewhere
+    # valid (project @ idx 1 for the post-edit prefix, MR# @ idx 2 for the
+    # export filename); everything else resolves columns by name.
     # ``ended`` is Tranzor ``updated_at`` (no separate completed_at exists).
-    _MR_COLUMNS = ("idx", "project", "mr", "mr_status",
-                   "delivery_mr", "delivery_mr_status",
+    _MR_COLUMNS = ("idx", "project", "mr", "mr_branch", "mr_status",
+                   "delivery_mr", "delivery_branch", "delivery_mr_status",
                    "jira", "title",
                    "release", "status", "src_strings", "avg_score",
                    "created", "ended", "duration")
@@ -643,8 +646,10 @@ class MRPipelineTab:
         cols = self._MR_COLUMNS
         self.mr_tree = ttk.Treeview(tree_frame, columns=cols, show="headings",
                                      style="Summary.Treeview", height=14, selectmode="browse")
-        col_widths = {"idx": 35, "project": 140, "mr": 60, "mr_status": 90,
-                      "delivery_mr": 120, "delivery_mr_status": 110,
+        col_widths = {"idx": 35, "project": 140, "mr": 60,
+                      "mr_branch": 130, "mr_status": 90,
+                      "delivery_mr": 120, "delivery_branch": 130,
+                      "delivery_mr_status": 110,
                       "jira": 90, "title": 260, "release": 60, "status": 80,
                       "src_strings": 90, "avg_score": 70, "created": 185,
                       "ended": 185, "duration": 70}
@@ -655,7 +660,8 @@ class MRPipelineTab:
                 c,
                 width=width,
                 minwidth=140 if is_title else width,
-                anchor="w" if c in ("project", "title") else "center",
+                anchor=("w" if c in ("project", "title", "mr_branch",
+                                 "delivery_branch") else "center"),
                 # Only Title absorbs spare horizontal space and contracts
                 # with the window; the compact metric columns stay stable.
                 stretch=is_title,
@@ -673,10 +679,22 @@ class MRPipelineTab:
             "post_edit", background="#3a2e1f", foreground="#fde68a",
         )
 
-        scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=self.mr_tree.yview)
-        self.mr_tree.configure(yscrollcommand=scroll.set)
-        self.mr_tree.pack(side="left", fill="both", expand=True)
-        scroll.pack(side="right", fill="y")
+        # The two branch columns pushed the fixed-width total past what a
+        # 1080p window can show, and a Treeview with no horizontal scrollbar
+        # simply clips whatever does not fit — Duration would fall off the
+        # right edge with no way to reach it. Grid (not pack) so the two
+        # scrollbars can share the frame without fighting over the corner.
+        scroll = ttk.Scrollbar(tree_frame, orient="vertical",
+                               command=self.mr_tree.yview)
+        hscroll = ttk.Scrollbar(tree_frame, orient="horizontal",
+                                command=self.mr_tree.xview)
+        self.mr_tree.configure(yscrollcommand=scroll.set,
+                               xscrollcommand=hscroll.set)
+        self.mr_tree.grid(row=0, column=0, sticky="nsew")
+        scroll.grid(row=0, column=1, sticky="ns")
+        hscroll.grid(row=1, column=0, sticky="ew")
+        tree_frame.rowconfigure(0, weight=1)
+        tree_frame.columnconfigure(0, weight=1)
 
         # A ttk.Treeview cannot host a real HTML <a> element, so make the
         # JIRA / MR# / Trans MR# cells themselves the hyperlink hit targets.
@@ -1889,6 +1907,16 @@ class MRPipelineTab:
                 if state_cached is not None
                 else ("…" if can_resolve else "—")
             )
+            # Target branch rides along on the same GitLab MR response as
+            # state, so it resolves on exactly the same schedule.
+            branch_cached = (_jira.get_cached_branch(*jira_key)
+                             if jira_key is not None else None)
+            if branch_cached is None and metadata_cached is not None:
+                branch_cached = metadata_cached.target_branch
+            mr_branch_display = (
+                (branch_cached or "—") if branch_cached is not None
+                else ("…" if can_resolve else "—")
+            )
             # ``_delivery_ref`` is present when the "Trans MR# exists" filter
             # already resolved this task — reuse it so Trans MR# paints with
             # the row instead of flickering through "…".
@@ -1908,12 +1936,23 @@ class MRPipelineTab:
                     delivery_status_display = "…"
                 else:
                     delivery_status_display = "—"
+                delivery_branch = delivery.target_branch or (
+                    _jira.get_cached_branch(*delivery_key)
+                    if delivery_key is not None else None)
+                if delivery_branch:
+                    delivery_branch_display = delivery_branch
+                elif jira_fetchable:
+                    delivery_branch_display = "…"
+                else:
+                    delivery_branch_display = "—"
             elif can_resolve:
                 delivery_display = "…"
                 delivery_status_display = "…"
+                delivery_branch_display = "…"
             else:
                 delivery_display = "—"
                 delivery_status_display = "—"
+                delivery_branch_display = "—"
             source_url = (
                 str(t.get("mr_link") or "").strip()
                 or _delivery.gitlab_mr_url(raw_project, mr_iid)
@@ -1924,8 +1963,10 @@ class MRPipelineTab:
                 "", "end",
                 iid=task_id or None,
                 values=(
-                    idx, display_project, mr_iid, mr_status_display,
-                    delivery_display, delivery_status_display,
+                    idx, display_project, mr_iid,
+                    mr_branch_display, mr_status_display,
+                    delivery_display, delivery_branch_display,
+                    delivery_status_display,
                     jira_display, title_display,
                     t.get("release", ""), t.get("status", ""),
                     src_display,
@@ -1940,6 +1981,8 @@ class MRPipelineTab:
                 "source_url": source_url,
                 "delivery_iid": delivery.iid if delivery is not None else None,
                 "delivery_url": delivery_url,
+                "delivery_branch": (
+                    delivery.target_branch if delivery is not None else ""),
                 "task_id": task_id,
             }
             if delivery_key is not None:
@@ -2350,9 +2393,14 @@ class MRPipelineTab:
             (_jira.display_mr_state(raw_state) or "—")
             if raw_state is not None else "—"
         )
+        branch = (metadata.target_branch if metadata is not None else None)
+        if branch is None:
+            branch = _jira.get_cached_branch(*key)
+        branch_display = (branch or "—") if branch is not None else "—"
         for iid in self._jira_row_iids.get(key, ()):
             try:
                 self.mr_tree.set(iid, "jira", jira or "—")
+                self.mr_tree.set(iid, "mr_branch", branch_display)
                 self.mr_tree.set(iid, "mr_status", status_display)
                 # Preserve an authoritative task-payload title when only its
                 # missing JIRA ID required the fallback GitLab lookup.
@@ -2365,8 +2413,8 @@ class MRPipelineTab:
         # If the user sorted a still-loading metadata column, fold the final
         # values into the requested order once all workers have returned.
         if self._mr_sort and self._mr_sort[0] in (
-                "jira", "title", "mr_status", "delivery_mr",
-                "delivery_mr_status"):
+                "jira", "title", "mr_branch", "mr_status", "delivery_mr",
+                "delivery_branch", "delivery_mr_status"):
             self._apply_sort(*self._mr_sort)
         # Source-MR state is now known: merged sources may have a translation
         # import MR, and a known import MR may have a later Language Lead
@@ -2471,11 +2519,14 @@ class MRPipelineTab:
             meta["delivery_iid"] = None
             meta["delivery_url"] = ""
             meta["delivery_state"] = ""
+            meta["delivery_branch"] = ""
             meta["fix_iid"] = None
             meta["fix_url"] = ""
             meta["fix_state"] = ""
+            meta["fix_branch"] = ""
         try:
             self.mr_tree.set(tree_iid, "delivery_mr", "—")
+            self.mr_tree.set(tree_iid, "delivery_branch", "—")
             self.mr_tree.set(tree_iid, "delivery_mr_status", "—")
         except tk.TclError:
             pass
@@ -2496,15 +2547,18 @@ class MRPipelineTab:
             meta["delivery_iid"] = import_ref.iid
             meta["delivery_url"] = import_ref.url
             meta["delivery_state"] = import_ref.state
+            meta["delivery_branch"] = import_ref.target_branch
         if (fix_ref is not None
                 and fix_ref.iid != meta.get("delivery_iid")):
             meta["fix_iid"] = fix_ref.iid
             meta["fix_url"] = fix_ref.url
             meta["fix_state"] = fix_ref.state
+            meta["fix_branch"] = fix_ref.target_branch
         else:
             meta["fix_iid"] = None
             meta["fix_url"] = ""
             meta["fix_state"] = ""
+            meta["fix_branch"] = ""
         self._paint_delivery_row(tree_iid)
 
     def _paint_delivery_row(self, tree_iid):
@@ -2513,15 +2567,29 @@ class MRPipelineTab:
             meta.get("delivery_iid"), meta.get("fix_iid"))
         current_iid = _delivery.current_trans_mr_iid(
             meta.get("delivery_iid"), meta.get("fix_iid"))
-        current_state = meta.get("fix_state") or meta.get("delivery_state")
+        # Branch and status both describe the *current* Trans MR — the fix MR
+        # when the cell reads "4213 → 4214", the import MR otherwise.
+        following_fix = (meta.get("fix_iid") is not None
+                         and meta.get("fix_iid") == current_iid)
+        current_state = (meta.get("fix_state") if following_fix
+                         else meta.get("delivery_state"))
+        current_branch = (meta.get("fix_branch") if following_fix
+                          else meta.get("delivery_branch"))
         if current_state:
             status_display = _jira.display_mr_state(current_state) or "—"
         elif current_iid is not None:
             status_display = "…"
         else:
             status_display = "—"
+        if current_branch:
+            branch_display = current_branch
+        elif current_iid is not None:
+            branch_display = "…"
+        else:
+            branch_display = "—"
         try:
             self.mr_tree.set(tree_iid, "delivery_mr", display)
+            self.mr_tree.set(tree_iid, "delivery_branch", branch_display)
             self.mr_tree.set(tree_iid, "delivery_mr_status", status_display)
         except tk.TclError:
             return
@@ -2607,18 +2675,25 @@ class MRPipelineTab:
                 # Transient fetch failure. Keep the last known state rather
                 # than knocking a correct cell back to "—".
                 continue
+            branch = _jira.get_cached_branch(*key) or ""
             if meta.get("fix_iid") == current:
                 meta["fix_state"] = raw_state or ""
+                if branch:
+                    meta["fix_branch"] = branch
             elif meta.get("delivery_iid") == current:
                 meta["delivery_state"] = raw_state or ""
+                if branch:
+                    meta["delivery_branch"] = branch
             try:
                 self.mr_tree.set(iid, "delivery_mr_status", status_display)
+                if branch:
+                    self.mr_tree.set(iid, "delivery_branch", branch)
             except tk.TclError:
                 pass
 
     def _on_delivery_prefetch_done(self):
         if self._mr_sort and self._mr_sort[0] in (
-                "delivery_mr", "delivery_mr_status"):
+                "delivery_mr", "delivery_branch", "delivery_mr_status"):
             self._apply_sort(*self._mr_sort)
 
     # ------------------------------------------------------------------
@@ -2714,6 +2789,16 @@ class MRPipelineTab:
         if column == self._col_ident("delivery_mr"):
             text = self._delivery_tooltip_text(iid)
             return (iid, text) if text else None
+        # Branch names routinely outrun their column
+        # ("eu_mqa_bug_challenge-auto-deploy"), and a half-shown branch is
+        # worse than none — hovering gives the full value.
+        for name in ("mr_branch", "delivery_branch"):
+            if column == self._col_ident(name):
+                try:
+                    text = str(self.mr_tree.set(iid, name) or "")
+                except tk.TclError:
+                    return None
+                return (iid, text) if text not in ("", "—", "…") else None
         return None
 
     def _delivery_tooltip_text(self, iid):

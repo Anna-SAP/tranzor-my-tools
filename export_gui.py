@@ -680,6 +680,8 @@ STRINGS = {
         "mr_col_mr":        "MR#",
         "mr_col_mr_status": "MR Status",
         "mr_col_delivery_mr": "Trans MR#",
+        "mr_col_mr_branch":   "MR Branch",
+        "mr_col_delivery_branch": "Trans MR Branch",
         "mr_col_delivery_mr_status": "Trans MR Status",
         "mr_trans_mr_tooltip": (
             "Translations imported in !{import_iid} ({import_status}). "
@@ -876,6 +878,8 @@ STRINGS = {
         "mr_col_mr":        "MR#",
         "mr_col_mr_status": "MR 状态",
         "mr_col_delivery_mr": "翻译 MR#",
+        "mr_col_mr_branch":   "MR 目标分支",
+        "mr_col_delivery_branch": "翻译 MR 目标分支",
         "mr_col_delivery_mr_status": "翻译 MR 状态",
         "mr_trans_mr_tooltip": (
             "翻译导入 !{import_iid}（{import_status}）。"
