@@ -55,6 +55,7 @@ class DeliveryRef:
     iid: int
     url: str = ""
     state: str = ""
+    target_branch: str = ""
 
 
 def parse_mr_iid(value) -> Optional[int]:
@@ -302,7 +303,10 @@ def delivery_ref_from_mr(mr, fallback_project="") -> Optional[DeliveryRef]:
         return None
     url = str(mr.get("web_url") or "") or gitlab_mr_url(project, iid)
     state = "" if mr.get("state") is None else str(mr.get("state"))
-    return DeliveryRef(project_id=project, iid=iid, url=url, state=state)
+    branch = ("" if mr.get("target_branch") is None
+              else str(mr.get("target_branch")))
+    return DeliveryRef(project_id=project, iid=iid, url=url, state=state,
+                       target_branch=branch)
 
 
 def _project_path_from_mr(mr, iid) -> str:

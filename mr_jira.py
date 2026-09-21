@@ -74,11 +74,13 @@ class JiraMetadata:
 
     ``state`` is GitLab's raw value (``opened`` / ``merged`` / …). The GUI
     paints :func:`display_mr_state` of that string in the MR Status column.
+    ``target_branch`` is where the MR lands — the MR Branch column.
     """
 
     jira_id: str
     title: str
     state: str = ""
+    target_branch: str = ""
 
 
 def display_mr_state(raw) -> str:
@@ -189,6 +191,7 @@ def jira_browse_url(value) -> str:
 _cache: dict[tuple[str, int], str] = {}
 _title_cache: dict[tuple[str, int], str] = {}
 _state_cache: dict[tuple[str, int], str] = {}
+_branch_cache: dict[tuple[str, int], str] = {}
 _cache_lock = threading.Lock()
 
 
@@ -230,6 +233,16 @@ def get_cached_state(project_id, mr_iid) -> Optional[str]:
         return _state_cache.get(key)
 
 
+def get_cached_branch(project_id, mr_iid) -> Optional[str]:
+    """Return the cached MR target branch, including ``""`` if fetched but
+    the payload had none. Never-fetched → ``None``."""
+    key = _normalize_key(project_id, mr_iid)
+    if key is None:
+        return None
+    with _cache_lock:
+        return _branch_cache.get(key)
+
+
 def get_cached_metadata(project_id, mr_iid) -> Optional[JiraMetadata]:
     """Return metadata only when both ID and title were resolved together."""
     key = _normalize_key(project_id, mr_iid)
@@ -239,7 +252,8 @@ def get_cached_metadata(project_id, mr_iid) -> Optional[JiraMetadata]:
         if key not in _cache or key not in _title_cache:
             return None
         return JiraMetadata(
-            _cache[key], _title_cache[key], _state_cache.get(key, ""))
+            _cache[key], _title_cache[key], _state_cache.get(key, ""),
+            _branch_cache.get(key, ""))
 
 
 def can_fetch() -> bool:
@@ -261,7 +275,8 @@ def _metadata_from_caches(key) -> Optional[JiraMetadata]:
     if key not in _cache or key not in _title_cache:
         return None
     return JiraMetadata(
-        _cache[key], _title_cache[key], _state_cache.get(key, ""))
+        _cache[key], _title_cache[key], _state_cache.get(key, ""),
+        _branch_cache.get(key, ""))
 
 
 def fetch_jira_metadata(project_id, mr_iid, client=None, *,
@@ -314,11 +329,14 @@ def fetch_jira_metadata(project_id, mr_iid, client=None, *,
     title = extract_jira_title(raw_title, jira)
     raw_state = mr.get("state")
     state = "" if raw_state is None else str(raw_state)
+    raw_branch = mr.get("target_branch")
+    branch = "" if raw_branch is None else str(raw_branch)
     with _cache_lock:
         _cache[key] = jira
         _title_cache[key] = title
         _state_cache[key] = state
-    return JiraMetadata(jira, title, state)
+        _branch_cache[key] = branch
+    return JiraMetadata(jira, title, state, branch)
 
 
 def fetch_jira_id(project_id, mr_iid, client=None) -> Optional[str]:
@@ -410,14 +428,20 @@ def find_merge_requests(jira_id, project_id=None, client=None):
                 raw_state = mr.get("state")
                 _state_cache[(project, iid)] = (
                     "" if raw_state is None else str(raw_state))
+            if "target_branch" in mr:
+                raw_branch = mr.get("target_branch")
+                _branch_cache[(project, iid)] = (
+                    "" if raw_branch is None else str(raw_branch))
     return matches
 
 
 def clear_cache() -> int:
     """清空缓存，返回清掉的条数。目前只有测试隔离在用。"""
     with _cache_lock:
-        n = len(set(_cache) | set(_title_cache) | set(_state_cache))
+        n = len(set(_cache) | set(_title_cache) | set(_state_cache)
+                | set(_branch_cache))
         _cache.clear()
         _title_cache.clear()
         _state_cache.clear()
+        _branch_cache.clear()
         return n

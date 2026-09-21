@@ -473,25 +473,33 @@ class ColumnLayoutTests(unittest.TestCase):
         from gui_tabs import MRPipelineTab
         cols = MRPipelineTab._MR_COLUMNS
         # Positional reads elsewhere in gui_tabs: project @ 1 (post-edit
-        # prefix), mr @ 2 (export filename). Source MR# + MR Status form a
-        # pair; Trans MR# + Trans MR Status form the next pair; JIRA and
-        # Title follow immediately after.
+        # prefix), mr @ 2 (export filename). Each MR then reads as a triple
+        # — number, target branch, live state — so the source MR's landing
+        # branch sits next to the translation MR's. JIRA and Title follow.
         self.assertEqual(cols.index("project"), 1)
         self.assertEqual(cols.index("mr"), 2)
-        self.assertEqual(cols.index("mr_status"), 3)
-        self.assertEqual(cols.index("delivery_mr"), 4)
-        self.assertEqual(cols.index("delivery_mr_status"), 5)
-        self.assertEqual(cols.index("jira"), 6)
-        self.assertEqual(cols.index("title"), 7)
-        self.assertEqual(cols.index("mr_status"), cols.index("mr") + 1)
+        self.assertEqual(cols.index("mr_branch"), 3)
+        self.assertEqual(cols.index("mr_status"), 4)
+        self.assertEqual(cols.index("delivery_mr"), 5)
+        self.assertEqual(cols.index("delivery_branch"), 6)
+        self.assertEqual(cols.index("delivery_mr_status"), 7)
+        self.assertEqual(cols.index("jira"), 8)
+        self.assertEqual(cols.index("title"), 9)
+        self.assertEqual(cols.index("mr_branch"), cols.index("mr") + 1)
+        self.assertEqual(cols.index("mr_status"), cols.index("mr_branch") + 1)
         self.assertEqual(
-            cols.index("delivery_mr_status"), cols.index("delivery_mr") + 1)
+            cols.index("delivery_branch"), cols.index("delivery_mr") + 1)
+        self.assertEqual(
+            cols.index("delivery_mr_status"),
+            cols.index("delivery_branch") + 1)
         # Ended sits between Created and Duration (updated_at → end clock).
         self.assertEqual(cols.index("ended"), cols.index("created") + 1)
         self.assertEqual(cols.index("duration"), cols.index("ended") + 1)
         # GitLab metadata columns sort as text, not as numbers.
         self.assertIn("delivery_mr", MRPipelineTab._MR_NUMERIC_COLS)
+        self.assertNotIn("mr_branch", MRPipelineTab._MR_NUMERIC_COLS)
         self.assertNotIn("mr_status", MRPipelineTab._MR_NUMERIC_COLS)
+        self.assertNotIn("delivery_branch", MRPipelineTab._MR_NUMERIC_COLS)
         self.assertNotIn("delivery_mr_status", MRPipelineTab._MR_NUMERIC_COLS)
         self.assertNotIn("jira", MRPipelineTab._MR_NUMERIC_COLS)
         self.assertNotIn("title", MRPipelineTab._MR_NUMERIC_COLS)
@@ -513,6 +521,12 @@ class ColumnLayoutTests(unittest.TestCase):
             STRINGS["en"]["mr_col_delivery_mr_status"], "Trans MR Status")
         self.assertEqual(
             STRINGS["zh"]["mr_col_delivery_mr_status"], "翻译 MR 状态")
+        self.assertEqual(STRINGS["en"]["mr_col_mr_branch"], "MR Branch")
+        self.assertEqual(
+            STRINGS["en"]["mr_col_delivery_branch"], "Trans MR Branch")
+        self.assertEqual(STRINGS["zh"]["mr_col_mr_branch"], "MR 目标分支")
+        self.assertEqual(
+            STRINGS["zh"]["mr_col_delivery_branch"], "翻译 MR 目标分支")
         self.assertEqual(STRINGS["en"]["mr_col_ended"], "Ended")
         self.assertEqual(STRINGS["zh"]["mr_col_ended"], "结束时间")
 
