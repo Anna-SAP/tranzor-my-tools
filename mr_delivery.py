@@ -318,27 +318,45 @@ def _project_path_from_mr(mr, iid) -> str:
     return ""
 
 
-def find_delivery_mr(project_id, source_iid, task_id=None,
-                     client=None) -> Optional[DeliveryRef]:
-    """GitLab title-search fallback when the task payload has no delivery MR."""
+def find_follow_up_mrs(project_id, source_iid, task_id=None, client=None):
+    """One GitLab title search → ``(import_ref, fix_ref)`` for a source MR.
+
+    ``import_ref`` is the original translation-import MR; ``fix_ref`` is a
+    later Language Lead fix MR on ``tranzor-mr-fix-*``. Either may be ``None``
+    independently: a task counts as *having* a translation MR when either one
+    is set, which is exactly what the Trans MR# cell renders. Any failure (no
+    token, no project, network error) degrades to ``(None, None)``.
+    """
     pid = str(project_id or "").strip()
     src = parse_mr_iid(source_iid)
     if not pid or src is None:
-        return None
+        return (None, None)
     if client is None:
         client = _shared_client()
         if client is None:
-            return None
+            return (None, None)
     try:
         if not client.has_token():
-            return None
+            return (None, None)
         mrs = client.list_merge_requests(
             DELIVERY_SEARCH_TERM.format(iid=src),
             project_id=pid, in_field="title")
     except Exception:
-        return None
-    picked = pick_delivery_mr(mrs, src, task_id=task_id)
-    return delivery_ref_from_mr(picked, fallback_project=pid)
+        return (None, None)
+    import_ref = delivery_ref_from_mr(
+        pick_delivery_mr(mrs, src, task_id=task_id), fallback_project=pid)
+    fix_ref = delivery_ref_from_mr(
+        pick_fix_mr(mrs, src,
+                    exclude_iid=import_ref.iid if import_ref else None),
+        fallback_project=pid)
+    return (import_ref, fix_ref)
+
+
+def find_delivery_mr(project_id, source_iid, task_id=None,
+                     client=None) -> Optional[DeliveryRef]:
+    """GitLab title-search fallback when the task payload has no delivery MR."""
+    return find_follow_up_mrs(
+        project_id, source_iid, task_id=task_id, client=client)[0]
 
 
 def expand_mr_iid_filter(mr_iid, project_ids=None, client=None) -> set:
