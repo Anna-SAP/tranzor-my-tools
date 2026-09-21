@@ -702,6 +702,10 @@ STRINGS = {
                                  "Needs a GitLab token."),
         "mr_trans_mr_token_required": ("A GitLab token is required to filter by "
                                        "Trans MR#."),
+        "mr_stop_scan": "■ Stop",
+        "mr_scan_progress": "🔀 Scanning {scanned}/{total} tasks — {matched} with a Trans MR",
+        "mr_scan_done": "🔀 {matched} of {scanned} scanned tasks have a Trans MR",
+        "mr_scan_stopped": "🔀 Stopped — {matched} of {scanned} scanned tasks have a Trans MR",
         "summary_post_edit_legend": "✏️ = task contains at least one human-edited translation (post-edit)",
         # Quality Overview tab
         "qa_language":      "Language",
@@ -885,6 +889,10 @@ STRINGS = {
         "mr_trans_mr_only": "🔀 仅含翻译 MR",
         "mr_trans_mr_only_tip": "只保留翻译已通过后续 MR 交付的任务（Trans MR# 不为空）。需要 GitLab token。",
         "mr_trans_mr_token_required": "按 Trans MR# 筛选需要配置 GitLab token。",
+        "mr_stop_scan": "■ 停止",
+        "mr_scan_progress": "🔀 已扫描 {scanned}/{total} 个任务 — {matched} 个含翻译 MR",
+        "mr_scan_done": "🔀 已扫描 {scanned} 个任务，{matched} 个含翻译 MR",
+        "mr_scan_stopped": "🔀 已停止 — 已扫描 {scanned} 个任务，{matched} 个含翻译 MR",
         "summary_post_edit_legend": "✏️ = 该任务至少含一条经过人工编辑（post-edit）的翻译",
         # Quality Overview tab
         "qa_language":      "语言",
