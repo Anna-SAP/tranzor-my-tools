@@ -302,6 +302,24 @@ class MRPipelineTab:
         # ("All"), matching the historical empty Combobox value. The
         # Combobox StringVar is display-only (one name, or "N selected").
         self._mr_selected_projects = []
+        # ── Streaming scan state (the "Trans MR# exists" path) ──────────
+        # That filter is a needle-in-haystack scan: ~1% of tasks qualify, so
+        # a page costs thousands of task probes. It streams matches to the
+        # table as it finds them instead of blocking on a full page.
+        # Bumped per load; every after() callback carries the generation it
+        # was queued under so a superseded scan cannot paint into a newer one.
+        self._fetch_generation = 0
+        # threading.Event while a streaming scan runs; Search doubles as Stop.
+        self._scan_cancel = None
+        # Replaces the "Loading…" text while a scan reports progress.
+        self._scan_progress_text = None
+        # Source MRs GitLab could not resolve (404 / no access) during this
+        # scan. mr_jira deliberately never caches a failed lookup so transient
+        # errors self-heal, but inside one scan the same dead MR recurs often
+        # enough that re-asking dominates the runtime. Scan-scoped, so the
+        # next Search still retries.
+        self._delivery_probe_misses: set[tuple[str, int]] = set()
+        self._delivery_probe_lock = threading.Lock()
         self._build(parent)
 
     def _t(self, key):
@@ -1000,12 +1018,27 @@ class MRPipelineTab:
             pass
 
     def _on_search(self):
+        # While a streaming scan is running this button is the Stop button
+        # (see _load_tasks / _set_scan_button). Keeping one control avoids a
+        # second widget on an already busy filter row.
+        scan = getattr(self, "_scan_cancel", None)
+        if scan is not None:
+            scan.set()
+            return
         # An explicit re-query means "give me fresh data" — drop stale ✏️
         # answers so a Language Lead's just-made fixes surface (see
         # _invalidate_post_edit_cache).
         self._invalidate_post_edit_cache()
         self.mr_page = 0
         self._load_tasks()
+
+    def _set_scan_button(self, scanning):
+        """Flip the Search button between Search and Stop."""
+        try:
+            self.btn_mr_search.configure(
+                text=self._t("mr_stop_scan" if scanning else "mr_search"))
+        except Exception:
+            pass
 
     def _selected_mr_projects(self):
         """Currently checked Project ids. Empty = no project filter."""
@@ -1116,6 +1149,10 @@ class MRPipelineTab:
         if self.mr_loading:
             return
         self.mr_loading = True
+        # Supersede anything a previous load still has queued on the Tk loop.
+        self._fetch_generation += 1
+        self._scan_progress_text = None
+        self._delivery_probe_misses = set()
         # Show prominent loading overlay in the data grid area
         self.mr_loading_overlay.configure(text=self._t("status_loading") + "...")
         self.mr_loading_overlay.place(relx=0.5, rely=0.4, anchor="center")
@@ -1132,7 +1169,9 @@ class MRPipelineTab:
             return
         self._loading_dot_count = (self._loading_dot_count % 3) + 1
         dots = "." * self._loading_dot_count
-        base = self._t("status_loading")
+        # A streaming scan reports real progress; show that instead of a
+        # bare "Loading" the user cannot read anything into.
+        base = self._scan_progress_text or self._t("status_loading")
         self.lbl_mr_status_bar.configure(text=f"{base}{dots}")
         self.mr_loading_overlay.configure(text=f"{base}{dots}")
         self._loading_anim_id = self.parent.after(500, self._animate_loading)
@@ -1169,6 +1208,64 @@ class MRPipelineTab:
             self.btn_mr_next.configure(state=state)
             self.btn_mr_load_more.configure(state=state)
 
+    def _warm_delivery_probe(self, tasks):
+        """Resolve each distinct source MR once before the per-task probe.
+
+        :meth:`_check_task_delivery_mr` runs per task, but tasks routinely
+        share a source MR — one MR triggers a task per language. Pointing 8
+        workers straight at the task list makes them all miss the same cache
+        key simultaneously, and mr_jira deliberately never caches a *failed*
+        lookup, so an MR GitLab cannot resolve (404 / no access) is re-fetched
+        on every encounter. Measured on a real page: 62 task probes over only
+        35 distinct MRs, 32 of those calls spent on 15 dead MRs.
+
+        Warming distinct keys first collapses both into one call each; the
+        per-task probe then runs against warm caches and keeps its task-level
+        precision (``task_digest`` still picks the right MR when one source
+        was translated more than once).
+        """
+        keys, seen = [], set()
+        for t in tasks:
+            project = str(t.get("project_id") or "").strip()
+            src = _delivery.parse_mr_iid(t.get("merge_request_iid"))
+            if not project or src is None:
+                continue
+            key = (project, src)
+            if key in seen:
+                continue
+            seen.add(key)
+            if self._probe_is_dead(key) or _jira.get_cached_state(*key) is not None:
+                continue
+            keys.append(key)
+        if not keys:
+            return
+
+        def _warm(key):
+            try:
+                resolved = _jira.fetch_jira_metadata(*key)
+            except Exception:
+                resolved = None
+            if resolved is None:
+                self._probe_mark_dead(key)
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(_warm, keys))
+
+    def _probe_is_dead(self, key) -> bool:
+        """True when this scan already found that source MR unresolvable."""
+        lock = getattr(self, "_delivery_probe_lock", None)
+        if lock is None:
+            return False
+        with lock:
+            return key in self._delivery_probe_misses
+
+    def _probe_mark_dead(self, key):
+        lock = getattr(self, "_delivery_probe_lock", None)
+        if lock is None:
+            return
+        with lock:
+            self._delivery_probe_misses.add(key)
+
     def _check_task_delivery_mr(self, t):
         """Resolve whether one task has a translation (Trans) MR.
 
@@ -1199,6 +1296,8 @@ class MRPipelineTab:
         project = str(t.get("project_id") or "").strip()
         source_iid = _delivery.parse_mr_iid(t.get("merge_request_iid"))
         if not project or source_iid is None:
+            return
+        if self._probe_is_dead((project, source_iid)):
             return
         try:
             # Not force_refresh: this is a coarse "has it merged yet" gate,
@@ -1250,6 +1349,7 @@ class MRPipelineTab:
             t["_translations_count"] = 0
 
     def _fetch_tasks(self):
+        gen = self._fetch_generation
         try:
             projs = self._selected_mr_projects()
             proj_set = set(projs)
@@ -1270,6 +1370,13 @@ class MRPipelineTab:
             trans_mr_only = self.mr_trans_mr_only_var.get()
             if trans_mr_only and not _jira.can_fetch():
                 raise RuntimeError(self._t("mr_trans_mr_token_required"))
+            # Only the Trans MR# path streams: it is the one filter whose
+            # hit rate (~1%) makes a page cost thousands of probes. Every
+            # other path fills a page in one or two batches, where streaming
+            # would just add flicker.
+            if trans_mr_only:
+                self._scan_cancel = threading.Event()
+                self.parent.after(0, self._set_scan_button, True)
             matching_mr_iids = set()
             if mr_iid_filter:
                 expand_projects = (
@@ -1383,7 +1490,17 @@ class MRPipelineTab:
                 total_matched = 0
                 total_scanned = 0
 
+                # Streaming bookkeeping: rows are handed to the table batch
+                # by batch, so track where the next chunk's "#" column starts
+                # and whether the first chunk has replaced the old rows yet.
+                stream_offset = base_offset
+                streamed_any = False
+                cancelled = False
+
                 while True:
+                    if self._scan_cancel is not None and self._scan_cancel.is_set():
+                        cancelled = True
+                        break
                     api_total, batch = mr_api.fetch_mr_tasks(
                         release=rel, status=status,
                         limit=batch_size, offset=offset,
@@ -1423,10 +1540,12 @@ class MRPipelineTab:
                             or t.get("_translations_count", 0) > 0
                         ]
                         if pending:
+                            self._warm_delivery_probe(pending)
                             with ThreadPoolExecutor(max_workers=8) as pool:
                                 list(pool.map(
                                     self._check_task_delivery_mr, pending))
 
+                    chunk = []
                     for t in batch:
                         # Hide empty MRs: use pre-fetched count from parallel check
                         if hide_empty:
@@ -1445,8 +1564,25 @@ class MRPipelineTab:
 
                         if len(collected) < target:
                             collected.append(t)
+                            chunk.append(t)
 
                     offset += batch_size
+
+                    if trans_mr_only:
+                        # Hand this batch's matches to the table now. The
+                        # first chunk replaces the previous result set; the
+                        # rest extend it, all forming one page (see the
+                        # ``streaming`` branch of _on_tasks_loaded).
+                        if chunk:
+                            self.parent.after(
+                                0, self._on_tasks_loaded, api_total, chunk,
+                                max(total_matched, len(collected)),
+                                streamed_any or append, stream_offset, gen)
+                            stream_offset += len(chunk)
+                            streamed_any = True
+                        self.parent.after(
+                            0, self._on_scan_progress, gen,
+                            total_scanned, api_total, total_matched)
 
                     # Stop as soon as we have enough items for this page
                     if len(collected) >= target:
@@ -1460,16 +1596,31 @@ class MRPipelineTab:
                 else:
                     estimated_total = total_matched
 
-                self.parent.after(0, self._on_tasks_loaded,
-                                  api_total, collected, estimated_total,
-                                  append, base_offset)
+                if trans_mr_only:
+                    # Rows are already on screen; just close the scan out.
+                    self.parent.after(
+                        0, self._on_scan_done, gen, api_total, estimated_total,
+                        total_scanned, total_matched, cancelled,
+                        append, streamed_any)
+                else:
+                    self.parent.after(0, self._on_tasks_loaded,
+                                      api_total, collected, estimated_total,
+                                      append, base_offset, gen)
         except Exception as e:
+            self._scan_cancel = None
+            self.parent.after(0, self._set_scan_button, False)
             self.parent.after(0, self._on_tasks_error, str(e))
 
     def _on_tasks_loaded(self, api_total, tasks, filtered_total,
-                          append=False, base_offset=0):
-        self.mr_loading = False
-        self._stop_loading_anim()
+                          append=False, base_offset=0, gen=None):
+        # A streaming scan calls this once per batch while still running, so
+        # the "load finished" bookkeeping moves to _on_scan_done.
+        streaming = getattr(self, "_scan_cancel", None) is not None
+        if gen is not None and gen != self._fetch_generation:
+            return  # superseded by a newer load
+        if not streaming:
+            self.mr_loading = False
+            self._stop_loading_anim()
         self.mr_total = api_total
         self.mr_filtered_total = filtered_total
 
@@ -1709,11 +1860,29 @@ class MRPipelineTab:
         if self._mr_sort is not None:
             self._apply_sort(*self._mr_sort)
 
-        if append:
+        if append and not streaming:
             # We just appended one more page worth of rows; track that
             # so Prev/Next/Load More can compute the correct boundary.
+            # Streaming chunks all build a single page — _on_scan_done
+            # bumps the counter once for the whole scan instead.
             self.mr_extra_pages += 1
 
+        self._refresh_pagination_controls(filtered_total)
+        if not streaming:
+            self.lbl_mr_status_bar.configure(text=self._t("status_ready"))
+
+        # Re-apply the "✏️ only" view filter to the freshly rendered rows
+        # (hides pending / non-edit rows; the prefetch above reveals the
+        # post-edits as their checks confirm).
+        if self.mr_post_edit_only_var.get():
+            self._apply_post_edit_filter()
+
+    def _refresh_pagination_controls(self, filtered_total):
+        """Repaint the page label, Prev/Next/Load More and the export buttons.
+
+        Shared by the one-shot render and the streaming scan's finalizer, so
+        both agree on the page boundary maths.
+        """
         # Pagination — use filtered_total when filters are active
         effective_total = filtered_total
         # items_shown_max == upper bound on the items currently visible
@@ -1746,13 +1915,50 @@ class MRPipelineTab:
             self.btn_mr_next.configure(state="normal" if has_next else "disabled")
             self.btn_mr_load_more.configure(state="normal" if has_more else "disabled")
         self._set_mr_export_buttons_enabled(has_rows)
-        self.lbl_mr_status_bar.configure(text=self._t("status_ready"))
 
-        # Re-apply the "✏️ only" view filter to the freshly rendered rows
-        # (hides pending / non-edit rows; the prefetch above reveals the
-        # post-edits as their checks confirm).
-        if self.mr_post_edit_only_var.get():
-            self._apply_post_edit_filter()
+    # ------------------------------------------------------------------
+    # Streaming scan callbacks ("Trans MR# exists"). Both run on the Tk
+    # thread via after() and drop anything a superseded load queued.
+    # ------------------------------------------------------------------
+    def _on_scan_progress(self, gen, scanned, api_total, matched):
+        """Report scan progress in the status bar and loading overlay."""
+        if gen != self._fetch_generation:
+            return
+        self._scan_progress_text = self._t("mr_scan_progress").format(
+            scanned=scanned, total=api_total, matched=matched)
+        # _animate_loading repaints both surfaces on its next tick; paint now
+        # so progress appears immediately rather than up to 500ms later.
+        try:
+            self.lbl_mr_status_bar.configure(text=self._scan_progress_text)
+            self.mr_loading_overlay.configure(text=self._scan_progress_text)
+        except tk.TclError:
+            pass
+
+    def _on_scan_done(self, gen, api_total, filtered_total, scanned, matched,
+                      cancelled, append, streamed_any):
+        """Close out a streaming scan: stop the spinner, restore Search."""
+        self._scan_cancel = None
+        self._set_scan_button(False)
+        if gen != self._fetch_generation:
+            return
+        self.mr_loading = False
+        self._scan_progress_text = None
+        self._stop_loading_anim()
+        self._set_controls_enabled(True)
+        self.mr_total = api_total
+        self.mr_filtered_total = filtered_total
+        if append and streamed_any:
+            # The whole scan appended one page worth of rows, however many
+            # batches it took (see the streaming branch of _on_tasks_loaded).
+            self.mr_extra_pages += 1
+        if not streamed_any and not append:
+            # Scanned and found nothing — clear whatever the previous search
+            # left on screen rather than leaving stale rows under a "0" count.
+            self._on_tasks_loaded(api_total, [], filtered_total, False, 0, gen)
+        self._refresh_pagination_controls(filtered_total)
+        self.lbl_mr_status_bar.configure(
+            text=self._t("mr_scan_stopped" if cancelled else "mr_scan_done")
+            .format(scanned=scanned, matched=matched))
 
     # ------------------------------------------------------------------
     # Post-edit prefetch callback. The fetcher runs on a worker thread,

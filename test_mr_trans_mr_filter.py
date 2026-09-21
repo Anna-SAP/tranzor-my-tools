@@ -140,6 +140,118 @@ class TestCheckTaskDeliveryMr(unittest.TestCase):
         search.assert_not_called()
 
 
+class TestScanStrings(unittest.TestCase):
+    def setUp(self):
+        import export_gui
+        self.STRINGS = export_gui.STRINGS
+
+    def test_scan_keys_present_and_format(self):
+        for lang in ("en", "zh"):
+            table = self.STRINGS[lang]
+            self.assertIn("mr_stop_scan", table, lang)
+            for key in ("mr_scan_progress", "mr_scan_done", "mr_scan_stopped"):
+                self.assertIn(key, table, f"{lang}/{key}")
+            out = table["mr_scan_progress"].format(
+                scanned=300, total=67436, matched=4)
+            self.assertIn("300", out)
+            self.assertIn("4", out)
+            for key in ("mr_scan_done", "mr_scan_stopped"):
+                self.assertIn("7", table[key].format(scanned=900, matched=7))
+
+
+class TestProbeMemo(unittest.TestCase):
+    """A source MR GitLab can't resolve must be asked about once per scan."""
+
+    def setUp(self):
+        import threading
+        self.tab = _Tab()
+        self.tab._delivery_probe_misses = set()
+        self.tab._delivery_probe_lock = threading.Lock()
+
+    def test_warm_resolves_each_distinct_source_mr_once(self):
+        import mr_jira
+        # Four tasks, two distinct source MRs — the shape that made 8 workers
+        # miss the same key at once.
+        tasks = [
+            {"task_id": "a", "project_id": "Fiji/Fiji", "merge_request_iid": 46441},
+            {"task_id": "b", "project_id": "Fiji/Fiji", "merge_request_iid": 46441},
+            {"task_id": "c", "project_id": "web/web", "merge_request_iid": 42391},
+            {"task_id": "d", "project_id": "Fiji/Fiji", "merge_request_iid": 46441},
+        ]
+        seen = []
+
+        def _fetch(project, iid, **kw):
+            seen.append((project, iid))
+            return mr_jira.JiraMetadata("", "", "opened")
+
+        with mock.patch("mr_jira.get_cached_state", return_value=None),                 mock.patch("mr_jira.fetch_jira_metadata", side_effect=_fetch):
+            self.tab._warm_delivery_probe(tasks)
+
+        self.assertEqual(sorted(seen),
+                         [("Fiji/Fiji", 46441), ("web/web", 42391)])
+
+    def test_unresolvable_source_mr_is_memoised_and_not_retried(self):
+        tasks = [{"task_id": "a", "project_id": "RND/rcvnc",
+                  "merge_request_iid": 6745}]
+        with mock.patch("mr_jira.get_cached_state", return_value=None),                 mock.patch("mr_jira.fetch_jira_metadata",
+                           return_value=None) as fetch:
+            self.tab._warm_delivery_probe(tasks)
+            self.assertEqual(fetch.call_count, 1)
+            self.assertTrue(self.tab._probe_is_dead(("RND/rcvnc", 6745)))
+            # A second batch carrying the same dead MR must not re-ask.
+            self.tab._warm_delivery_probe(tasks)
+            self.assertEqual(fetch.call_count, 1)
+
+    def test_per_task_probe_short_circuits_on_a_memoised_miss(self):
+        self.tab._probe_mark_dead(("RND/rcvnc", 6745))
+        task = {"task_id": "a", "project_id": "RND/rcvnc",
+                "merge_request_iid": 6745}
+        with mock.patch("mr_jira.fetch_jira_metadata") as fetch:
+            self.tab._check_task_delivery_mr(task)
+        self.assertFalse(task["_has_delivery_mr"])
+        fetch.assert_not_called()
+
+    def test_already_cached_state_needs_no_warm_call(self):
+        tasks = [{"task_id": "a", "project_id": "web/web",
+                  "merge_request_iid": 42391}]
+        with mock.patch("mr_jira.get_cached_state", return_value="merged"),                 mock.patch("mr_jira.fetch_jira_metadata") as fetch:
+            self.tab._warm_delivery_probe(tasks)
+        fetch.assert_not_called()
+
+
+class TestScanControl(unittest.TestCase):
+    """Search doubles as Stop, and a superseded scan must not paint."""
+
+    def test_search_cancels_a_running_scan_instead_of_reloading(self):
+        import threading
+        tab = _Tab()
+        tab._scan_cancel = threading.Event()
+        with mock.patch.object(type(tab), "_load_tasks",
+                               create=True) as load:
+            tab._on_search()
+        self.assertTrue(tab._scan_cancel.is_set())
+        load.assert_not_called()
+
+    def test_progress_from_a_superseded_scan_is_dropped(self):
+        tab = _Tab()
+        tab._fetch_generation = 7
+        tab._scan_progress_text = None
+        tab._t = lambda key: "{scanned}/{total}/{matched}"
+        tab._on_scan_progress(6, 100, 67436, 3)
+        self.assertIsNone(tab._scan_progress_text)
+
+    def test_progress_from_the_current_scan_is_shown(self):
+        tab = _Tab()
+        tab._fetch_generation = 7
+        tab._scan_progress_text = None
+        tab._t = lambda key: "{scanned}/{total}/{matched}"
+        tab.lbl_mr_status_bar = mock.Mock()
+        tab.mr_loading_overlay = mock.Mock()
+        tab._on_scan_progress(7, 100, 67436, 3)
+        self.assertEqual(tab._scan_progress_text, "100/67436/3")
+        tab.lbl_mr_status_bar.configure.assert_called_once_with(text="100/67436/3")
+
+
 class TestFindFollowUpMrs(unittest.TestCase):
     """One title search must yield both the import MR and any later fix MR."""
 
