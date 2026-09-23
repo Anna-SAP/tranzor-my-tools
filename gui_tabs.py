@@ -67,14 +67,23 @@ def _ellipsize_text(value, max_width, measure):
     return text[:lo].rstrip() + suffix, True
 
 
-# MR Pipeline right sidebar: grow with the window so a maximized desktop
-# no longer leaves the filter card empty while project paths clip at 280px.
-# Floor / cap keep the 15-column table readable on the 1280px default size.
-_MR_SIDEBAR_MIN_PX = 320
-_MR_SIDEBAR_MAX_PX = 500
-_MR_SIDEBAR_RATIO = 0.22
+# MR Pipeline "Recently Added" drawer: a docked, collapsible right pane that
+# only carries the project list — the four KPIs live in the filter card. It
+# is packed BEFORE the table: the Treeview's requested width (sum of its
+# fixed columns) outgrew the window once the Trans MR columns landed, and a
+# pane packed after it was squeezed to 0px.
+_MR_SIDEBAR_MIN_PX = 260
+_MR_SIDEBAR_MAX_PX = 380
+_MR_SIDEBAR_RATIO = 0.18
 _MR_SIDEBAR_TABLE_RESERVE = 0.58
 _MR_SIDEBAR_INNER_PAD_PX = 24
+# Until the user toggles the drawer, it follows the window: open on a wide
+# pane, collapsed below this so the table keeps the width.
+_MR_DRAWER_AUTO_OPEN_PX = 1600
+# Config key holding the user's explicit drawer choice, per env.
+_MR_DRAWER_PREF_KEY = "mr_recent_drawer_open"
+# Gap between the filter rows and the KPI block when they share a line.
+_MR_KPI_GAP_PX = 24
 # Room for the longest relative-time string ("59 分钟前" / "12 个月前") plus
 # a small gap so the project path wraps instead of colliding with the age.
 _MR_RECENT_AGE_RESERVE_PX = 96
@@ -108,6 +117,59 @@ def _mr_sidebar_wraplength(sidebar_width, reserve=0):
     except (TypeError, ValueError):
         extra = 0
     return max(80, width - _MR_SIDEBAR_INNER_PAD_PX - extra)
+
+
+def _mr_drawer_should_open(content_width, saved=None):
+    """Whether the Recently Added drawer is open for this pane width.
+
+    An explicit user choice (``saved`` is a bool) always wins; otherwise the
+    drawer opens only when the pane is wide enough to spare it.
+    """
+    if isinstance(saved, bool):
+        return saved
+    try:
+        pane = int(content_width)
+    except (TypeError, ValueError):
+        return False
+    return pane >= _MR_DRAWER_AUTO_OPEN_PX
+
+
+def _mr_kpi_fits_inline(card_width, rows_width, kpi_width,
+                        gap=_MR_KPI_GAP_PX):
+    """True when the KPI block fits beside the filter rows in the card."""
+    try:
+        card = int(card_width)
+        need = int(rows_width) + int(kpi_width) + int(gap)
+    except (TypeError, ValueError):
+        return False
+    return card > 0 and card >= need
+
+
+def _mr_drawer_toggle_text(label, count=None, is_open=False):
+    """Action-bar toggle text, e.g. ``📦 Recently Added (40) ◂``.
+
+    The count stays visible while the drawer is collapsed; the arrow points
+    the way the drawer will move when clicked.
+    """
+    text = str(label or "").strip()
+    if isinstance(count, int) and count >= 0:
+        text = f"{text} ({count})"
+    return f"{text} {'▸' if is_open else '◂'}"
+
+
+def _format_kpi_number(value):
+    """``68351`` → ``68,351``; non-integers pass through as text."""
+    if value is None or isinstance(value, bool):
+        return "—"
+    if isinstance(value, int):
+        return f"{value:,}"
+    try:
+        s = str(value).strip()
+        if s.lstrip("-").isdigit():
+            return f"{int(s):,}"
+        return s or "—"
+    except Exception:
+        return "—"
 
 
 def _recent_project_tooltip(project_id, relative="", absolute=""):
@@ -343,34 +405,52 @@ class MRPipelineTab:
         content.pack(fill="both", expand=True, padx=16, pady=8)
         self._mr_content = content
 
-        left = ttk.Frame(content, style="App.TFrame")
-        left.pack(side="left", fill="both", expand=True)
-
+        # The drawer is packed FIRST so it claims its width before the table
+        # asks for more than the window has (see _MR_SIDEBAR_MIN_PX).
         right = ttk.Frame(
             content, style="App.TFrame", width=_MR_SIDEBAR_MIN_PX)
         right.pack(side="right", fill="y", padx=(8, 0))
         right.pack_propagate(False)
         self._mr_sidebar_frame = right
+
+        left = ttk.Frame(content, style="App.TFrame")
+        left.pack(side="left", fill="both", expand=True)
+        self._mr_left = left
+
+        self._mr_drawer_saved = self._load_mr_drawer_pref()
+        self._mr_drawer_open = True
         content.bind("<Configure>", self._sync_mr_sidebar_width, add="+")
 
         # ── Filter bar ──
         filt = ttk.Frame(left, style="Card.TFrame")
         filt.pack(fill="x", pady=(0, 8))
         filt.configure(borderwidth=1, relief="solid")
-        fi = ttk.Frame(filt, style="Card.TFrame")
-        fi.pack(fill="x", padx=12, pady=10)
+        card = ttk.Frame(filt, style="Card.TFrame")
+        card.pack(fill="x", padx=12, pady=10)
+        # Filter rows on the left, KPI block on the right of the same card
+        # (the space the rows never used); the KPIs drop under the rows when
+        # the card is too narrow — see _sync_mr_kpi_layout.
+        card_body = ttk.Frame(card, style="Card.TFrame")
+        card_body.columnconfigure(0, weight=1)
+        fi = ttk.Frame(card_body, style="Card.TFrame")
+        fi.grid(row=0, column=0, sticky="nw")
+        self._mr_card_body = card_body
+        self._mr_filter_rows = fi
 
         # Stage instance: a compact env chip so the two otherwise-identical
         # panels can't be mistaken for each other.
         if self.env_key == "stage":
             self.lbl_mr_env_badge = tk.Label(
-                fi, text="STAGE",
+                card, text="STAGE",
                 font=(FONT_FAMILY, 8, "bold"),
                 bg="#854d0e", fg="#fde68a",
                 padx=6, pady=1)
             self.lbl_mr_env_badge.pack(anchor="e", pady=(0, 6))
         else:
             self.lbl_mr_env_badge = None
+        card_body.pack(fill="x")
+        self._build_mr_kpis(card_body)
+        card_body.bind("<Configure>", self._sync_mr_kpi_layout, add="+")
 
         # Row 1: Project + Release + Status
         r1 = ttk.Frame(fi, style="Card.TFrame")
@@ -612,13 +692,38 @@ class MRPipelineTab:
             font=(FONT_FAMILY, 9), bg="#0f3460", fg="#ccc",
             padx=10, pady=3)
         self.btn_mr_refresh.pack(side="right", padx=(0, 8))
+        # Pack order decides who gets squeezed on a narrow window: move the
+        # pagination group ahead of the export buttons so it is the radios
+        # that clip, never ◀ ▶.
+        for w in (self.btn_mr_next, self.lbl_mr_page, self.btn_mr_prev,
+                  self.btn_mr_refresh):
+            w.pack_configure(before=self.btn_mr_export)
+
+        # Legend line: ✏️ marker legend on the left, Recently Added drawer
+        # toggle on the right — directly above the drawer it controls.
+        legend_row = ttk.Frame(left, style="App.TFrame")
+        legend_row.pack(fill="x", pady=(0, 4))
+        # The toggle carries the project count so the list is never
+        # invisible, only folded away. Packed first so it never clips.
+        self.btn_mr_drawer_toggle = self.app._create_button(
+            legend_row, text="", command=self._toggle_mr_drawer,
+            style_name="SecondaryTiny",
+            font=(FONT_FAMILY, 9), bg="#0f3460", fg="#ccc",
+            padx=10, pady=2)
+        self.btn_mr_drawer_toggle.pack(side="right")
+        self._mr_drawer_toggle_tip = None
+        try:
+            from export_gui import Tooltip as _Tooltip
+            self._mr_drawer_toggle_tip = _Tooltip(self.btn_mr_drawer_toggle, "")
+        except Exception:
+            pass
 
         # Legend for the ✏️ marker the async post-edit prefetch may
         # prepend to the Project column once detail fetches return.
         self.lbl_mr_post_edit_legend = ttk.Label(
-            left, text="", style="Status.TLabel",
+            legend_row, text="", style="Status.TLabel",
         )
-        self.lbl_mr_post_edit_legend.pack(anchor="w", pady=(0, 4))
+        self.lbl_mr_post_edit_legend.pack(side="left", anchor="w")
 
         # ── Footer: Load More button anchored at the bottom of `left` ──
         # Packed BEFORE tree_frame with side="bottom" so the tree's
@@ -721,8 +826,88 @@ class MRPipelineTab:
             anchor="center",
         )
 
-        # ── Right sidebar: overview stats ──
+        # ── Right drawer: Recently Added Projects ──
         self._build_mr_sidebar(right)
+        # An explicit saved choice applies now; otherwise start folded and
+        # let the first real <Configure> open it on a wide enough pane.
+        self._apply_mr_drawer(_mr_drawer_should_open(0, self._mr_drawer_saved))
+
+    def _build_mr_kpis(self, parent):
+        """Four overview KPIs, shown in the filter card at all times.
+
+        They used to sit at the top of the right sidebar and vanished with it
+        when the table squeezed the sidebar out. Here they cost no table
+        width: beside the filter rows on a wide card, a single line under
+        them on a narrow one.
+        """
+        kpi = ttk.Frame(parent, style="Summary.TFrame")
+        self._mr_kpi_frame = kpi
+        self._mr_kpi_inline = None
+
+        head = ttk.Frame(kpi, style="Summary.TFrame")
+        head.pack(fill="x", anchor="w")
+        self.lbl_mr_sidebar_title = ttk.Label(
+            head, text="", style="SummarySection.TLabel", anchor="w")
+        self.lbl_mr_sidebar_title.pack(side="left")
+        self.lbl_mr_sidebar_status = ttk.Label(
+            head, text="", style="SummaryStatus.TLabel", anchor="w")
+        self.lbl_mr_sidebar_status.pack(side="left", padx=(8, 0))
+
+        stats = ttk.Frame(kpi, style="Summary.TFrame")
+        stats.pack(fill="x", anchor="w", pady=(4, 0))
+        self._mr_kpi_stats = stats
+        self._mr_kpi_cells = []
+        self.mr_stat_labels = {}
+        for key in ("total", "completed", "failed", "avg_score"):
+            cell = ttk.Frame(stats, style="Summary.TFrame")
+            val = ttk.Label(
+                cell, text="—", style="SummaryCount.TLabel",
+                font=(FONT_FAMILY, 14, "bold"))
+            val.pack(anchor="w")
+            lbl = ttk.Label(
+                cell, text="", style="SummaryCountLabel.TLabel",
+                font=(FONT_FAMILY, 9), anchor="w")
+            lbl.pack(anchor="w")
+            self.mr_stat_labels[key] = (lbl, val)
+            self._mr_kpi_cells.append(cell)
+        self._layout_mr_kpis(inline=True)
+
+    def _layout_mr_kpis(self, inline):
+        """Place the KPI block: 2×2 beside the filter rows, or 1×4 under them."""
+        inline = bool(inline)
+        if getattr(self, "_mr_kpi_inline", None) is inline:
+            return
+        self._mr_kpi_inline = inline
+        kpi = self._mr_kpi_frame
+        for cell in self._mr_kpi_cells:
+            cell.grid_forget()
+        for i, cell in enumerate(self._mr_kpi_cells):
+            r, c = divmod(i, 2) if inline else (0, i)
+            cell.grid(row=r, column=c, sticky="nw",
+                      padx=(0, 20), pady=(0, 4))
+        kpi.grid_forget()
+        if inline:
+            kpi.grid(row=0, column=1, sticky="ne", padx=(_MR_KPI_GAP_PX, 0))
+        else:
+            kpi.grid(row=1, column=0, columnspan=2, sticky="w", pady=(10, 0))
+
+    def _sync_mr_kpi_layout(self, event=None):
+        body = getattr(self, "_mr_card_body", None)
+        rows = getattr(self, "_mr_filter_rows", None)
+        kpi = getattr(self, "_mr_kpi_frame", None)
+        if body is None or rows is None or kpi is None:
+            return
+        try:
+            card_w = int(body.winfo_width() or 0)
+            rows_w = int(rows.winfo_reqwidth() or 0)
+            if self._mr_kpi_inline:
+                self._mr_kpi_inline_w = int(kpi.winfo_reqwidth() or 0)
+        except tk.TclError:
+            return
+        if card_w < 200:
+            return
+        kpi_w = getattr(self, "_mr_kpi_inline_w", 0) or 240
+        self._layout_mr_kpis(_mr_kpi_fits_inline(card_w, rows_w, kpi_w))
 
     def _build_mr_sidebar(self, parent):
         panel = ttk.Frame(parent, style="Summary.TFrame")
@@ -732,60 +917,20 @@ class MRPipelineTab:
         inner.pack(fill="both", expand=True, padx=10, pady=10)
         self._mr_sidebar_inner = inner
 
-        self.lbl_mr_sidebar_title = ttk.Label(
-            inner, text="", style="SummaryTitle.TLabel",
-            wraplength=_mr_sidebar_wraplength(_MR_SIDEBAR_MIN_PX),
-            justify="left", anchor="w")
-        self.lbl_mr_sidebar_title.pack(anchor="w", fill="x")
-        tk.Frame(inner, bg="#2a2a4a", height=1).pack(fill="x", pady=(6, 8))
-
-        # 2×2 KPI grid — uses the extra sidebar width instead of four
-        # stacked rows, and leaves more vertical room for project paths.
-        stats = ttk.Frame(inner, style="Summary.TFrame")
-        stats.pack(fill="x")
-        stats.columnconfigure(0, weight=1)
-        stats.columnconfigure(1, weight=1)
-        self.mr_stat_labels = {}
-        for i, key in enumerate(("total", "completed", "failed", "avg_score")):
-            r, c = divmod(i, 2)
-            cell = ttk.Frame(stats, style="Summary.TFrame")
-            cell.grid(
-                row=r, column=c, sticky="nsew",
-                padx=(0, 8) if c == 0 else (8, 0), pady=(0, 6))
-            val = ttk.Label(
-                cell, text="—", style="SummaryCount.TLabel",
-                font=(FONT_FAMILY, 16, "bold"))
-            val.pack(anchor="w")
-            lbl = ttk.Label(
-                cell, text="", style="SummaryCountLabel.TLabel",
-                wraplength=max(80, _mr_sidebar_wraplength(
-                    _MR_SIDEBAR_MIN_PX) // 2),
-                justify="left", anchor="w")
-            lbl.pack(anchor="w")
-            self.mr_stat_labels[key] = (lbl, val)
-
-        tk.Frame(inner, bg="#2a2a4a", height=1).pack(fill="x", pady=(4, 8))
         self.lbl_mr_recent_projects_title = ttk.Label(
             inner, text="", style="SummarySection.TLabel",
             wraplength=_mr_sidebar_wraplength(_MR_SIDEBAR_MIN_PX),
             justify="left", anchor="w")
         self.lbl_mr_recent_projects_title.pack(anchor="w", fill="x", pady=(0, 4))
 
-        # Status + refresh sit at the BOTTOM first so the project list
-        # expands into every remaining pixel.
+        # Refresh sits at the BOTTOM first so the project list expands into
+        # every remaining pixel. It reloads the KPIs too.
         self.btn_mr_sidebar_refresh = self.app._create_button(
             inner, text="", command=self._load_overview,
             style_name="SecondaryTiny",
             font=(FONT_FAMILY, 9), bg="#0f3460", fg="#ccc",
             padx=10, pady=3)
         self.btn_mr_sidebar_refresh.pack(side="bottom", anchor="e", pady=(6, 0))
-
-        self.lbl_mr_sidebar_status = ttk.Label(
-            inner, text="", style="SummaryStatus.TLabel",
-            wraplength=_mr_sidebar_wraplength(_MR_SIDEBAR_MIN_PX),
-            justify="left", anchor="w")
-        self.lbl_mr_sidebar_status.pack(side="bottom", anchor="w", fill="x",
-                                        pady=(6, 0))
 
         recent_frame = ttk.Frame(inner, style="Summary.TFrame")
         recent_frame.pack(fill="both", expand=True)
@@ -816,8 +961,8 @@ class MRPipelineTab:
         self._recent_tooltips = []
 
     def _sync_mr_sidebar_width(self, event=None):
-        """Grow/shrink the sidebar with the pane so extra monitor width is
-        spent on project paths instead of an empty filter card."""
+        """Follow the pane: auto open/fold the drawer (until the user has
+        chosen) and size it so project paths get the spare width."""
         frame = getattr(self, "_mr_sidebar_frame", None)
         content = getattr(self, "_mr_content", None)
         if frame is None or content is None:
@@ -827,6 +972,12 @@ class MRPipelineTab:
         except tk.TclError:
             return
         if pane_w < 200:
+            return
+        want_open = _mr_drawer_should_open(
+            pane_w, getattr(self, "_mr_drawer_saved", None))
+        if want_open != getattr(self, "_mr_drawer_open", True):
+            self._apply_mr_drawer(want_open)
+        if not want_open:
             return
         width = _mr_sidebar_width(pane_w)
         try:
@@ -848,23 +999,85 @@ class MRPipelineTab:
             except (TypeError, ValueError, tk.TclError):
                 sidebar_width = _MR_SIDEBAR_MIN_PX
         wrap = _mr_sidebar_wraplength(sidebar_width)
-        for attr in (
-                "lbl_mr_sidebar_title",
-                "lbl_mr_recent_projects_title",
-                "lbl_mr_sidebar_status"):
-            lbl = getattr(self, attr, None)
-            if lbl is not None:
-                try:
-                    lbl.configure(wraplength=wrap)
-                except tk.TclError:
-                    pass
-        caption_wrap = max(80, wrap // 2)
-        for pair in getattr(self, "mr_stat_labels", {}).values():
+        lbl = getattr(self, "lbl_mr_recent_projects_title", None)
+        if lbl is not None:
             try:
-                pair[0].configure(wraplength=caption_wrap)
-            except (tk.TclError, TypeError, IndexError):
+                lbl.configure(wraplength=wrap)
+            except tk.TclError:
                 pass
         self._apply_recent_name_wraplengths()
+
+    def _apply_mr_drawer(self, is_open):
+        """Show or fold the Recently Added drawer (no persistence)."""
+        frame = getattr(self, "_mr_sidebar_frame", None)
+        left = getattr(self, "_mr_left", None)
+        self._mr_drawer_open = bool(is_open)
+        if frame is not None:
+            try:
+                if self._mr_drawer_open:
+                    # before=left keeps the drawer first in packing order,
+                    # which is what stops the table from squeezing it out.
+                    if left is not None:
+                        frame.pack(side="right", fill="y", padx=(8, 0),
+                                   before=left)
+                    else:
+                        frame.pack(side="right", fill="y", padx=(8, 0))
+                else:
+                    frame.pack_forget()
+            except tk.TclError:
+                pass
+        self._refresh_mr_drawer_toggle()
+
+    def _toggle_mr_drawer(self):
+        """User click: flip the drawer and remember the choice."""
+        is_open = not getattr(self, "_mr_drawer_open", True)
+        self._mr_drawer_saved = is_open
+        self._apply_mr_drawer(is_open)
+        if is_open:
+            self._sync_mr_sidebar_width()
+        self._save_mr_drawer_pref(is_open)
+
+    def _load_mr_drawer_pref(self):
+        """Saved open/closed choice for this env, or None (follow width)."""
+        try:
+            from gitlab_client import load_config
+            prefs = (load_config() or {}).get(_MR_DRAWER_PREF_KEY)
+        except Exception:
+            return None
+        if not isinstance(prefs, dict):
+            return None
+        value = prefs.get(getattr(self, "env_key", "prod"))
+        return value if isinstance(value, bool) else None
+
+    def _save_mr_drawer_pref(self, is_open):
+        try:
+            from gitlab_client import load_config, update_config
+            prefs = (load_config() or {}).get(_MR_DRAWER_PREF_KEY)
+            prefs = dict(prefs) if isinstance(prefs, dict) else {}
+            prefs[getattr(self, "env_key", "prod")] = bool(is_open)
+            update_config(**{_MR_DRAWER_PREF_KEY: prefs})
+        except Exception:
+            pass
+
+    def _refresh_mr_drawer_toggle(self):
+        btn = getattr(self, "btn_mr_drawer_toggle", None)
+        if btn is None:
+            return
+        is_open = getattr(self, "_mr_drawer_open", True)
+        count = None
+        if (getattr(self, "_recent_projects_loaded", False)
+                and not getattr(self, "_recent_projects_loading", False)):
+            count = len(getattr(self, "_last_recent_projects", None) or [])
+        try:
+            btn.configure(text=_mr_drawer_toggle_text(
+                self._t("mr_recent_toggle"), count, is_open))
+        except tk.TclError:
+            pass
+        tip = getattr(self, "_mr_drawer_toggle_tip", None)
+        if tip is not None:
+            tip.set_text(self._t(
+                "mr_recent_toggle_tip_hide" if is_open
+                else "mr_recent_toggle_tip_show"))
 
     def _apply_recent_name_wraplengths(self, canvas_width=None):
         labels = getattr(self, "_recent_name_labels", None) or []
@@ -993,6 +1206,12 @@ class MRPipelineTab:
         else:
             self._render_recent_projects(self._last_recent_projects)
         self._apply_sidebar_wraplengths()
+        self._refresh_mr_drawer_toggle()
+        # Label widths differ per language; re-decide KPI placement.
+        try:
+            self.parent.after_idle(self._sync_mr_kpi_layout)
+        except (tk.TclError, AttributeError):
+            pass
 
     def load_initial_tasks(self):
         """Load the latest ``mr_page_size`` tasks (no filters) on first tab selection."""
@@ -3319,11 +3538,14 @@ class MRPipelineTab:
     def _on_overview_loaded(self, data):
         self.mr_overview_loading = False
         self.lbl_mr_sidebar_status.configure(text="")
-        self.mr_stat_labels["total"][1].configure(text=str(data.get("total_tasks", 0)))
+        self.mr_stat_labels["total"][1].configure(
+            text=_format_kpi_number(data.get("total_tasks", 0)))
         # Tranzor renamed `completed` → `completed_tasks` etc. on /dashboard/overview;
         # keep the old keys as fallback in case an older deployment is reached.
-        self.mr_stat_labels["completed"][1].configure(text=str(data.get("completed_tasks", data.get("completed", 0))))
-        self.mr_stat_labels["failed"][1].configure(text=str(data.get("failed_tasks", data.get("failed", 0))))
+        self.mr_stat_labels["completed"][1].configure(text=_format_kpi_number(
+            data.get("completed_tasks", data.get("completed", 0))))
+        self.mr_stat_labels["failed"][1].configure(text=_format_kpi_number(
+            data.get("failed_tasks", data.get("failed", 0))))
         avg = data.get("average_score")
         self.mr_stat_labels["avg_score"][1].configure(text=f"{avg}" if avg else "—")
 
@@ -3338,6 +3560,7 @@ class MRPipelineTab:
             return
         self._recent_projects_loading = True
         self._show_recent_projects_loading()
+        self._refresh_mr_drawer_toggle()
         threading.Thread(target=self._fetch_recent_projects, daemon=True).start()
 
     def _fetch_recent_projects(self):
@@ -3349,6 +3572,7 @@ class MRPipelineTab:
 
     def _on_recent_projects_loaded(self, recent):
         self._recent_projects_loading = False
+        self._recent_projects_loaded = True
         self._render_recent_projects(recent)
 
     def _clear_recent_project_rows(self):
@@ -3389,6 +3613,7 @@ class MRPipelineTab:
         """Repaint the Recently Added list. Paths wrap to the live sidebar
         width (no Treeview clipping); hover still shows the full identity."""
         self._last_recent_projects = list(recent or [])
+        self._refresh_mr_drawer_toggle()
         inner = getattr(self, "_recent_inner", None)
         if inner is None:
             return

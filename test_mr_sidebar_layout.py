@@ -1,10 +1,14 @@
-"""MR Pipeline right-sidebar layout: width, wrapping, no clipped paths.
+"""MR Pipeline layout: KPI block in the filter card + Recently Added drawer.
 
 The sidebar used to be a fixed 280px pane whose ttk.Label titles had no
 ``wraplength`` and whose Recently Added list was a two-column Treeview.
 On a maximized window that clipped "Recently Added Projects" and every
-``group/subgroup/project`` path. Helpers here are display-free; the last
-class builds the real widgets and is skipped without a Tk display.
+``group/subgroup/project`` path. Later the Trans MR columns pushed the
+table's requested width past the window and the sidebar (packed after the
+table) was squeezed to 0px; the KPIs moved into the filter card and the
+project list became a collapsible drawer packed before the table.
+Helpers here are display-free; the widget classes build real widgets and
+are skipped without a Tk display.
 
 Run:  python -m unittest test_mr_sidebar_layout
 """
@@ -27,18 +31,15 @@ class SidebarWidthTests(unittest.TestCase):
         self.assertEqual(gt._mr_sidebar_width(None), gt._MR_SIDEBAR_MIN_PX)
         self.assertEqual(gt._mr_sidebar_width("nope"), gt._MR_SIDEBAR_MIN_PX)
 
-    def test_default_1280_window_stays_near_the_floor(self):
-        # 1280px default geometry: sidebar grows only a little past 280 so
-        # the 15-column table still fits.
-        width = gt._mr_sidebar_width(1280)
-        self.assertGreaterEqual(width, gt._MR_SIDEBAR_MIN_PX)
-        self.assertLess(width, 380)
+    def test_default_1280_window_stays_at_the_floor(self):
+        # The drawer only holds the project list now; on the 1280px default
+        # geometry it stays at its floor so the table keeps the width.
+        self.assertEqual(gt._mr_sidebar_width(1280), gt._MR_SIDEBAR_MIN_PX)
 
-    def test_maximized_window_gives_the_sidebar_the_spare_width(self):
+    def test_maximized_window_gives_the_drawer_some_spare_width(self):
         compact = gt._mr_sidebar_width(1280)
         wide = gt._mr_sidebar_width(1920)
         self.assertGreater(wide, compact)
-        self.assertGreaterEqual(wide, 400)
         self.assertLessEqual(wide, gt._MR_SIDEBAR_MAX_PX)
 
     def test_ultra_wide_is_capped(self):
@@ -48,6 +49,66 @@ class SidebarWidthTests(unittest.TestCase):
         width = gt._mr_sidebar_width(500)
         self.assertLessEqual(width, 500 * (1 - gt._MR_SIDEBAR_TABLE_RESERVE) + 1)
         self.assertGreaterEqual(width, 180)
+
+
+class DrawerStateTests(unittest.TestCase):
+
+    def test_follows_the_pane_width_until_the_user_chooses(self):
+        self.assertFalse(gt._mr_drawer_should_open(1280))
+        self.assertFalse(gt._mr_drawer_should_open(
+            gt._MR_DRAWER_AUTO_OPEN_PX - 1))
+        self.assertTrue(gt._mr_drawer_should_open(gt._MR_DRAWER_AUTO_OPEN_PX))
+        self.assertTrue(gt._mr_drawer_should_open(1880))
+
+    def test_saved_choice_wins_over_width(self):
+        self.assertTrue(gt._mr_drawer_should_open(900, saved=True))
+        self.assertFalse(gt._mr_drawer_should_open(2400, saved=False))
+
+    def test_non_bool_saved_value_is_ignored(self):
+        self.assertTrue(gt._mr_drawer_should_open(2000, saved="no"))
+        self.assertFalse(gt._mr_drawer_should_open(None))
+        self.assertFalse(gt._mr_drawer_should_open("x"))
+
+
+class KpiPlacementTests(unittest.TestCase):
+
+    def test_inline_when_rows_and_kpis_fit(self):
+        self.assertTrue(gt._mr_kpi_fits_inline(1800, 1150, 240))
+
+    def test_drops_under_the_rows_when_cramped(self):
+        self.assertFalse(gt._mr_kpi_fits_inline(1250, 1150, 240))
+
+    def test_gap_is_counted(self):
+        self.assertTrue(gt._mr_kpi_fits_inline(1000, 700, 276, gap=24))
+        self.assertFalse(gt._mr_kpi_fits_inline(999, 700, 276, gap=24))
+
+    def test_invalid_input_is_not_inline(self):
+        self.assertFalse(gt._mr_kpi_fits_inline(0, 0, 0))
+        self.assertFalse(gt._mr_kpi_fits_inline(None, 100, 100))
+
+
+class ToggleTextAndNumberTests(unittest.TestCase):
+
+    def test_toggle_text_carries_count_and_direction(self):
+        self.assertEqual(
+            gt._mr_drawer_toggle_text("📦 Recently Added", 40, False),
+            "📦 Recently Added (40) ◂")
+        self.assertEqual(
+            gt._mr_drawer_toggle_text("📦 Recently Added", 0, True),
+            "📦 Recently Added (0) ▸")
+
+    def test_unknown_count_is_omitted(self):
+        self.assertEqual(
+            gt._mr_drawer_toggle_text("📦 Recently Added", None, True),
+            "📦 Recently Added ▸")
+
+    def test_kpi_numbers_get_thousands_separators(self):
+        self.assertEqual(gt._format_kpi_number(68351), "68,351")
+        self.assertEqual(gt._format_kpi_number("14636"), "14,636")
+        self.assertEqual(gt._format_kpi_number(898), "898")
+        self.assertEqual(gt._format_kpi_number("97.09"), "97.09")
+        self.assertEqual(gt._format_kpi_number(""), "—")
+        self.assertEqual(gt._format_kpi_number(None), "—")
 
 
 class WraplengthTests(unittest.TestCase):
@@ -117,7 +178,8 @@ class SidebarI18nTests(unittest.TestCase):
                     "mr_sidebar_title", "mr_sidebar_title_stage",
                     "mr_stat_total", "mr_stat_completed", "mr_stat_failed",
                     "mr_stat_avg_score", "mr_recent_projects_title",
-                    "mr_recent_empty"):
+                    "mr_recent_empty", "mr_recent_toggle",
+                    "mr_recent_toggle_tip_show", "mr_recent_toggle_tip_hide"):
                 self.assertIn(key, STRINGS[lang], key)
                 self.assertTrue(STRINGS[lang][key].strip(), key)
 
@@ -187,16 +249,78 @@ class SidebarWidgetSmokeTests(unittest.TestCase):
         tab, _host = self._sidebar()
         try:
             self.assertGreater(
-                int(tab.lbl_mr_sidebar_title.cget("wraplength") or 0), 80)
-            self.assertGreater(
                 int(tab.lbl_mr_recent_projects_title.cget("wraplength") or 0),
                 80)
             self.assertFalse(hasattr(tab, "mr_recent_tree"))
             self.assertIsNotNone(tab._recent_canvas)
-            self.assertEqual(set(tab.mr_stat_labels), {
-                "total", "completed", "failed", "avg_score"})
+            # The KPIs no longer live in the drawer.
+            self.assertFalse(hasattr(tab, "mr_stat_labels"))
         finally:
             _host.destroy()
+
+    def _kpis(self):
+        tab = gt.MRPipelineTab.__new__(gt.MRPipelineTab)
+        tab.app = self._fake_app()
+        tab.parent = self.root
+        body = self.ttk.Frame(self.root)
+        body.columnconfigure(0, weight=1)
+        rows = self.ttk.Frame(body, width=600, height=40)
+        rows.grid(row=0, column=0, sticky="nw")
+        tab._mr_card_body = body
+        tab._mr_filter_rows = rows
+        tab._build_mr_kpis(body)
+        return tab, body
+
+    def test_kpis_switch_between_beside_and_under_the_rows(self):
+        tab, body = self._kpis()
+        try:
+            self.assertEqual(set(tab.mr_stat_labels), {
+                "total", "completed", "failed", "avg_score"})
+            self.assertEqual(
+                int(tab._mr_kpi_frame.grid_info()["column"]), 1)
+            tab._layout_mr_kpis(inline=False)
+            info = tab._mr_kpi_frame.grid_info()
+            self.assertEqual((int(info["row"]), int(info["column"])), (1, 0))
+            cols = {int(c.grid_info()["column"]) for c in tab._mr_kpi_cells}
+            self.assertEqual(cols, {0, 1, 2, 3})
+            tab._layout_mr_kpis(inline=True)
+            rows = {int(c.grid_info()["row"]) for c in tab._mr_kpi_cells}
+            self.assertEqual(rows, {0, 1})
+        finally:
+            body.destroy()
+
+    def test_open_drawer_is_not_squeezed_by_a_too_wide_table(self):
+        """The screenshot bug: a table wider than the window hid the pane."""
+        tk, ttk = self.tk, self.ttk
+        top = tk.Toplevel(self.root)
+        top.geometry("900x300")
+        try:
+            content = ttk.Frame(top, width=900, height=300)
+            content.pack(fill="both", expand=True)
+            right = ttk.Frame(content, width=gt._MR_SIDEBAR_MIN_PX)
+            right.pack_propagate(False)
+            left = ttk.Frame(content)
+            left.pack(side="left", fill="both", expand=True)
+            # A child that asks for far more than the window has, like the
+            # 17-column Treeview.
+            ttk.Frame(left, width=2400, height=100).pack()
+
+            tab = gt.MRPipelineTab.__new__(gt.MRPipelineTab)
+            tab.app = self._fake_app()
+            tab._mr_sidebar_frame = right
+            tab._mr_left = left
+            tab._apply_mr_drawer(True)
+            top.update_idletasks()
+            top.update()
+            self.assertTrue(right.winfo_ismapped())
+            self.assertGreater(right.winfo_width(), 100)
+
+            tab._apply_mr_drawer(False)
+            top.update()
+            self.assertFalse(right.winfo_ismapped())
+            self.assertFalse(tab._mr_drawer_open)
+        finally:
+            top.destroy()
 
     def test_long_project_paths_are_stored_in_full_on_the_label(self):
         tab, _host = self._sidebar()
