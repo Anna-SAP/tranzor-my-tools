@@ -77,9 +77,15 @@ _MR_SIDEBAR_MAX_PX = 380
 _MR_SIDEBAR_RATIO = 0.18
 _MR_SIDEBAR_TABLE_RESERVE = 0.58
 _MR_SIDEBAR_INNER_PAD_PX = 24
-# Until the user toggles the drawer, it follows the window: open on a wide
-# pane, collapsed below this so the table keeps the width.
+# Until the user toggles the drawer, it follows the window: it opens on its
+# own only when every table column still fits beside it (never less than
+# this floor). On a maximized 1920 screen the ~1900px table does not, so
+# the drawer starts folded and Created / Ended / Duration stay in view.
 _MR_DRAWER_AUTO_OPEN_PX = 1600
+# Treeview chrome beyond the column widths (vertical scrollbar + border).
+_MR_TABLE_CHROME_PX = 24
+# Room the drawer header's "Hide »" button takes from the title's wrap.
+_MR_DRAWER_HIDE_BTN_RESERVE_PX = 64
 # Config key holding the user's explicit drawer choice, per env.
 _MR_DRAWER_PREF_KEY = "mr_recent_drawer_open"
 # Gap between the filter rows and the KPI block when they share a line.
@@ -119,11 +125,13 @@ def _mr_sidebar_wraplength(sidebar_width, reserve=0):
     return max(80, width - _MR_SIDEBAR_INNER_PAD_PX - extra)
 
 
-def _mr_drawer_should_open(content_width, saved=None):
+def _mr_drawer_should_open(content_width, saved=None, table_width=0):
     """Whether the Recently Added drawer is open for this pane width.
 
-    An explicit user choice (``saved`` is a bool) always wins; otherwise the
-    drawer opens only when the pane is wide enough to spare it.
+    An explicit user choice (``saved`` is a bool) always wins. Otherwise the
+    drawer opens only when the whole table (``table_width``, its natural
+    column total) still fits beside it — auto-opening must never push
+    columns into the horizontal scroll.
     """
     if isinstance(saved, bool):
         return saved
@@ -131,7 +139,12 @@ def _mr_drawer_should_open(content_width, saved=None):
         pane = int(content_width)
     except (TypeError, ValueError):
         return False
-    return pane >= _MR_DRAWER_AUTO_OPEN_PX
+    try:
+        table = max(0, int(table_width or 0))
+    except (TypeError, ValueError):
+        table = 0
+    drawer = _mr_sidebar_width(pane) + 8
+    return pane >= max(_MR_DRAWER_AUTO_OPEN_PX, table + drawer)
 
 
 def _mr_kpi_fits_inline(card_width, rows_width, kpi_width,
@@ -170,6 +183,24 @@ def _format_kpi_number(value):
         return s or "—"
     except Exception:
         return "—"
+
+
+def _mr_title_fit_width(tree_width, other_columns_width, min_width=140,
+                        slack=4):
+    """Title column width that lets every other column fit in the Treeview.
+
+    Title is the only elastic column: it takes whatever the fixed columns
+    leave (never below ``min_width``; the ellipsis + tooltip cover the rest).
+    Returns 0 when the widget has no real size yet.
+    """
+    try:
+        tree = int(tree_width)
+        others = int(other_columns_width)
+    except (TypeError, ValueError):
+        return 0
+    if tree <= 1:
+        return 0
+    return max(int(min_width), tree - others - int(slack))
 
 
 def _recent_project_tooltip(project_id, relative="", absolute=""):
@@ -758,6 +789,9 @@ class MRPipelineTab:
                       "jira": 90, "title": 260, "release": 60, "status": 80,
                       "src_strings": 90, "avg_score": 70, "created": 185,
                       "ended": 185, "duration": 70}
+        # Natural table width: the drawer auto-opens only if this still fits.
+        self._mr_table_natural_w = sum(
+            col_widths.get(c, 80) for c in cols) + _MR_TABLE_CHROME_PX
         for c in cols:
             width = col_widths.get(c, 80)
             is_title = c == "title"
@@ -917,11 +951,23 @@ class MRPipelineTab:
         inner.pack(fill="both", expand=True, padx=10, pady=10)
         self._mr_sidebar_inner = inner
 
+        # Header: title + a "Hide »" button, so the drawer can be folded
+        # from the drawer itself, not only from the toggle above the table.
+        head = ttk.Frame(inner, style="Summary.TFrame")
+        head.pack(fill="x", pady=(0, 4))
+        self.btn_mr_drawer_hide = self.app._create_button(
+            head, text="", command=self._hide_mr_drawer,
+            style_name="SecondaryTiny",
+            font=(FONT_FAMILY, 9), bg="#0f3460", fg="#ccc",
+            padx=8, pady=1)
+        self.btn_mr_drawer_hide.pack(side="right", anchor="ne")
         self.lbl_mr_recent_projects_title = ttk.Label(
-            inner, text="", style="SummarySection.TLabel",
-            wraplength=_mr_sidebar_wraplength(_MR_SIDEBAR_MIN_PX),
+            head, text="", style="SummarySection.TLabel",
+            wraplength=_mr_sidebar_wraplength(
+                _MR_SIDEBAR_MIN_PX, reserve=_MR_DRAWER_HIDE_BTN_RESERVE_PX),
             justify="left", anchor="w")
-        self.lbl_mr_recent_projects_title.pack(anchor="w", fill="x", pady=(0, 4))
+        self.lbl_mr_recent_projects_title.pack(
+            side="left", anchor="w", fill="x", expand=True)
 
         # Refresh sits at the BOTTOM first so the project list expands into
         # every remaining pixel. It reloads the KPIs too.
@@ -974,7 +1020,8 @@ class MRPipelineTab:
         if pane_w < 200:
             return
         want_open = _mr_drawer_should_open(
-            pane_w, getattr(self, "_mr_drawer_saved", None))
+            pane_w, getattr(self, "_mr_drawer_saved", None),
+            getattr(self, "_mr_table_natural_w", 0))
         if want_open != getattr(self, "_mr_drawer_open", True):
             self._apply_mr_drawer(want_open)
         if not want_open:
@@ -998,7 +1045,8 @@ class MRPipelineTab:
                 sidebar_width = int(str(frame.cget("width") or 0))
             except (TypeError, ValueError, tk.TclError):
                 sidebar_width = _MR_SIDEBAR_MIN_PX
-        wrap = _mr_sidebar_wraplength(sidebar_width)
+        wrap = _mr_sidebar_wraplength(
+            sidebar_width, reserve=_MR_DRAWER_HIDE_BTN_RESERVE_PX)
         lbl = getattr(self, "lbl_mr_recent_projects_title", None)
         if lbl is not None:
             try:
@@ -1027,6 +1075,11 @@ class MRPipelineTab:
             except tk.TclError:
                 pass
         self._refresh_mr_drawer_toggle()
+
+    def _hide_mr_drawer(self):
+        """"Hide »" in the drawer header: fold it and remember that."""
+        if getattr(self, "_mr_drawer_open", True):
+            self._toggle_mr_drawer()
 
     def _toggle_mr_drawer(self):
         """User click: flip the drawer and remember the choice."""
@@ -1198,6 +1251,8 @@ class MRPipelineTab:
         for key in ("total", "completed", "failed", "avg_score"):
             self.mr_stat_labels[key][0].configure(text=t(f"mr_stat_{key}"))
         self.btn_mr_sidebar_refresh.configure(text=t("summary_refresh"))
+        if getattr(self, "btn_mr_drawer_hide", None) is not None:
+            self.btn_mr_drawer_hide.configure(text=t("mr_recent_hide"))
         self.lbl_mr_recent_projects_title.configure(
             text=t("mr_recent_projects_title"))
         # Re-render relative timestamps / placeholders in the new language
@@ -2920,7 +2975,35 @@ class MRPipelineTab:
     # but does not render an ellipsis, so the visible value is pixel-fitted
     # while the lossless value remains in _jira_titles_by_iid.
     # ------------------------------------------------------------------
+    def _fit_mr_title_column(self):
+        """Shrink/grow Title so Created / Ended / Duration stay on screen.
+
+        ttk only redistributes width on later resizes, so the initial 260px
+        Title kept the ~1900px column total wider than a maximized 1920
+        window and pushed the time columns into the horizontal scroll.
+        """
+        tree = getattr(self, "mr_tree", None)
+        if tree is None:
+            return
+        try:
+            tree_w = int(tree.winfo_width() or 0)
+            others = sum(
+                int(tree.column(c, "width"))
+                for c in self._MR_COLUMNS if c != "title")
+        except (tk.TclError, TypeError, ValueError):
+            return
+        width = _mr_title_fit_width(tree_w, others)
+        if not width:
+            return
+        try:
+            if abs(int(tree.column("title", "width")) - width) >= 2:
+                tree.column("title", width=width)
+        except (tk.TclError, TypeError, ValueError):
+            pass
+
     def _schedule_title_ellipsis(self, _event=None):
+        if _event is not None:
+            self._fit_mr_title_column()
         after_id = getattr(self, "_title_resize_after_id", None)
         if after_id is not None:
             try:
