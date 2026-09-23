@@ -64,6 +64,19 @@ class DrawerStateTests(unittest.TestCase):
         self.assertTrue(gt._mr_drawer_should_open(900, saved=True))
         self.assertFalse(gt._mr_drawer_should_open(2400, saved=False))
 
+    def test_never_auto_opens_over_table_columns(self):
+        # The reported bug: maximized 1920 screen (~1870px pane) with the
+        # ~1930px table — auto-opening hid Created / Ended / Duration.
+        table = 1929
+        self.assertFalse(gt._mr_drawer_should_open(1870, table_width=table))
+        self.assertFalse(gt._mr_drawer_should_open(2200, table_width=table))
+        # A 2560 monitor fits the whole table beside the drawer.
+        self.assertTrue(gt._mr_drawer_should_open(2520, table_width=table))
+
+    def test_saved_choice_wins_over_table_width(self):
+        self.assertTrue(
+            gt._mr_drawer_should_open(1870, saved=True, table_width=1929))
+
     def test_non_bool_saved_value_is_ignored(self):
         self.assertTrue(gt._mr_drawer_should_open(2000, saved="no"))
         self.assertFalse(gt._mr_drawer_should_open(None))
@@ -109,6 +122,23 @@ class ToggleTextAndNumberTests(unittest.TestCase):
         self.assertEqual(gt._format_kpi_number("97.09"), "97.09")
         self.assertEqual(gt._format_kpi_number(""), "—")
         self.assertEqual(gt._format_kpi_number(None), "—")
+
+
+class TitleFitTests(unittest.TestCase):
+
+    def test_title_absorbs_the_leftover_width(self):
+        # Maximized 1920: 1821px tree, 1645px of fixed columns.
+        self.assertEqual(gt._mr_title_fit_width(1821, 1645), 172)
+
+    def test_title_never_below_its_minimum(self):
+        self.assertEqual(gt._mr_title_fit_width(1483, 1645), 140)
+
+    def test_wide_tree_gives_title_the_spare_width(self):
+        self.assertEqual(gt._mr_title_fit_width(2400, 1645), 751)
+
+    def test_unmapped_tree_is_left_alone(self):
+        self.assertEqual(gt._mr_title_fit_width(1, 1645), 0)
+        self.assertEqual(gt._mr_title_fit_width(None, 1645), 0)
 
 
 class WraplengthTests(unittest.TestCase):
@@ -179,7 +209,8 @@ class SidebarI18nTests(unittest.TestCase):
                     "mr_stat_total", "mr_stat_completed", "mr_stat_failed",
                     "mr_stat_avg_score", "mr_recent_projects_title",
                     "mr_recent_empty", "mr_recent_toggle",
-                    "mr_recent_toggle_tip_show", "mr_recent_toggle_tip_hide"):
+                    "mr_recent_toggle_tip_show", "mr_recent_toggle_tip_hide",
+                    "mr_recent_hide"):
                 self.assertIn(key, STRINGS[lang], key)
                 self.assertTrue(STRINGS[lang][key].strip(), key)
 
@@ -255,6 +286,11 @@ class SidebarWidgetSmokeTests(unittest.TestCase):
             self.assertIsNotNone(tab._recent_canvas)
             # The KPIs no longer live in the drawer.
             self.assertFalse(hasattr(tab, "mr_stat_labels"))
+            # The drawer can be folded from its own header.
+            self.assertIsNotNone(tab.btn_mr_drawer_hide)
+            self.assertIs(
+                tab.btn_mr_drawer_hide.master,
+                tab.lbl_mr_recent_projects_title.master)
         finally:
             _host.destroy()
 
