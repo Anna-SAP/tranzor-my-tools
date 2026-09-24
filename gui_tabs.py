@@ -7,6 +7,7 @@ import threading
 import tkinter as tk
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import replace
 from tkinter import font as tkfont
 from tkinter import ttk
 from datetime import date, datetime
@@ -25,7 +26,7 @@ from export_gui import (
     FONT_FAMILY, IS_MAC, reveal_in_folder, sanitize_for_filename,
     export_output_dir,
 )
-from time_display import format_display_datetime
+from time_display import FMT_MINUTE, format_display_datetime
 from date_picker import attach_calendar
 from searchable_combobox import attach_search, format_selection_summary
 import project_presets as _presets
@@ -84,6 +85,10 @@ _MR_SIDEBAR_INNER_PAD_PX = 24
 _MR_DRAWER_AUTO_OPEN_PX = 1600
 # Treeview chrome beyond the column widths (vertical scrollbar + border).
 _MR_TABLE_CHROME_PX = 24
+# Trans MR# starts at this width and widens to fit its longest MR chain.
+_TRANS_MR_COL_PX = 120
+# Cell padding ttk adds around the text, plus a little breathing room.
+_TRANS_MR_CELL_PAD_PX = 16
 # Room the drawer header's "Hide »" button takes from the title's wrap.
 _MR_DRAWER_HIDE_BTN_RESERVE_PX = 64
 # Config key holding the user's explicit drawer choice, per env.
@@ -201,6 +206,30 @@ def _mr_title_fit_width(tree_width, other_columns_width, min_width=140,
     if tree <= 1:
         return 0
     return max(int(min_width), tree - others - int(slack))
+
+
+def _trans_mr_index_at(offset_x, cell_width, labels, measure,
+                       separator=_delivery.TRANS_MR_SEPARATOR):
+    """Which label of a centred ``4213 → 4214 → 4233`` cell is under the pointer.
+
+    ``offset_x`` is the pointer's distance from the cell's left edge and
+    ``measure`` a Tk ``Font.measure``. The nearest label wins, so the arrows
+    and the padding still resolve to an MR. ``None`` when nothing can be hit.
+    """
+    if not labels:
+        return None
+    try:
+        x = (float(cell_width) - measure(separator.join(labels))) / 2.0
+        gap = measure(separator)
+        centres = []
+        for label in labels:
+            width = measure(label)
+            centres.append(x + width / 2.0)
+            x += width + gap
+        return min(range(len(labels)),
+                   key=lambda i: abs(centres[i] - float(offset_x)))
+    except (TypeError, ValueError):
+        return None
 
 
 def _recent_project_tooltip(project_id, relative="", absolute=""):
@@ -368,11 +397,12 @@ class MRPipelineTab:
         # pipeline tasks (that's the whole same-origin premise), so a
         # single-iid mapping would light up only the last-inserted row.
         self._jira_row_iids: dict[tuple[str, int], list[str]] = {}
-        # tree iid → {project, source_iid, source_url, delivery_iid,
-        # delivery_url}. Drives the clickable MR# / Trans MR# cells.
+        # tree iid → {project, source_iid, source_url, task_id, trans_mrs}.
+        # ``trans_mrs`` is the task's DeliveryRef chain, oldest first. Drives
+        # the clickable MR# / Trans MR# cells.
         self._mr_link_meta: dict[str, dict] = {}
-        # (delivery_project, delivery_iid) → [row iids]. One GitLab fetch
-        # paints Trans MR Status for every row that shares that follow-up MR.
+        # (project, iid) of a row's current Trans MR → [row iids]. One GitLab
+        # fetch paints Trans MR Status for every row that shares that MR.
         self._delivery_row_iids: dict[tuple[str, int], list[str]] = {}
         # Full Title stays outside Treeview values so sorting and Tooltip use
         # the lossless text while the visible cell can carry a width-specific
@@ -784,7 +814,7 @@ class MRPipelineTab:
                                      style="Summary.Treeview", height=14, selectmode="browse")
         col_widths = {"idx": 35, "project": 140, "mr": 60,
                       "mr_branch": 130, "mr_status": 90,
-                      "delivery_mr": 120, "delivery_branch": 130,
+                      "delivery_mr": _TRANS_MR_COL_PX, "delivery_branch": 130,
                       "delivery_mr_status": 110,
                       "jira": 90, "title": 260, "release": 60, "status": 80,
                       "src_strings": 90, "avg_score": 70, "created": 185,
@@ -1623,16 +1653,16 @@ class MRPipelineTab:
     def _resolve_trans_mr_state(self, t) -> str:
         """Live GitLab state of the Trans MR this task's row will show.
 
-        The Trans MR# cell follows the fix MR when there is one and the import
-        MR otherwise (:func:`mr_delivery.current_trans_mr_iid`), so the filter
-        has to ask about the same one. Force-refresh rather than reusing the
-        title search's copy of ``state``: that search is cached, and an
-        "is open" filter driven by a value that may be minutes stale would
-        list MRs that already merged — the exact bug #202 fixed in the column.
-        Seeding the state cache here also lets the column paint without its
-        own round trip.
+        Trans MR Status follows one MR of the chain — the newest still-open
+        one, else the newest (:func:`mr_delivery.current_trans_mr`) — so the
+        filter has to ask about the same one. Force-refresh rather than
+        reusing the title search's copy of ``state``: that search is cached,
+        and an "is open" filter driven by a value that may be minutes stale
+        would list MRs that already merged — the exact bug #202 fixed in the
+        column. Seeding the state cache here also lets the column paint
+        without its own round trip.
         """
-        current = t.get("_fix_ref") or t.get("_delivery_ref")
+        current = _delivery.current_trans_mr(t.get("_trans_mrs"))
         if current is None:
             return ""
         try:
@@ -1647,10 +1677,11 @@ class MRPipelineTab:
 
         Runs only on the "Trans MR# exists" path, on the same worker pool as
         :meth:`_check_task_translations`, and mutates the task in place:
-        ``_has_delivery_mr`` drives the filter, ``_delivery_ref`` lets the
-        render paint Trans MR# straight away instead of resolving it a second
-        time asynchronously. Never raises — an unresolvable task is treated as
-        having no translation MR rather than failing the whole page.
+        ``_has_delivery_mr`` drives the filter, ``_trans_mrs`` (the MR chain,
+        oldest first) lets the render paint Trans MR# straight away instead of
+        resolving it a second time asynchronously. Never raises — an
+        unresolvable task is treated as having no translation MR rather than
+        failing the whole page.
 
         Resolution mirrors what the table itself does, cheapest first:
 
@@ -1662,13 +1693,14 @@ class MRPipelineTab:
         Steps 2 and 3 are cached process-wide (mr_jira / GitLabClient), so
         tasks sharing a source MR cost one round trip between them.
         """
-        t["_fix_ref"] = None
         ref = _delivery.delivery_from_task(t)
         if ref is not None:
-            t["_delivery_ref"] = ref
+            # The rest of the chain (import MR, earlier fixes) is filled in by
+            # the table's own GitLab search once the row renders.
+            t["_trans_mrs"] = [ref]
             t["_has_delivery_mr"] = True
             return
-        t["_delivery_ref"] = None
+        t["_trans_mrs"] = []
         t["_has_delivery_mr"] = False
         project = str(t.get("project_id") or "").strip()
         source_iid = _delivery.parse_mr_iid(t.get("merge_request_iid"))
@@ -1684,16 +1716,14 @@ class MRPipelineTab:
             metadata = _jira.fetch_jira_metadata(project, source_iid)
             if metadata is None or str(metadata.state).lower() != "merged":
                 return
-            import_ref, fix_ref = _delivery.find_follow_up_mrs(
+            chain = _delivery.find_trans_mrs(
                 project, source_iid, task_id=t.get("task_id"))
         except Exception:
             return
-        # Either one alone still renders a Trans MR# — a fix MR can outlive
-        # an import MR the search no longer matches.
-        t["_delivery_ref"] = import_ref or fix_ref
-        t["_fix_ref"] = fix_ref if (fix_ref is not None
-                                    and fix_ref is not t["_delivery_ref"]) else None
-        t["_has_delivery_mr"] = t["_delivery_ref"] is not None
+        # Any MR at all still renders a Trans MR# — a fix MR can outlive an
+        # import MR the search no longer matches.
+        t["_trans_mrs"] = chain
+        t["_has_delivery_mr"] = bool(chain)
 
     def _check_task_translations(self, t):
         """Check a task's translation count via API; attach _translations_count,
@@ -2073,6 +2103,8 @@ class MRPipelineTab:
             # Every follow-up MR must be re-verified against GitLab on an
             # explicit Search/Refresh (see _claim_delivery_status_refresh).
             self._delivery_status_refreshed = set()
+            # A new result set re-fits Trans MR# to its own longest chain.
+            self._reset_trans_mr_column()
             self._jira_titles_by_iid = {}
             self._truncated_title_iids = set()
             self._hide_title_tooltip()
@@ -2191,26 +2223,30 @@ class MRPipelineTab:
                 (branch_cached or "—") if branch_cached is not None
                 else ("…" if can_resolve else "—")
             )
-            # ``_delivery_ref`` is present when the "Trans MR# exists" filter
+            # ``_trans_mrs`` is present when the "Trans MR# exists" filter
             # already resolved this task — reuse it so Trans MR# paints with
-            # the row instead of flickering through "…".
-            delivery = t.get("_delivery_ref") or _delivery.delivery_from_task(t)
+            # the row instead of flickering through "…". Otherwise the payload
+            # names one MR and the GitLab search fills in the rest of the
+            # chain (_prefetch_missing_delivery_mrs).
+            trans_mrs = t.get("_trans_mrs")
+            if trans_mrs is None:
+                payload_ref = _delivery.delivery_from_task(t)
+                trans_mrs = [payload_ref] if payload_ref is not None else []
+            trans_mrs = [self._with_live_state(ref) for ref in trans_mrs]
+            current = _delivery.current_trans_mr(trans_mrs)
             delivery_key = None
-            if delivery is not None:
-                delivery_display = delivery.iid
+            if current is not None:
+                delivery_display = _delivery.format_trans_mr_cell(trans_mrs)
                 delivery_key = _jira._normalize_key(
-                    delivery.project_id, delivery.iid)
-                delivery_state = (
-                    _jira.get_cached_state(*delivery_key)
-                    if delivery_key is not None else None)
-                if delivery_state is not None:
+                    current.project_id, current.iid)
+                if current.state:
                     delivery_status_display = (
-                        _jira.display_mr_state(delivery_state) or "—")
+                        _jira.display_mr_state(current.state) or "—")
                 elif jira_fetchable:
                     delivery_status_display = "…"
                 else:
                     delivery_status_display = "—"
-                delivery_branch = delivery.target_branch or (
+                delivery_branch = current.target_branch or (
                     _jira.get_cached_branch(*delivery_key)
                     if delivery_key is not None else None)
                 if delivery_branch:
@@ -2231,7 +2267,6 @@ class MRPipelineTab:
                 str(t.get("mr_link") or "").strip()
                 or _delivery.gitlab_mr_url(raw_project, mr_iid)
             )
-            delivery_url = delivery.url if delivery is not None else ""
 
             iid = self.mr_tree.insert(
                 "", "end",
@@ -2253,12 +2288,11 @@ class MRPipelineTab:
                 "project": raw_project,
                 "source_iid": _delivery.parse_mr_iid(mr_iid),
                 "source_url": source_url,
-                "delivery_iid": delivery.iid if delivery is not None else None,
-                "delivery_url": delivery_url,
-                "delivery_branch": (
-                    delivery.target_branch if delivery is not None else ""),
                 "task_id": task_id,
+                "trans_mrs": trans_mrs,
             }
+            if trans_mrs:
+                self._fit_trans_mr_column(delivery_display)
             if delivery_key is not None:
                 self._delivery_row_iids.setdefault(delivery_key, []).append(iid)
                 if self._claim_delivery_status_refresh(delivery_key):
@@ -2691,13 +2725,14 @@ class MRPipelineTab:
                 "delivery_branch", "delivery_mr_status"):
             self._apply_sort(*self._mr_sort)
         # Source-MR state is now known: merged sources may have a translation
-        # import MR, and a known import MR may have a later Language Lead
-        # fix MR on tranzor-mr-fix-*.
+        # import MR, and any known Trans MR may have Language Lead fix MRs on
+        # tranzor-mr-fix-* around it.
         self._prefetch_missing_delivery_mrs()
 
     def _prefetch_missing_delivery_mrs(self):
-        """GitLab-search the original Trans MR and any later fix successor."""
-        groups = {}  # (project, source_iid) → [(tree_iid, task_id, known_iid)]
+        """GitLab-search each row's whole Trans MR chain: the original import
+        MR and every later Language Lead fix MR."""
+        groups = {}  # (project, source_iid) → [(tree_iid, task_id, known)]
         try:
             rows = list(self.mr_tree.get_children(""))
         except tk.TclError:
@@ -2706,20 +2741,20 @@ class MRPipelineTab:
             meta = self._mr_link_meta.get(tree_iid) or {}
             project = meta.get("project") or ""
             source_iid = meta.get("source_iid")
-            known_iid = meta.get("delivery_iid")
+            known = list(meta.get("trans_mrs") or ())
             try:
                 cell = str(self.mr_tree.set(tree_iid, "delivery_mr") or "")
                 status = str(self.mr_tree.set(tree_iid, "mr_status") or "")
             except tk.TclError:
                 continue
             if not project or source_iid is None:
-                if not known_iid and cell == "…":
+                if not known and cell == "…":
                     self._clear_delivery_cells(tree_iid)
                 continue
-            if known_iid:
+            if known:
                 groups.setdefault(
                     (str(project), int(source_iid)), []
-                ).append((tree_iid, meta.get("task_id") or tree_iid, known_iid))
+                ).append((tree_iid, meta.get("task_id") or tree_iid, known))
                 continue
             if cell not in ("…",):
                 continue
@@ -2751,29 +2786,13 @@ class MRPipelineTab:
                             project_id=project, in_field="title") or []
                 except Exception:
                     mrs = []
-                for tree_iid, task_id, known_iid in row_jobs:
-                    picked_import = _delivery.pick_delivery_mr(
-                        mrs, source_iid, task_id=task_id)
-                    if known_iid:
-                        import_ref = (
-                            _delivery.ref_from_iid(
-                                mrs, known_iid, fallback_project=project)
-                            or _delivery.DeliveryRef(
-                                project_id=project, iid=int(known_iid),
-                                url=_delivery.gitlab_mr_url(project, known_iid))
-                        )
-                    else:
-                        import_ref = _delivery.delivery_ref_from_mr(
-                            picked_import, fallback_project=project)
-                    exclude = import_ref.iid if import_ref is not None else known_iid
-                    picked_fix = _delivery.pick_fix_mr(
-                        mrs, source_iid, exclude_iid=exclude)
-                    fix_ref = _delivery.delivery_ref_from_mr(
-                        picked_fix, fallback_project=project)
+                for tree_iid, task_id, known in row_jobs:
+                    chain = _delivery.trans_mr_chain(
+                        mrs, source_iid, task_id=task_id, known=known,
+                        fallback_project=project)
                     try:
                         self.parent.after(
-                            0, self._apply_follow_ups,
-                            tree_iid, import_ref, fix_ref)
+                            0, self._apply_trans_mrs, tree_iid, chain)
                     except Exception:
                         pass
 
@@ -2790,14 +2809,7 @@ class MRPipelineTab:
     def _clear_delivery_cells(self, tree_iid):
         meta = self._mr_link_meta.get(tree_iid)
         if meta is not None:
-            meta["delivery_iid"] = None
-            meta["delivery_url"] = ""
-            meta["delivery_state"] = ""
-            meta["delivery_branch"] = ""
-            meta["fix_iid"] = None
-            meta["fix_url"] = ""
-            meta["fix_state"] = ""
-            meta["fix_branch"] = ""
+            meta["trans_mrs"] = []
         try:
             self.mr_tree.set(tree_iid, "delivery_mr", "—")
             self.mr_tree.set(tree_iid, "delivery_branch", "—")
@@ -2805,83 +2817,109 @@ class MRPipelineTab:
         except tk.TclError:
             pass
 
-    def _apply_delivery_mr(self, tree_iid, ref):
-        """Paint one Trans MR# + Trans MR Status pair. Runs on the Tk thread."""
-        self._apply_follow_ups(tree_iid, ref, None)
+    def _apply_trans_mrs(self, tree_iid, chain):
+        """Paint a row's whole Trans MR chain (oldest first). Tk thread only.
 
-    def _apply_follow_ups(self, tree_iid, import_ref, fix_ref=None):
-        """Paint original import MR plus an optional later Language Lead fix MR."""
+        ``chain`` already carries the MRs the row knew before the GitLab
+        search (see mr_delivery.trans_mr_chain), so an empty one really
+        means "no translation MR".
+        """
         meta = self._mr_link_meta.get(tree_iid)
         if meta is None:
             return
-        if import_ref is None and not meta.get("delivery_iid") and fix_ref is None:
+        chain = [self._with_live_state(ref) for ref in (chain or ())]
+        if not chain:
             self._clear_delivery_cells(tree_iid)
             return
-        if import_ref is not None:
-            meta["delivery_iid"] = import_ref.iid
-            meta["delivery_url"] = import_ref.url
-            meta["delivery_state"] = import_ref.state
-            meta["delivery_branch"] = import_ref.target_branch
-        if (fix_ref is not None
-                and fix_ref.iid != meta.get("delivery_iid")):
-            meta["fix_iid"] = fix_ref.iid
-            meta["fix_url"] = fix_ref.url
-            meta["fix_state"] = fix_ref.state
-            meta["fix_branch"] = fix_ref.target_branch
-        else:
-            meta["fix_iid"] = None
-            meta["fix_url"] = ""
-            meta["fix_state"] = ""
-            meta["fix_branch"] = ""
+        meta["trans_mrs"] = chain
         self._paint_delivery_row(tree_iid)
+
+    @staticmethod
+    def _with_live_state(ref):
+        """``ref`` carrying the live GitLab state, once one has been fetched.
+
+        The title search that built ``ref`` is cached for minutes, while the
+        live state is force-refreshed once per Search (_prefetch_delivery_
+        status). Letting a late search result overwrite a fresher live state
+        would pin Trans MR Status at "Open" after the MR merged (#202).
+        """
+        key = _jira._normalize_key(ref.project_id, ref.iid)
+        live = _jira.get_cached_state(*key) if key is not None else None
+        if not live or live == ref.state:
+            return ref
+        return replace(ref, state=live)
 
     def _paint_delivery_row(self, tree_iid):
         meta = self._mr_link_meta.get(tree_iid) or {}
-        display = _delivery.format_trans_mr_cell(
-            meta.get("delivery_iid"), meta.get("fix_iid"))
-        current_iid = _delivery.current_trans_mr_iid(
-            meta.get("delivery_iid"), meta.get("fix_iid"))
-        # Branch and status both describe the *current* Trans MR — the fix MR
-        # when the cell reads "4213 → 4214", the import MR otherwise.
-        following_fix = (meta.get("fix_iid") is not None
-                         and meta.get("fix_iid") == current_iid)
-        current_state = (meta.get("fix_state") if following_fix
-                         else meta.get("delivery_state"))
-        current_branch = (meta.get("fix_branch") if following_fix
-                          else meta.get("delivery_branch"))
-        if current_state:
-            status_display = _jira.display_mr_state(current_state) or "—"
-        elif current_iid is not None:
-            status_display = "…"
-        else:
+        chain = meta.get("trans_mrs") or []
+        display = _delivery.format_trans_mr_cell(chain)
+        # Branch and status both describe the *current* Trans MR: the newest
+        # one ("4237" of "4213 → 4214 → 4233 → 4237"), unless an older one is
+        # still open — that is the translation work still in flight.
+        current = _delivery.current_trans_mr(chain)
+        dkey = (_jira._normalize_key(current.project_id, current.iid)
+                if current is not None else None)
+        if current is None:
             status_display = "—"
-        if current_branch:
-            branch_display = current_branch
-        elif current_iid is not None:
-            branch_display = "…"
-        else:
             branch_display = "—"
+        else:
+            status_display = ((_jira.display_mr_state(current.state) or "—")
+                              if current.state else "…")
+            branch = current.target_branch or (
+                _jira.get_cached_branch(*dkey) if dkey is not None else None)
+            branch_display = branch or "…"
         try:
             self.mr_tree.set(tree_iid, "delivery_mr", display)
             self.mr_tree.set(tree_iid, "delivery_branch", branch_display)
             self.mr_tree.set(tree_iid, "delivery_mr_status", status_display)
         except tk.TclError:
             return
-        project = meta.get("project") or ""
-        dkey = _jira._normalize_key(project, current_iid)
+        self._fit_trans_mr_column(display)
         if dkey is None:
             return
         rows = self._delivery_row_iids.setdefault(dkey, [])
         if tree_iid not in rows:
             rows.append(tree_iid)
-        # ``current_state`` is a *last-known* value, not a live one: it comes
+        # ``current.state`` is a *last-known* value, not a live one: it comes
         # from the GitLab title search that resolved this follow-up MR, whose
         # result set is cached (GitLabClient.list_merge_requests). Trusting it
         # kept Trans MR Status pinned at "Open" for the rest of the session
         # after the translation MR merged. Verify it against GitLab the same
         # way the source MR Status column does — once per Search/Refresh.
-        if current_iid is not None and self._claim_delivery_status_refresh(dkey):
+        if self._claim_delivery_status_refresh(dkey):
             self._prefetch_delivery_status([dkey])
+
+    def _fit_trans_mr_column(self, text):
+        """Widen Trans MR# until ``text`` — one row's MR chain — fits.
+
+        ttk clips an overflowing cell without an ellipsis, and a chain with a
+        cut-off tail would hide exactly the MRs this column exists to show.
+        Grow-only within a result set (_reset_trans_mr_column starts the next
+        one over); Title, the elastic column, gives up the room.
+        """
+        font = getattr(self, "_mr_title_font", None)
+        tree = getattr(self, "mr_tree", None)
+        if font is None or tree is None:
+            return
+        try:
+            need = int(font.measure(str(text))) + _TRANS_MR_CELL_PAD_PX
+            if need <= int(tree.column("delivery_mr", "width")):
+                return
+            tree.column("delivery_mr", width=need)
+        except (tk.TclError, TypeError, ValueError, AttributeError):
+            return
+        self._fit_mr_title_column()
+        self._schedule_title_ellipsis()
+
+    def _reset_trans_mr_column(self):
+        tree = getattr(self, "mr_tree", None)
+        if tree is None:
+            return
+        try:
+            tree.column("delivery_mr", width=_TRANS_MR_COL_PX)
+        except (tk.TclError, AttributeError):
+            return
+        self._fit_mr_title_column()
 
     def _claim_delivery_status_refresh(self, key) -> bool:
         """True the first time ``key`` needs a live-state fetch this repaint.
@@ -2937,27 +2975,27 @@ class MRPipelineTab:
             if raw_state is not None else "—"
         )
         want_iid = key[1] if isinstance(key, tuple) and len(key) > 1 else None
-        for iid in self._delivery_row_iids.get(key, ()):
+        # A copy: repainting a row below registers it under its new key.
+        for iid in list(self._delivery_row_iids.get(key, ())):
             meta = getattr(self, "_mr_link_meta", {}).get(iid) or {}
-            current = _delivery.current_trans_mr_iid(
-                meta.get("delivery_iid"), meta.get("fix_iid"))
-            if current is None or want_iid not in (None, current):
+            chain = meta.get("trans_mrs") or []
+            current = _delivery.current_trans_mr(chain)
+            if current is None or want_iid not in (None, current.iid):
                 continue
-            known = (meta.get("fix_state") if meta.get("fix_iid") == current
-                     else meta.get("delivery_state"))
-            if raw_state is None and known:
+            if raw_state is None and current.state:
                 # Transient fetch failure. Keep the last known state rather
                 # than knocking a correct cell back to "—".
                 continue
             branch = _jira.get_cached_branch(*key) or ""
-            if meta.get("fix_iid") == current:
-                meta["fix_state"] = raw_state or ""
-                if branch:
-                    meta["fix_branch"] = branch
-            elif meta.get("delivery_iid") == current:
-                meta["delivery_state"] = raw_state or ""
-                if branch:
-                    meta["delivery_branch"] = branch
+            updated = replace(current, state=raw_state or "",
+                              target_branch=branch or current.target_branch)
+            chain = [updated if ref is current else ref for ref in chain]
+            meta["trans_mrs"] = chain
+            if _delivery.current_trans_mr(chain) is not updated:
+                # The open MR this row followed has merged or closed: the
+                # row now follows another MR of the chain, so repaint it.
+                self._paint_delivery_row(iid)
+                continue
             try:
                 self.mr_tree.set(iid, "delivery_mr_status", status_display)
                 if branch:
@@ -3066,17 +3104,39 @@ class MRPipelineTab:
             if column == self._col_ident("mr"):
                 return str(meta.get("source_url") or "")
             if column == self._col_ident("delivery_mr"):
-                return str(meta.get("fix_url") or meta.get("delivery_url") or "")
+                return self._trans_mr_url_at(iid, x)
         except tk.TclError:
             return ""
         return ""
+
+    def _trans_mr_url_at(self, iid, x):
+        """GitLab URL of the Trans MR under the pointer in a Trans MR# cell.
+
+        Each iid of "4213 → 4214 → 4233 → 4237" opens its own MR. Without the
+        cell geometry (or for a single MR) the current Trans MR is the target.
+        """
+        chain = (self._mr_link_meta.get(iid) or {}).get("trans_mrs") or []
+        ref = _delivery.current_trans_mr(chain)
+        if len(chain) > 1:
+            try:
+                cell_x, _y, cell_w, _h = self.mr_tree.bbox(iid, "delivery_mr")
+                hit = _trans_mr_index_at(
+                    x - cell_x, cell_w, [str(r.iid) for r in chain],
+                    self._mr_title_font.measure)
+            except (tk.TclError, AttributeError, TypeError, ValueError):
+                hit = None
+            if hit is not None:
+                ref = chain[hit]
+        if ref is None:
+            return ""
+        return ref.url or _delivery.gitlab_mr_url(ref.project_id, ref.iid)
 
     def _jira_link_at(self, x, y):
         """Backward-compatible alias used by existing unit tests."""
         return self._mr_tree_link_at(x, y)
 
     def _title_tooltip_at(self, x, y):
-        """Return ``(iid, text)`` for a truncated Title or a Trans MR successor."""
+        """Return ``(iid, text)`` for a truncated Title or a multi-MR Trans MR#."""
         if self.mr_tree.identify_region(x, y) != "cell":
             return None
         column = self.mr_tree.identify_column(x)
@@ -3104,23 +3164,34 @@ class MRPipelineTab:
         return None
 
     def _delivery_tooltip_text(self, iid):
+        """One line per Trans MR of a multi-MR chain, oldest first:
+        ``!4214 · Merged · 2026-09-20 17:37 UTC+8 · Language Lead fix``."""
         meta = getattr(self, "_mr_link_meta", {}).get(iid) or {}
-        import_iid = meta.get("delivery_iid")
-        fix_iid = meta.get("fix_iid")
-        if not import_iid or not fix_iid or import_iid == fix_iid:
+        chain = meta.get("trans_mrs") or []
+        if len(chain) < 2:
             return ""
-        import_status = (
-            _jira.display_mr_state(meta.get("delivery_state")) or "—")
-        fix_status = _jira.display_mr_state(meta.get("fix_state")) or "—"
+        lines = [self._t_or("mr_trans_mr_tooltip_head",
+                            "Translation MRs, oldest first:")]
+        for ref in chain:
+            if _delivery.is_fix_branch(ref.source_branch):
+                role = self._t_or("mr_trans_mr_role_fix", "Language Lead fix")
+            elif ref.source_branch:
+                role = self._t_or("mr_trans_mr_role_import",
+                                  "translation import")
+            else:
+                role = ""  # Named by the task payload only.
+            parts = [f"!{ref.iid}", _jira.display_mr_state(ref.state),
+                     format_display_datetime(ref.created_at, fmt=FMT_MINUTE),
+                     role]
+            lines.append(" · ".join(p for p in parts if p))
+        return "\n".join(lines)
+
+    def _t_or(self, key, fallback):
+        """``self._t(key)``, or ``fallback`` where no app is attached."""
         try:
-            template = self._t("mr_trans_mr_tooltip")
+            return self._t(key)
         except Exception:
-            template = (
-                "Translations imported in !{import_iid} ({import_status}). "
-                "Later Language Lead fixes in !{fix_iid} ({fix_status}).")
-        return template.format(
-            import_iid=import_iid, import_status=import_status,
-            fix_iid=fix_iid, fix_status=fix_status)
+            return fallback
 
     def _update_title_tooltip_hover(self, event):
         target = self._title_tooltip_at(event.x, event.y)
