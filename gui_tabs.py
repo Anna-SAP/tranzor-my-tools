@@ -232,6 +232,21 @@ def _trans_mr_index_at(offset_x, cell_width, labels, measure,
         return None
 
 
+def _branch_matches(branch, query):
+    """Fuzzy MR Branch / Trans MR Branch filter match.
+
+    Every space-separated keyword of ``query`` must appear in ``branch``,
+    ignoring case: "xmn-ft5" and "26-4 ft5" both match ``26-4-2_XMN-FT5``.
+    Git forbids spaces in branch names, so a space can only be a separator.
+    An empty query matches everything; an unknown branch matches nothing.
+    """
+    words = str(query or "").lower().split()
+    if not words:
+        return True
+    text = str(branch or "").lower()
+    return bool(text) and all(word in text for word in words)
+
+
 def _recent_project_tooltip(project_id, relative="", absolute=""):
     """Hover text for a Recently Added row: full path + relative + absolute."""
     parts = [str(project_id or "").strip()]
@@ -572,6 +587,40 @@ class MRPipelineTab:
                                         font=(FONT_FAMILY, 10),
                                         bg="#0a0a1a", fg="#fff", insertbackground="#fff", relief="flat")
         self.ent_mr_task_id.pack(side="left", padx=(4, 0), ipady=3)
+
+        # MR Branch / Trans MR Branch — the MR# Entry and its Search-time
+        # semantics, as fuzzy text matches (_branch_matches). Both columns
+        # come from GitLab rather than the task payload, so the match runs
+        # inside the fetch loop and streams like "Trans MR# exists" (see
+        # _filter_batch_by_branch). They sit on this row, not row 1, so a
+        # 1280px window still shows every filter.
+        self.lbl_mr_branch_filter = ttk.Label(r1b, text="", style="Card.TLabel")
+        self.lbl_mr_branch_filter.pack(side="left", padx=(16, 0))
+        self.mr_branch_var = tk.StringVar()
+        self.ent_mr_branch = tk.Entry(
+            r1b, textvariable=self.mr_branch_var, width=16,
+            font=(FONT_FAMILY, 10), bg="#0a0a1a", fg="#fff",
+            insertbackground="#fff", relief="flat")
+        self.ent_mr_branch.pack(side="left", padx=(4, 0), ipady=3)
+        self.lbl_mr_trans_branch_filter = ttk.Label(
+            r1b, text="", style="Card.TLabel")
+        self.lbl_mr_trans_branch_filter.pack(side="left", padx=(16, 0))
+        self.mr_trans_branch_var = tk.StringVar()
+        self.ent_mr_trans_branch = tk.Entry(
+            r1b, textvariable=self.mr_trans_branch_var, width=16,
+            font=(FONT_FAMILY, 10), bg="#0a0a1a", fg="#fff",
+            insertbackground="#fff", relief="flat")
+        self.ent_mr_trans_branch.pack(side="left", padx=(4, 0), ipady=3)
+        for entry in (self.ent_mr_branch, self.ent_mr_trans_branch):
+            entry.bind("<Return>", lambda _event: self._on_search())
+        self._mr_branch_tip = None
+        self._mr_trans_branch_tip = None
+        try:
+            from export_gui import Tooltip as _Tooltip
+            self._mr_branch_tip = _Tooltip(self.ent_mr_branch, "")
+            self._mr_trans_branch_tip = _Tooltip(self.ent_mr_trans_branch, "")
+        except Exception:
+            pass
 
         # Row 2: Date range + buttons
         r2 = ttk.Frame(fi, style="Card.TFrame")
@@ -1248,6 +1297,14 @@ class MRPipelineTab:
         self.lbl_mr_date.configure(text=t("mr_date_range"))
         self.lbl_mr_task_id.configure(text=t("mr_task_id"))
         self.lbl_mr_jira_id.configure(text=t("mr_jira_id"))
+        # Same words as the column headers, so filter and column read alike.
+        self.lbl_mr_branch_filter.configure(text=t("mr_col_mr_branch"))
+        self.lbl_mr_trans_branch_filter.configure(
+            text=t("mr_col_delivery_branch"))
+        if getattr(self, "_mr_branch_tip", None) is not None:
+            self._mr_branch_tip.set_text(t("mr_branch_filter_tip"))
+        if getattr(self, "_mr_trans_branch_tip", None) is not None:
+            self._mr_trans_branch_tip.set_text(t("mr_trans_branch_filter_tip"))
         self.btn_mr_search.configure(text=t("mr_search"))
         self.btn_mr_reset.configure(text=t("mr_reset"))
         self.btn_mr_export.configure(text=t("mr_export"))
@@ -1431,6 +1488,8 @@ class MRPipelineTab:
         self.mr_iid_var.set("")
         self.mr_task_id_var.set("")
         self.mr_jira_var.set("")
+        self.mr_branch_var.set("")
+        self.mr_trans_branch_var.set("")
         self.mr_date_from.delete(0, "end")
         self.mr_date_to.delete(0, "end")
         self._invalidate_post_edit_cache()
@@ -1451,6 +1510,8 @@ class MRPipelineTab:
             or self.mr_iid_var.get().strip()
             or self.mr_task_id_var.get().strip()
             or self.mr_jira_var.get().strip()
+            or self.mr_branch_var.get().strip()
+            or self.mr_trans_branch_var.get().strip()
         )
         effective_total = self.mr_filtered_total if filters_active else self.mr_total
         # Skip past every page already visible in the current extended
@@ -1476,6 +1537,8 @@ class MRPipelineTab:
             or self.mr_iid_var.get().strip()
             or self.mr_task_id_var.get().strip()
             or self.mr_jira_var.get().strip()
+            or self.mr_branch_var.get().strip()
+            or self.mr_trans_branch_var.get().strip()
         )
         effective_total = self.mr_filtered_total if filters_active else self.mr_total
         items_shown = (self.mr_page + 1 + self.mr_extra_pages) * self.mr_page_size
@@ -1640,9 +1703,11 @@ class MRPipelineTab:
         answers the narrower "Trans MR# is open". The open state is only
         resolved when asked for, because it costs one extra GitLab call —
         affordable precisely because it runs on the ~1% of scanned tasks that
-        got this far.
+        got this far. A chain the Trans MR Branch filter already resolved for
+        this task is reused as is.
         """
-        self._resolve_task_delivery_mr(t)
+        if t.get("_trans_mrs") is None:
+            self._resolve_task_delivery_mr(t)
         t["_trans_mr_state"] = ""
         t["_trans_mr_open"] = False
         if want_open and t.get("_has_delivery_mr"):
@@ -1725,6 +1790,84 @@ class MRPipelineTab:
         t["_trans_mrs"] = chain
         t["_has_delivery_mr"] = bool(chain)
 
+    def _filter_batch_by_branch(self, batch, mr_query, trans_query):
+        """Keep the tasks whose MR Branch / Trans MR Branch match the filters.
+
+        Neither branch is in the task payload: MR Branch is the source MR's
+        target branch and Trans MR Branch that of the Trans MR the row shows,
+        both from GitLab. They are resolved here once per distinct MR, into
+        the same caches the table paints from, so the matching rows render
+        with both cells already filled. A branch GitLab cannot resolve
+        matches nothing. Worker-thread only.
+        """
+        batch = list(batch or ())
+        if not (mr_query or trans_query):
+            return batch
+        if trans_query:
+            # A skipped task never ran: no Trans MR, so no branch to match.
+            batch = [t for t in batch if not self._cannot_have_trans_mr(t)]
+        if not batch:
+            return batch
+        # One GET per distinct source MR fills MR Branch — and the "has it
+        # merged" gate the Trans MR lookup below needs anyway.
+        self._warm_delivery_probe(batch)
+        if mr_query:
+            batch = [t for t in batch
+                     if _branch_matches(self._source_branch(t), mr_query)]
+        if trans_query and batch:
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                list(pool.map(self._resolve_trans_mr_branch, batch))
+            batch = [t for t in batch
+                     if _branch_matches(t.get("_trans_mr_branch"), trans_query)]
+        return batch
+
+    def _source_branch(self, t):
+        """Target branch of the task's source MR ("" when GitLab can't say).
+
+        Normally a cache hit — _warm_delivery_probe just fetched it.
+        """
+        project = str(t.get("project_id") or "").strip()
+        source_iid = _delivery.parse_mr_iid(t.get("merge_request_iid"))
+        if (not project or source_iid is None
+                or self._probe_is_dead((project, source_iid))):
+            return ""
+        branch = _jira.get_cached_branch(project, source_iid)
+        if branch is None:
+            metadata = _jira.fetch_jira_metadata(project, source_iid)
+            branch = metadata.target_branch if metadata is not None else ""
+        return branch or ""
+
+    def _resolve_trans_mr_branch(self, t):
+        """Resolve the target branch of the Trans MR this task's row shows.
+
+        The payload names a single MR (the newest fix, see mr_delivery), so
+        a chain that came from it is completed with one title search — the
+        row then paints every MR at once, and the MR the branch belongs to
+        is the one Trans MR Branch will show. Never raises.
+        """
+        t["_trans_mr_branch"] = ""
+        try:
+            if t.get("_trans_mrs") is None:
+                self._resolve_task_delivery_mr(t)
+            chain = t.get("_trans_mrs") or []
+            if chain and any(not ref.source_branch for ref in chain):
+                chain = _delivery.find_trans_mrs(
+                    t.get("project_id"), t.get("merge_request_iid"),
+                    task_id=t.get("task_id"), known=chain)
+                t["_trans_mrs"] = chain
+                t["_has_delivery_mr"] = bool(chain)
+            current = _delivery.current_trans_mr(chain)
+            if current is None:
+                return
+            branch = current.target_branch
+            if not branch:
+                metadata = _jira.fetch_jira_metadata(
+                    current.project_id, current.iid)
+                branch = metadata.target_branch if metadata is not None else ""
+            t["_trans_mr_branch"] = branch or ""
+        except Exception:
+            t["_trans_mr_branch"] = ""
+
     def _check_task_translations(self, t):
         """Check a task's translation count via API; attach _translations_count,
         _src_string_count and average_score.
@@ -1780,13 +1923,24 @@ class MRPipelineTab:
             trans_mr_only = self.mr_trans_mr_only_var.get() or trans_mr_open
             if trans_mr_only and not _jira.can_fetch():
                 raise RuntimeError(self._t("mr_trans_mr_token_required"))
-            # Only the Trans MR# path streams: it is the one filter whose
-            # hit rate (~1%) makes a page cost thousands of probes. Every
-            # other path fills a page in one or two batches, where streaming
-            # would just add flicker.
-            if trans_mr_only:
-                self._scan_cancel = threading.Event()
-                self.parent.after(0, self._set_scan_button, True)
+            mr_branch_filter = self.mr_branch_var.get().strip()
+            trans_branch_filter = self.mr_trans_branch_var.get().strip()
+            branch_filter = bool(mr_branch_filter or trans_branch_filter)
+            if branch_filter and not _jira.can_fetch():
+                raise RuntimeError(self._t("mr_branch_token_required"))
+            # Only the GitLab-backed filters stream: Trans MR# (hit rate ~1%)
+            # and the branch filters, whose hit rate is whatever the typed
+            # branch makes it. Either can cost thousands of probes per page;
+            # every other path fills a page in one or two batches, where
+            # streaming would just add flicker. The scan starts below, after
+            # the single-lookup paths that return early without closing one.
+            streaming = trans_mr_only or branch_filter
+            # Load More may resume a scan only if it asks the same question.
+            scan_filters = (
+                tuple(sorted(proj_set)), rel, status, mr_iid_filter,
+                jira_filter, hide_empty, trans_mr_only, trans_mr_open,
+                tuple(mr_branch_filter.lower().split()),
+                tuple(trans_branch_filter.lower().split()))
             matching_mr_iids = set()
             if mr_iid_filter:
                 expand_projects = (
@@ -1839,6 +1993,11 @@ class MRPipelineTab:
                         detail = None
                     else:
                         detail["_jira_ticket_id"] = jira_filter
+                if (isinstance(detail, dict) and detail.get("task_id")
+                        and branch_filter):
+                    if not self._filter_batch_by_branch(
+                            [detail], mr_branch_filter, trans_branch_filter):
+                        detail = None
                 if isinstance(detail, dict) and detail.get("task_id"):
                     if hide_empty:
                         self._check_task_translations(detail)
@@ -1879,8 +2038,14 @@ class MRPipelineTab:
                     return
 
             need_filter = (
-                hide_empty or trans_mr_only
+                hide_empty or trans_mr_only or branch_filter
                 or bool(mr_iid_filter) or bool(jira_filter))
+            if streaming:
+                # Progress wording: "with a Trans MR" only fits that filter.
+                self._scan_msg_prefix = (
+                    "mr_filter_scan" if branch_filter else "mr_scan")
+                self._scan_cancel = threading.Event()
+                self.parent.after(0, self._set_scan_button, True)
 
             if not need_filter:
                 # Simple path: no client-side filtering needed
@@ -1903,12 +2068,16 @@ class MRPipelineTab:
                 total_matched = 0
                 total_scanned = 0
 
-                # Load More on a Trans MR# scan resumes where the last one
+                # Load More on a streaming scan resumes where the last one
                 # stopped. Without this it restarts at offset 0 and re-scans
                 # every task it already rejected, only to throw the first
                 # page's matches away via skip_count — so page 2 costs page 1
-                # plus page 2, page 3 costs 1+2+3, and so on.
-                cursor = self._scan_cursor if (append and trans_mr_only) else None
+                # plus page 2, page 3 costs 1+2+3, and so on. A filter edited
+                # since (a typed branch, say) asks a different question, and
+                # the carried-over matches no longer answer it.
+                cursor = self._scan_cursor if (append and streaming) else None
+                if cursor is not None and cursor.get("filters") != scan_filters:
+                    cursor = None
                 carry = []
                 if cursor is not None:
                     offset = cursor["offset"]
@@ -1962,6 +2131,18 @@ class MRPipelineTab:
                         batch = [t for t in batch
                                  if _delivery.task_matches_mr_iid(
                                      t, matching_mr_iids)]
+
+                    # MR Branch / Trans MR Branch: one cached GitLab call per
+                    # distinct MR is still cheaper than the per-task results
+                    # fetch below, so they go first and shrink what Hide
+                    # empty MRs has to count. A skipped task never ran, so
+                    # Hide empty MRs would drop it anyway — skip its lookups.
+                    if branch_filter and batch:
+                        if hide_empty:
+                            batch = [t for t in batch
+                                     if not self._cannot_have_trans_mr(t)]
+                        batch = self._filter_batch_by_branch(
+                            batch, mr_branch_filter, trans_branch_filter)
 
                     # A Trans MR# scan can rule most of the batch out from
                     # the payload alone, before paying for a results fetch.
@@ -2023,14 +2204,14 @@ class MRPipelineTab:
                         if len(collected) < target:
                             collected.append(t)
                             chunk.append(t)
-                        elif trans_mr_only:
+                        elif streaming:
                             # Already paid for; hand it to the next Load More
                             # instead of re-finding it (see _scan_cursor).
                             carry.append(t)
 
                     offset += batch_size
 
-                    if trans_mr_only:
+                    if streaming:
                         # Hand this batch's matches to the table now. The
                         # first chunk replaces the previous result set; the
                         # rest extend it, all forming one page (see the
@@ -2056,13 +2237,14 @@ class MRPipelineTab:
                 else:
                     estimated_total = total_matched
 
-                if trans_mr_only:
+                if streaming:
                     # Remember where to pick up, plus the matches already
                     # found past this page, so Load More doesn't re-scan.
                     self._scan_cursor = {
                         "offset": offset, "carry": carry,
                         "api_total": api_total,
                         "matched": total_matched, "scanned": total_scanned,
+                        "filters": scan_filters,
                     }
                     # Rows are already on screen; just close the scan out.
                     self.parent.after(
@@ -2420,8 +2602,9 @@ class MRPipelineTab:
         """Report scan progress in the status bar and loading overlay."""
         if gen != self._fetch_generation:
             return
-        self._scan_progress_text = self._t("mr_scan_progress").format(
-            scanned=scanned, total=api_total, matched=matched)
+        self._scan_progress_text = self._t(
+            self._scan_msg_key("progress")).format(
+                scanned=scanned, total=api_total, matched=matched)
         # _animate_loading repaints both surfaces on its next tick; paint now
         # so progress appears immediately rather than up to 500ms later.
         try:
@@ -2453,8 +2636,13 @@ class MRPipelineTab:
             self._on_tasks_loaded(api_total, [], filtered_total, False, 0, gen)
         self._refresh_pagination_controls(filtered_total)
         self.lbl_mr_status_bar.configure(
-            text=self._t("mr_scan_stopped" if cancelled else "mr_scan_done")
+            text=self._t(self._scan_msg_key("stopped" if cancelled else "done"))
             .format(scanned=scanned, matched=matched))
+
+    def _scan_msg_key(self, suffix):
+        """Status-bar string for the running scan: "…have a Trans MR" for the
+        Trans MR# filter alone, a plain "…match" once a branch filter joins."""
+        return f"{getattr(self, '_scan_msg_prefix', 'mr_scan')}_{suffix}"
 
     # ------------------------------------------------------------------
     # Post-edit prefetch callback. The fetcher runs on a worker thread,

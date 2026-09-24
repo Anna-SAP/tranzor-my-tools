@@ -718,6 +718,25 @@ STRINGS = {
         "mr_scan_progress": "🔀 Scanning {scanned}/{total} tasks — {matched} with a Trans MR",
         "mr_scan_done": "🔀 {matched} of {scanned} scanned tasks have a Trans MR",
         "mr_scan_stopped": "🔀 Stopped — {matched} of {scanned} scanned tasks have a Trans MR",
+        "mr_branch_filter_tip": ("Keep only tasks whose MR Branch contains this "
+                                 "text. Case-insensitive; separate words with "
+                                 "spaces to require them all (\"26-4 ft5\"). "
+                                 "Needs a GitLab token. Scans history in the "
+                                 "background — pick a Project to search a much "
+                                 "smaller set."),
+        "mr_trans_branch_filter_tip": ("Keep only tasks whose Trans MR Branch — "
+                                       "the target branch of the translation MR "
+                                       "the row shows — contains this text. "
+                                       "Case-insensitive; space-separated words "
+                                       "must all match. Tasks without a "
+                                       "translation MR never match. Needs a "
+                                       "GitLab token; scans history in the "
+                                       "background."),
+        "mr_branch_token_required": ("A GitLab token is required to filter by "
+                                     "branch."),
+        "mr_filter_scan_progress": "🔎 Scanning {scanned}/{total} tasks — {matched} match",
+        "mr_filter_scan_done": "🔎 {matched} of {scanned} scanned tasks match",
+        "mr_filter_scan_stopped": "🔎 Stopped — {matched} of {scanned} scanned tasks match",
         "summary_post_edit_legend": "✏️ = task contains at least one human-edited translation (post-edit)",
         # Quality Overview tab
         "qa_language":      "Language",
@@ -913,6 +932,12 @@ STRINGS = {
         "mr_scan_progress": "🔀 已扫描 {scanned}/{total} 个任务 — {matched} 个含翻译 MR",
         "mr_scan_done": "🔀 已扫描 {scanned} 个任务，{matched} 个含翻译 MR",
         "mr_scan_stopped": "🔀 已停止 — 已扫描 {scanned} 个任务，{matched} 个含翻译 MR",
+        "mr_branch_filter_tip": "只保留 MR 目标分支包含该关键字的任务。不区分大小写；多个关键字用空格分隔，需全部命中（如“26-4 ft5”）。需要 GitLab token。后台逐批扫描历史——先选 Project 可大幅缩小搜索范围。",
+        "mr_trans_branch_filter_tip": "只保留翻译 MR 目标分支（该行所示翻译 MR 的目标分支）包含该关键字的任务。不区分大小写；多个关键字用空格分隔，需全部命中。没有翻译 MR 的任务不会命中。需要 GitLab token；后台逐批扫描历史。",
+        "mr_branch_token_required": "按分支筛选需要配置 GitLab token。",
+        "mr_filter_scan_progress": "🔎 已扫描 {scanned}/{total} 个任务 — {matched} 个匹配",
+        "mr_filter_scan_done": "🔎 已扫描 {scanned} 个任务，{matched} 个匹配",
+        "mr_filter_scan_stopped": "🔎 已停止 — 已扫描 {scanned} 个任务，{matched} 个匹配",
         "summary_post_edit_legend": "✏️ = 该任务至少含一条经过人工编辑（post-edit）的翻译",
         # Quality Overview tab
         "qa_language":      "语言",

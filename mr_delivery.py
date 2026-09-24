@@ -382,33 +382,37 @@ def _project_path_from_mr(mr, iid) -> str:
     return ""
 
 
-def find_trans_mrs(project_id, source_iid, task_id=None, client=None) -> list:
+def find_trans_mrs(project_id, source_iid, task_id=None, known=(),
+                   client=None) -> list:
     """One GitLab title search → the task's whole Trans MR chain.
 
     Oldest first (:func:`trans_mr_chain`): the translation-import MR, then
     every later Language Lead fix MR on ``tranzor-mr-fix-*``. A task counts
     as *having* a translation MR when the chain is non-empty — a fix MR can
     outlive an import MR the search no longer matches — which is exactly
-    what the Trans MR# cell renders. Any failure (no token, no project,
-    network error) degrades to ``[]``.
+    what the Trans MR# cell renders. ``known`` (e.g. the payload's delivery
+    MR) is kept and completed. Any failure (no token, no project, network
+    error) degrades to ``known`` alone.
     """
+    fallback = sort_chronologically(known)
     pid = str(project_id or "").strip()
     src = parse_mr_iid(source_iid)
     if not pid or src is None:
-        return []
+        return fallback
     if client is None:
         client = _shared_client()
         if client is None:
-            return []
+            return fallback
     try:
         if not client.has_token():
-            return []
+            return fallback
         mrs = client.list_merge_requests(
             DELIVERY_SEARCH_TERM.format(iid=src),
             project_id=pid, in_field="title")
     except Exception:
-        return []
-    return trans_mr_chain(mrs, src, task_id=task_id, fallback_project=pid)
+        return fallback
+    return trans_mr_chain(mrs, src, task_id=task_id, known=known,
+                          fallback_project=pid)
 
 
 def find_delivery_mr(project_id, source_iid, task_id=None,
