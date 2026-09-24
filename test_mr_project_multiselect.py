@@ -236,6 +236,8 @@ class TabDisplayAndResetTests(unittest.TestCase):
         tab.mr_iid_var = _FakeVar("1")
         tab.mr_task_id_var = _FakeVar("t")
         tab.mr_jira_var = _FakeVar("X-1")
+        tab.mr_branch_var = _FakeVar("xmn")
+        tab.mr_trans_branch_var = _FakeVar("ft5")
 
         class _E:
             def delete(self, *_a):
@@ -252,6 +254,8 @@ class TabDisplayAndResetTests(unittest.TestCase):
 
         self.assertEqual(tab._mr_selected_projects, [])
         self.assertEqual(tab.mr_project_var.value, "")
+        self.assertEqual(tab.mr_branch_var.value, "")
+        self.assertEqual(tab.mr_trans_branch_var.value, "")
         self.assertEqual(tab.mr_page, 0)
         self.assertEqual(tab._loaded, 1)
 
