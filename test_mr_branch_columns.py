@@ -3,7 +3,8 @@
 Both target branches ride along on the GitLab MR responses the table already
 fetches, so the point of these tests is that the value reaches the right cell
 -- in particular that the Trans MR branch follows the *current* translation
-MR (the fix MR when the cell reads "4213 -> 4214", the import MR otherwise).
+MR (the newest fix MR when the cell reads "4213 -> 4214", the import MR
+otherwise).
 
 Run:  python -m unittest test_mr_branch_columns
 """
@@ -123,15 +124,17 @@ class TestSourceBranchCell(unittest.TestCase):
 
 class TestTransBranchCell(unittest.TestCase):
 
+    def setUp(self):
+        _jira.clear_cache()
+        self.addCleanup(_jira.clear_cache)
+
     def test_branch_follows_the_import_mr_when_there_is_no_fix(self):
         tab = _tab()
         tab._mr_link_meta = {"task-1": {"project": "common/uns"}}
-        tab._apply_follow_ups(
-            "task-1",
+        tab._apply_trans_mrs("task-1", [
             _delivery.DeliveryRef(project_id="common/uns", iid=4216,
                                   state="merged",
-                                  target_branch="26-4-2_XMN-FT5"),
-            None)
+                                  target_branch="26-4-2_XMN-FT5")])
         self.assertEqual(tab.mr_tree.cells[("task-1", "delivery_mr")], "4216")
         self.assertEqual(
             tab.mr_tree.cells[("task-1", "delivery_branch")], "26-4-2_XMN-FT5")
@@ -142,13 +145,12 @@ class TestTransBranchCell(unittest.TestCase):
         # to 26-4-2_XMN-FT5 -- exactly the divergence these columns expose.
         tab = _tab()
         tab._mr_link_meta = {"task-1": {"project": "common/uns"}}
-        tab._apply_follow_ups(
-            "task-1",
+        tab._apply_trans_mrs("task-1", [
             _delivery.DeliveryRef(project_id="common/uns", iid=4213,
                                   state="merged", target_branch="26-4_XMN-FT5"),
             _delivery.DeliveryRef(project_id="common/uns", iid=4214,
                                   state="merged",
-                                  target_branch="26-4-2_XMN-FT5"))
+                                  target_branch="26-4-2_XMN-FT5")])
         self.assertEqual(
             tab.mr_tree.cells[("task-1", "delivery_mr")], "4213 → 4214")
         self.assertEqual(
@@ -157,24 +159,23 @@ class TestTransBranchCell(unittest.TestCase):
     def test_known_mr_with_no_branch_yet_shows_the_pending_marker(self):
         tab = _tab()
         tab._mr_link_meta = {"task-1": {"project": "common/uns"}}
-        tab._apply_follow_ups(
-            "task-1",
-            _delivery.DeliveryRef(project_id="common/uns", iid=4216),
-            None)
+        tab._apply_trans_mrs("task-1", [
+            _delivery.DeliveryRef(project_id="common/uns", iid=4216)])
         self.assertEqual(
             tab.mr_tree.cells[("task-1", "delivery_branch")], "…")
 
     def test_no_trans_mr_clears_the_branch_cell(self):
         tab = _tab()
-        tab._mr_link_meta = {"task-1": {"delivery_iid": None}}
-        tab._apply_follow_ups("task-1", None, None)
+        tab._mr_link_meta = {"task-1": {"trans_mrs": []}}
+        tab._apply_trans_mrs("task-1", [])
         self.assertEqual(
             tab.mr_tree.cells[("task-1", "delivery_branch")], "—")
 
     def test_live_status_refresh_also_lands_the_branch(self):
         tab = _tab()
         tab._delivery_row_iids = {("common/uns", 4216): ["task-1"]}
-        tab._mr_link_meta = {"task-1": {"delivery_iid": 4216}}
+        tab._mr_link_meta = {"task-1": {"trans_mrs": [
+            _delivery.DeliveryRef(project_id="common/uns", iid=4216)]}}
         with mock.patch("mr_jira.get_cached_branch",
                         return_value="26-4-2_XMN-FT5"):
             tab._apply_delivery_status(("common/uns", 4216), "merged")
@@ -183,7 +184,8 @@ class TestTransBranchCell(unittest.TestCase):
         self.assertEqual(
             tab.mr_tree.cells[("task-1", "delivery_branch")], "26-4-2_XMN-FT5")
         self.assertEqual(
-            tab._mr_link_meta["task-1"]["delivery_branch"], "26-4-2_XMN-FT5")
+            tab._mr_link_meta["task-1"]["trans_mrs"][0].target_branch,
+            "26-4-2_XMN-FT5")
 
 
 class TestBranchTooltip(unittest.TestCase):

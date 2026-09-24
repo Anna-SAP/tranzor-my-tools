@@ -651,125 +651,146 @@ class ApplyGitlabMetadataTests(unittest.TestCase):
         self.assertEqual(tab.mr_tree.cells[("task-1", "mr_status")], "Merged")
 
 
+class _CellTree:
+    def __init__(self):
+        self.cells = {}
+
+    def set(self, iid, column, value=None):
+        if value is None:
+            return self.cells.get((iid, column), "")
+        self.cells[(iid, column)] = value
+
+
+def _ref(iid, state="", project="common/uns", **kw):
+    import mr_delivery as _delivery
+    return _delivery.DeliveryRef(
+        project_id=project, iid=iid, state=state,
+        url=f"https://git.ringcentral.com/{project}/-/merge_requests/{iid}",
+        **kw)
+
+
 class ApplyDeliveryMrTests(unittest.TestCase):
 
-    def test_paints_follow_up_iid_and_stores_url(self):
+    def setUp(self):
+        # Painting overlays live GitLab states from the process-wide cache.
+        mr_jira.clear_cache()
+        self.addCleanup(mr_jira.clear_cache)
+
+    def _tab(self, meta):
         from gui_tabs import MRPipelineTab
-        import mr_delivery as _delivery
-
-        class _Tree:
-            def __init__(self):
-                self.cells = {}
-
-            def set(self, iid, column, value=None):
-                if value is None:
-                    return self.cells.get((iid, column), "")
-                self.cells[(iid, column)] = value
-
         tab = MRPipelineTab.__new__(MRPipelineTab)
-        tab.mr_tree = _Tree()
+        tab.mr_tree = _CellTree()
         tab._delivery_row_iids = {}
-        tab._mr_link_meta = {
-            "task-1": {"project": "common/uns", "source_iid": 3930,
-                       "delivery_iid": None, "delivery_url": ""},
-        }
+        tab._mr_link_meta = {"task-1": meta}
         tab._prefetch_delivery_status = lambda keys: None
-        tab._apply_delivery_mr(
-            "task-1",
-            _delivery.DeliveryRef(
-                project_id="common/uns", iid=4192,
-                url=("https://git.ringcentral.com/common/uns/"
-                     "-/merge_requests/4192"),
-                state="opened"),
-        )
+        return tab
+
+    def test_paints_follow_up_iid_and_stores_url(self):
+        tab = self._tab({"project": "common/uns", "source_iid": 3930})
+        tab._apply_trans_mrs("task-1", [_ref(4192, "opened")])
         self.assertEqual(tab.mr_tree.cells[("task-1", "delivery_mr")], "4192")
         self.assertEqual(
             tab.mr_tree.cells[("task-1", "delivery_mr_status")], "Open")
-        self.assertEqual(tab._mr_link_meta["task-1"]["delivery_iid"], 4192)
-        self.assertIn("/merge_requests/4192",
-                      tab._mr_link_meta["task-1"]["delivery_url"])
+        chain = tab._mr_link_meta["task-1"]["trans_mrs"]
+        self.assertEqual([r.iid for r in chain], [4192])
+        self.assertIn("/merge_requests/4192", chain[0].url)
 
     def test_missing_follow_up_paints_dash(self):
-        from gui_tabs import MRPipelineTab
-
-        class _Tree:
-            def __init__(self):
-                self.cells = {"task-1": {}}
-
-            def set(self, iid, column, value=None):
-                if value is None:
-                    return self.cells.get((iid, column), "")
-                self.cells[(iid, column)] = value
-
-        tab = MRPipelineTab.__new__(MRPipelineTab)
-        tab.mr_tree = _Tree()
-        tab._delivery_row_iids = {}
-        tab._mr_link_meta = {"task-1": {"delivery_iid": None}}
-        tab._apply_delivery_mr("task-1", None)
+        tab = self._tab({"trans_mrs": []})
+        tab._apply_trans_mrs("task-1", [])
         self.assertEqual(tab.mr_tree.cells[("task-1", "delivery_mr")], "—")
         self.assertEqual(
             tab.mr_tree.cells[("task-1", "delivery_mr_status")], "—")
 
     def test_apply_delivery_status_paints_merged(self):
-        from gui_tabs import MRPipelineTab
-
-        class _Tree:
-            def __init__(self):
-                self.cells = {}
-
-            def set(self, iid, column, value=None):
-                if value is None:
-                    return self.cells.get((iid, column), "")
-                self.cells[(iid, column)] = value
-
-        tab = MRPipelineTab.__new__(MRPipelineTab)
-        tab.mr_tree = _Tree()
+        tab = self._tab({"trans_mrs": [_ref(4191)]})
         tab._delivery_row_iids = {("common/uns", 4191): ["task-1"]}
-        tab._mr_link_meta = {"task-1": {"delivery_iid": 4191}}
         tab._apply_delivery_status(("common/uns", 4191), "merged")
         self.assertEqual(
             tab.mr_tree.cells[("task-1", "delivery_mr_status")], "Merged")
 
     def test_successor_fix_mr_paints_arrow_and_current_status(self):
-        from gui_tabs import MRPipelineTab
-        import mr_delivery as _delivery
-
-        class _Tree:
-            def __init__(self):
-                self.cells = {}
-
-            def set(self, iid, column, value=None):
-                if value is None:
-                    return self.cells.get((iid, column), "")
-                self.cells[(iid, column)] = value
-
-        tab = MRPipelineTab.__new__(MRPipelineTab)
-        tab.mr_tree = _Tree()
-        tab._delivery_row_iids = {}
-        tab._mr_link_meta = {
-            "task-1": {"project": "web/i18n", "source_iid": 1223,
-                       "delivery_iid": None, "delivery_url": ""},
-        }
-        tab._prefetch_delivery_status = lambda keys: None
-        tab._apply_follow_ups(
-            "task-1",
-            _delivery.DeliveryRef(
-                project_id="web/i18n", iid=1224,
-                url=("https://git.ringcentral.com/web/i18n/"
-                     "-/merge_requests/1224"),
-                state="merged"),
-            _delivery.DeliveryRef(
-                project_id="web/i18n", iid=1225,
-                url=("https://git.ringcentral.com/web/i18n/"
-                     "-/merge_requests/1225"),
-                state="opened"),
-        )
+        tab = self._tab({"project": "web/i18n", "source_iid": 1223})
+        tab._apply_trans_mrs("task-1", [
+            _ref(1224, "merged", project="web/i18n"),
+            _ref(1225, "opened", project="web/i18n"),
+        ])
         self.assertEqual(
             tab.mr_tree.cells[("task-1", "delivery_mr")], "1224 → 1225")
         self.assertEqual(
             tab.mr_tree.cells[("task-1", "delivery_mr_status")], "Open")
-        self.assertEqual(tab._mr_link_meta["task-1"]["delivery_iid"], 1224)
-        self.assertEqual(tab._mr_link_meta["task-1"]["fix_iid"], 1225)
+
+    def test_every_mr_of_a_long_chain_is_shown_in_order(self):
+        # The screenshot bug: !4003 has four translation MRs; the cell read
+        # "4237 → 4214" and hid 4213 and 4233. Nothing is capped or folded.
+        tab = self._tab({"project": "common/uns", "source_iid": 4003})
+        queued = []
+        tab._prefetch_delivery_status = queued.extend
+        tab._delivery_status_refreshed = set()
+        chain = [_ref(iid, "merged", target_branch="26-4-2_XMN-FT5")
+                 for iid in (4213, 4214, 4233, 4237)]
+        with mock.patch("mr_jira.can_fetch", return_value=True):
+            tab._apply_trans_mrs("task-1", chain)
+        self.assertEqual(tab.mr_tree.cells[("task-1", "delivery_mr")],
+                         "4213 → 4214 → 4233 → 4237")
+        self.assertEqual(
+            tab.mr_tree.cells[("task-1", "delivery_mr_status")], "Merged")
+        # Status is verified live for the MR the row follows: the newest.
+        self.assertEqual(queued, [("common/uns", 4237)])
+
+    def test_row_moves_on_when_the_open_mr_it_followed_merges(self):
+        tab = self._tab({"project": "common/uns", "source_iid": 4003})
+        queued = []
+        tab._prefetch_delivery_status = queued.extend
+        tab._delivery_status_refreshed = set()
+        with mock.patch("mr_jira.can_fetch", return_value=True):
+            tab._apply_trans_mrs("task-1", [
+                _ref(4213, "merged"), _ref(4214, "opened"),
+                _ref(4233, "merged", target_branch="26-4-2_XMN-FT5")])
+            self.assertEqual(
+                tab.mr_tree.cells[("task-1", "delivery_mr_status")], "Open")
+            self.assertEqual(queued, [("common/uns", 4214)])
+
+            tab._apply_delivery_status(("common/uns", 4214), "merged")
+
+        self.assertEqual(
+            tab.mr_tree.cells[("task-1", "delivery_mr_status")], "Merged")
+        self.assertEqual(
+            tab.mr_tree.cells[("task-1", "delivery_branch")], "26-4-2_XMN-FT5")
+        self.assertEqual(queued, [("common/uns", 4214), ("common/uns", 4233)])
+
+    def test_late_search_result_does_not_undo_a_live_state(self):
+        # The title search is cached for minutes; the live state is fresher.
+        tab = self._tab({"project": "common/uns", "source_iid": 4215})
+        with mock.patch("mr_jira.get_cached_state",
+                        side_effect=lambda p, i: "merged" if i == 4216
+                        else None):
+            tab._apply_trans_mrs("task-1", [_ref(4216, "opened")])
+        self.assertEqual(
+            tab.mr_tree.cells[("task-1", "delivery_mr_status")], "Merged")
+
+    def test_tooltip_lists_every_mr_oldest_first(self):
+        tab = self._tab({"trans_mrs": [
+            _ref(4213, "merged", created_at="2026-09-20T08:03:08.773Z",
+                 source_branch="tranzor/translate-4003-7729-28ad-71c8ec67"),
+            _ref(4233, "merged", created_at="2026-09-23T07:55:30.473Z",
+                 source_branch="tranzor-mr-fix-20260923075431-d988"),
+            _ref(4237, "opened", created_at="2026-09-24T06:15:45.028Z",
+                 source_branch="tranzor-mr-fix-20260924061453-a932"),
+        ]})
+        with mock.patch("gui_tabs.format_display_datetime",
+                        side_effect=lambda v, **kw: v[:10]):
+            text = tab._delivery_tooltip_text("task-1")
+        self.assertEqual(text.splitlines(), [
+            "Translation MRs, oldest first:",
+            "!4213 · Merged · 2026-09-20 · translation import",
+            "!4233 · Merged · 2026-09-23 · Language Lead fix",
+            "!4237 · Open · 2026-09-24 · Language Lead fix",
+        ])
+
+    def test_single_mr_needs_no_tooltip(self):
+        tab = self._tab({"trans_mrs": [_ref(4192, "merged")]})
+        self.assertEqual(tab._delivery_tooltip_text("task-1"), "")
 
 
 class DeliveryStatusFreshnessTests(unittest.TestCase):
@@ -784,6 +805,10 @@ class DeliveryStatusFreshnessTests(unittest.TestCase):
                 return self.cells.get((iid, column), "")
             self.cells[(iid, column)] = value
 
+    def setUp(self):
+        mr_jira.clear_cache()
+        self.addCleanup(mr_jira.clear_cache)
+
     def _tab(self):
         from gui_tabs import MRPipelineTab
         tab = MRPipelineTab.__new__(MRPipelineTab)
@@ -791,8 +816,7 @@ class DeliveryStatusFreshnessTests(unittest.TestCase):
         tab._delivery_row_iids = {}
         tab._delivery_status_refreshed = set()
         tab._mr_link_meta = {
-            "task-1": {"project": "common/uns", "source_iid": 4215,
-                       "delivery_iid": None, "delivery_url": ""},
+            "task-1": {"project": "common/uns", "source_iid": 4215},
         }
         return tab
 
@@ -808,13 +832,12 @@ class DeliveryStatusFreshnessTests(unittest.TestCase):
         tab._prefetch_delivery_status = queued.extend
 
         with mock.patch("mr_jira.can_fetch", return_value=True):
-            tab._apply_delivery_mr(
-                "task-1",
+            tab._apply_trans_mrs("task-1", [
                 _delivery.DeliveryRef(
                     project_id="common/uns", iid=4216,
                     url="https://git.example.com/common/uns/-/merge_requests/4216",
                     state="opened"),
-            )
+            ])
 
         self.assertEqual(
             tab.mr_tree.cells[("task-1", "delivery_mr_status")], "Open")
@@ -834,13 +857,12 @@ class DeliveryStatusFreshnessTests(unittest.TestCase):
         tab._prefetch_delivery_status = queued.extend
 
         with mock.patch("mr_jira.can_fetch", return_value=True):
-            tab._apply_follow_ups(
-                "task-1",
+            tab._apply_trans_mrs("task-1", [
                 _delivery.DeliveryRef(project_id="common/uns", iid=4213,
                                       state="merged"),
                 _delivery.DeliveryRef(project_id="common/uns", iid=4214,
                                       state="opened"),
-            )
+            ])
 
         self.assertEqual(
             tab.mr_tree.cells[("task-1", "delivery_mr")], "4213 → 4214")
@@ -869,10 +891,12 @@ class DeliveryStatusFreshnessTests(unittest.TestCase):
                 tab._claim_delivery_status_refresh(("common/uns", 4216)))
 
     def test_failed_refresh_keeps_the_last_known_state(self):
+        import mr_delivery as _delivery
+
         tab = self._tab()
         tab._delivery_row_iids = {("common/uns", 4216): ["task-1"]}
-        tab._mr_link_meta["task-1"].update(
-            {"delivery_iid": 4216, "delivery_state": "merged"})
+        tab._mr_link_meta["task-1"]["trans_mrs"] = [
+            _delivery.DeliveryRef("common/uns", 4216, state="merged")]
         tab.mr_tree.set("task-1", "delivery_mr_status", "Merged")
 
         tab._apply_delivery_status(("common/uns", 4216), None)
@@ -926,9 +950,7 @@ class JiraHyperlinkInteractionTests(unittest.TestCase):
                 "source_url": (
                     "https://git.ringcentral.com/common/uns/"
                     "-/merge_requests/3930"),
-                "delivery_url": (
-                    "https://git.ringcentral.com/common/uns/"
-                    "-/merge_requests/4192"),
+                "trans_mrs": [_ref(4192)],
             }
         })
         with mock.patch("gui_tabs.webbrowser.open_new_tab") as opener:
@@ -944,9 +966,7 @@ class JiraHyperlinkInteractionTests(unittest.TestCase):
                 "source_url": (
                     "https://git.ringcentral.com/common/uns/"
                     "-/merge_requests/3930"),
-                "delivery_url": (
-                    "https://git.ringcentral.com/common/uns/"
-                    "-/merge_requests/4192"),
+                "trans_mrs": [_ref(4192)],
             }
         })
         with mock.patch("gui_tabs.webbrowser.open_new_tab") as opener:
@@ -956,15 +976,12 @@ class JiraHyperlinkInteractionTests(unittest.TestCase):
         self.assertEqual(result, "break")
 
     def test_clicking_trans_mr_opens_later_fix_mr_when_present(self):
+        # No cell geometry to hit-test against → the current Trans MR.
         tree = _FakeTree(column=_col("delivery_mr"))
         tab = self._tab(tree, {
             "task-1": {
-                "delivery_url": (
-                    "https://git.ringcentral.com/web/i18n/"
-                    "-/merge_requests/1224"),
-                "fix_url": (
-                    "https://git.ringcentral.com/web/i18n/"
-                    "-/merge_requests/1225"),
+                "trans_mrs": [_ref(1224, "merged", project="web/i18n"),
+                              _ref(1225, "opened", project="web/i18n")],
             }
         })
         with mock.patch("gui_tabs.webbrowser.open_new_tab") as opener:
@@ -972,6 +989,29 @@ class JiraHyperlinkInteractionTests(unittest.TestCase):
         opener.assert_called_once_with(
             "https://git.ringcentral.com/web/i18n/-/merge_requests/1225")
         self.assertEqual(result, "break")
+
+    def test_each_iid_in_a_chain_opens_its_own_mr(self):
+        # "4213 → 4214 → 4233 → 4237" in a 300px cell at x=100, 7px/char:
+        # 175px of text, centred, so it starts at x = 100 + 62.5.
+        class _GeoTree(_FakeTree):
+            def bbox(self, _iid, _column):
+                return (100, 0, 300, 20)
+
+        tree = _GeoTree(column=_col("delivery_mr"))
+        tab = self._tab(tree, {"task-1": {"trans_mrs": [
+            _ref(4213, "merged"), _ref(4214, "merged"),
+            _ref(4233, "merged"), _ref(4237, "merged")]}})
+        tab._mr_title_font = SimpleNamespace(measure=lambda s: 7 * len(s))
+        start = 100 + 62.5
+        # Centre of each 28px iid; each " → " separator is 21px wide.
+        for n, iid in enumerate((4213, 4214, 4233, 4237)):
+            x = start + n * 49 + 14
+            self.assertTrue(
+                tab._mr_tree_link_at(x, 20).endswith(f"/merge_requests/{iid}"),
+                iid)
+        # Padding and arrows resolve to the nearest iid.
+        self.assertTrue(tab._mr_tree_link_at(101, 20).endswith("/4213"))
+        self.assertTrue(tab._mr_tree_link_at(399, 20).endswith("/4237"))
 
 
 class TitleTooltipInteractionTests(unittest.TestCase):

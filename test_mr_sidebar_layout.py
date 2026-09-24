@@ -141,6 +141,70 @@ class TitleFitTests(unittest.TestCase):
         self.assertEqual(gt._mr_title_fit_width(None, 1645), 0)
 
 
+class TransMrColumnTests(unittest.TestCase):
+    """Trans MR# must show its whole MR chain, never a clipped tail."""
+
+    class _Tree:
+        def __init__(self, width):
+            self.widths = {"delivery_mr": width}
+
+        def column(self, name, option=None, **kw):
+            if option == "width":
+                return self.widths[name]
+            self.widths[name] = kw["width"]
+
+    def _tab(self, width=gt._TRANS_MR_COL_PX):
+        tab = gt.MRPipelineTab.__new__(gt.MRPipelineTab)
+        tab.mr_tree = self._Tree(width)
+        tab._mr_title_font = type("F", (), {
+            "measure": staticmethod(lambda s: 7 * len(s))})()
+        self.title_refits = []
+        tab._fit_mr_title_column = lambda: self.title_refits.append(True)
+        tab._schedule_title_ellipsis = lambda *a: None
+        return tab
+
+    def test_column_widens_to_fit_a_long_chain(self):
+        tab = self._tab()
+        tab._fit_trans_mr_column("4213 → 4214 → 4233 → 4237")
+        # 25 chars * 7px + cell padding; Title gives up the room.
+        self.assertEqual(tab.mr_tree.widths["delivery_mr"],
+                         175 + gt._TRANS_MR_CELL_PAD_PX)
+        self.assertEqual(self.title_refits, [True])
+
+    def test_short_chain_never_shrinks_the_column(self):
+        tab = self._tab(width=260)
+        tab._fit_trans_mr_column("4192")
+        self.assertEqual(tab.mr_tree.widths["delivery_mr"], 260)
+        self.assertEqual(self.title_refits, [])
+
+    def test_a_new_result_set_starts_from_the_default_width(self):
+        tab = self._tab(width=260)
+        tab._reset_trans_mr_column()
+        self.assertEqual(tab.mr_tree.widths["delivery_mr"],
+                         gt._TRANS_MR_COL_PX)
+
+    def test_pointer_resolves_to_the_nearest_iid(self):
+        labels = ["4213", "4214", "4233"]
+
+        def measure(s):
+            return 7 * len(s)
+
+        # 3*28 + 2*21 = 126px of text centred in 200px → starts at x=37.
+        hit = [gt._trans_mr_index_at(x, 200, labels, measure)
+               for x in (0, 51, 72, 100, 130, 199)]
+        self.assertEqual(hit, [0, 0, 0, 1, 2, 2])
+        self.assertIsNone(gt._trans_mr_index_at(10, 200, [], measure))
+
+    def test_clipped_text_still_maps_by_position(self):
+        # Wider than its cell: ttk centres it and clips both sides. 175px in
+        # 120px starts at x=-27.5; the iid centres sit at -13.5, 35.5, 84.5
+        # and 133.5.
+        labels = ["4213", "4214", "4233", "4237"]
+        hits = [gt._trans_mr_index_at(x, 120, labels, lambda s: 7 * len(s))
+                for x in (2, 40, 80, 119)]
+        self.assertEqual(hits, [0, 1, 2, 3])
+
+
 class WraplengthTests(unittest.TestCase):
 
     def test_wraplength_is_strictly_inside_the_pane(self):

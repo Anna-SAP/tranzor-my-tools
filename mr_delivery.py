@@ -10,11 +10,13 @@ separate follow-up MR that actually receives the translation commits:
 
 The platform persists ``delivery_mr_iid`` / ``delivery_project_id`` /
 ``import_mr_url`` on the task row, but GET ``/tasks`` historically omitted
-them. This module:
+them. Every later Language Lead fix opens another MR on ``tranzor-mr-fix-*``
+and re-points those fields at it, so the payload names the *newest* fix MR,
+not the import MR. This module:
 
 1. Reads those fields when a newer payload supplies them.
 2. Parses ``import_mr_url`` as a fallback.
-3. Resolves the follow-up MR from GitLab when the payload is silent.
+3. Resolves the whole chain — import MR plus every fix MR — from GitLab.
 
 Pure logic (no Tkinter) so the GUI and unit tests share one implementation.
 """
@@ -23,8 +25,11 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass
+from datetime import timezone
 from typing import Optional
 from urllib.parse import urlparse
+
+from time_display import parse_iso_datetime
 
 # ``import_mr_url`` / GitLab web URL → iid.
 _MR_IID_IN_URL = re.compile(r"/merge_requests/(\d+)(?:/|$|\?)")
@@ -46,16 +51,24 @@ FIX_BRANCH_RE = re.compile(r"^tranzor-mr-fix-")
 # ("Translations for MR" | "MR!3930").
 DELIVERY_SEARCH_TERM = "MR!{iid}"
 
+# Joins a task's Trans MRs in the Trans MR# cell, oldest first.
+TRANS_MR_SEPARATOR = " → "
+
 
 @dataclass(frozen=True)
 class DeliveryRef:
-    """The follow-up MR that received translation commits, if any."""
+    """One translation MR of a task: the import MR or a Language Lead fix."""
 
     project_id: str
     iid: int
     url: str = ""
     state: str = ""
     target_branch: str = ""
+    # GitLab ``created_at``: a task's Trans MRs are listed in this order.
+    created_at: str = ""
+    # Tells the import MR (``tranzor/translate-*``) from a fix MR
+    # (``tranzor-mr-fix-*``). Empty when only the task payload named the MR.
+    source_branch: str = ""
 
 
 def parse_mr_iid(value) -> Optional[int]:
@@ -153,7 +166,14 @@ def is_delivery_candidate(mr, source_iid) -> bool:
 
 
 def is_fix_mr_candidate(mr, source_iid) -> bool:
-    """True when ``mr`` is a post-merge Language Lead fix MR for ``source_iid``."""
+    """True when ``mr`` is a post-merge Language Lead fix MR for ``source_iid``.
+
+    The ``tranzor-mr-fix-*`` branch already says what the MR is, so an exact
+    ``MR!{source_iid}`` anywhere in the title is enough to tie it to the
+    source MR. Language Leads retitle these freely ("fix(LOC-25286) further
+    fr-FR linguistic fixes for MR!4003"); requiring the "Translations for
+    MR!…" template silently dropped such fixes from the Trans MR# chain.
+    """
     want = parse_mr_iid(source_iid)
     if want is None or not isinstance(mr, dict):
         return False
@@ -162,8 +182,8 @@ def is_fix_mr_candidate(mr, source_iid) -> bool:
         return False
     if not is_fix_branch(mr.get("source_branch")):
         return False
-    got = source_iid_from_delivery_mr(mr)
-    return got == want
+    return want in {
+        int(n) for n in _MR_BANG_RE.findall(str(mr.get("title") or ""))}
 
 
 def pick_delivery_mr(mrs, source_iid, task_id=None) -> Optional[dict]:
@@ -192,35 +212,6 @@ def pick_delivery_mr(mrs, source_iid, task_id=None) -> Optional[dict]:
     return max(pool, key=_iid_key)
 
 
-def pick_fix_mr(mrs, source_iid, exclude_iid=None) -> Optional[dict]:
-    """Choose the latest Language Lead fix MR for one source iid.
-
-    Prefers an opened MR, then the highest iid. ``exclude_iid`` drops the
-    original translation-import MR when the same search hits both.
-    """
-    skip = parse_mr_iid(exclude_iid)
-    candidates = []
-    for mr in (mrs or []):
-        if not is_fix_mr_candidate(mr, source_iid):
-            continue
-        iid = parse_mr_iid(mr.get("iid"))
-        if skip is not None and iid == skip:
-            continue
-        candidates.append(mr)
-    if not candidates:
-        return None
-    opened = [
-        mr for mr in candidates
-        if str(mr.get("state") or "").lower() == "opened"
-    ]
-    pool = opened or candidates
-
-    def _iid_key(mr):
-        return parse_mr_iid(mr.get("iid")) or 0
-
-    return max(pool, key=_iid_key)
-
-
 def ref_from_iid(mrs, iid, fallback_project="") -> Optional[DeliveryRef]:
     """Find ``iid`` in a GitLab MR list and wrap it as :class:`DeliveryRef`."""
     want = parse_mr_iid(iid)
@@ -232,26 +223,93 @@ def ref_from_iid(mrs, iid, fallback_project="") -> Optional[DeliveryRef]:
     return None
 
 
-def format_trans_mr_cell(delivery_iid, fix_iid=None) -> str:
-    """Visible Trans MR# cell: ``1224`` or ``1224 → 1225``."""
-    delivery = parse_mr_iid(delivery_iid)
-    fix = parse_mr_iid(fix_iid)
-    if delivery is None and fix is None:
-        return "—"
-    if delivery is None:
-        return str(fix)
-    if fix is None or fix == delivery:
-        return str(delivery)
-    return f"{delivery} → {fix}"
+def trans_mr_chain(mrs, source_iid, task_id=None, known=(),
+                   fallback_project="") -> list:
+    """Every translation MR behind one task, oldest first.
+
+    ``mrs`` is the ``MR!{source_iid}`` title search. The chain holds:
+
+    - ``known`` — MRs already tied to the task (the payload's delivery MR, an
+      earlier resolution), refreshed from ``mrs`` when the search has them;
+    - the task's own import MR(s), pinned by :func:`task_digest`. With no
+      digest match, :func:`pick_delivery_mr` stands in — unless ``known``
+      already holds a non-fix MR, which is then taken to be the import MR;
+    - every Language Lead fix MR for the source MR.
+
+    Nothing is capped or folded: a source MR fixed three times shows all
+    three fix MRs after its import MR.
+    """
+    mrs = [mr for mr in (mrs or []) if isinstance(mr, dict)]
+    chain = {}
+    for ref in known or ():
+        if ref is not None:
+            chain[ref.iid] = ref_from_iid(
+                mrs, ref.iid, fallback_project=ref.project_id) or ref
+    digest = task_digest(task_id)
+    imports = [
+        mr for mr in mrs
+        if is_delivery_candidate(mr, source_iid) and digest
+        and str(mr.get("source_branch") or "").endswith("-" + digest)
+    ]
+    if not imports and all(
+            is_fix_branch(ref.source_branch) for ref in chain.values()):
+        picked = pick_delivery_mr(mrs, source_iid, task_id=task_id)
+        imports = [picked] if picked is not None else []
+    fixes = [mr for mr in mrs if is_fix_mr_candidate(mr, source_iid)]
+    for mr in imports + fixes:
+        ref = delivery_ref_from_mr(mr, fallback_project=fallback_project)
+        if ref is not None:
+            chain[ref.iid] = ref
+    return sort_chronologically(chain.values())
 
 
-def current_trans_mr_iid(delivery_iid, fix_iid=None) -> Optional[int]:
-    """The iid the Trans MR# click / status column should follow."""
-    return parse_mr_iid(fix_iid) or parse_mr_iid(delivery_iid)
+def _created_utc(ref):
+    stamp = parse_iso_datetime(getattr(ref, "created_at", "") or None)
+    if stamp is None:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return stamp.astimezone(timezone.utc)
+
+
+def sort_chronologically(refs) -> list:
+    """Order Trans MRs oldest first by GitLab ``created_at``.
+
+    GitLab hands out iids in creation order within a project, so the iid
+    breaks ties and stands in for every ref whenever one ``created_at`` is
+    unknown (a ref built from the task payload alone).
+    """
+    refs = [ref for ref in (refs or ()) if ref is not None]
+    stamps = [_created_utc(ref) for ref in refs]
+    if refs and all(stamp is not None for stamp in stamps):
+        order = sorted(range(len(refs)),
+                       key=lambda i: (stamps[i], refs[i].iid))
+        return [refs[i] for i in order]
+    return sorted(refs, key=lambda ref: ref.iid)
+
+
+def format_trans_mr_cell(chain) -> str:
+    """Visible Trans MR# cell: every MR of ``chain`` (oldest first), e.g.
+    ``4213`` or ``4213 → 4214 → 4233 → 4237``."""
+    iids = [str(ref.iid) for ref in (chain or ()) if ref is not None]
+    return TRANS_MR_SEPARATOR.join(iids) if iids else "—"
+
+
+def current_trans_mr(chain) -> Optional[DeliveryRef]:
+    """The Trans MR the status / branch cells and "is open" filter follow.
+
+    ``chain`` is oldest first. The newest still-open MR wins — it is the
+    translation work in flight — and otherwise simply the newest.
+    """
+    refs = [ref for ref in (chain or ()) if ref is not None]
+    if not refs:
+        return None
+    opened = [ref for ref in refs if str(ref.state or "").lower() == "opened"]
+    return (opened or refs)[-1]
 
 
 def trans_mr_sort_iid(cell) -> Optional[int]:
-    """Numeric sort key: the right-hand (current) iid in a Trans MR# cell."""
+    """Numeric sort key: the right-hand (newest) iid in a Trans MR# cell."""
     text = str(cell or "").strip()
     if text in ("", "—", "…"):
         return None
@@ -306,7 +364,9 @@ def delivery_ref_from_mr(mr, fallback_project="") -> Optional[DeliveryRef]:
     branch = ("" if mr.get("target_branch") is None
               else str(mr.get("target_branch")))
     return DeliveryRef(project_id=project, iid=iid, url=url, state=state,
-                       target_branch=branch)
+                       target_branch=branch,
+                       created_at=str(mr.get("created_at") or ""),
+                       source_branch=str(mr.get("source_branch") or ""))
 
 
 def _project_path_from_mr(mr, iid) -> str:
@@ -322,45 +382,43 @@ def _project_path_from_mr(mr, iid) -> str:
     return ""
 
 
-def find_follow_up_mrs(project_id, source_iid, task_id=None, client=None):
-    """One GitLab title search → ``(import_ref, fix_ref)`` for a source MR.
+def find_trans_mrs(project_id, source_iid, task_id=None, client=None) -> list:
+    """One GitLab title search → the task's whole Trans MR chain.
 
-    ``import_ref`` is the original translation-import MR; ``fix_ref`` is a
-    later Language Lead fix MR on ``tranzor-mr-fix-*``. Either may be ``None``
-    independently: a task counts as *having* a translation MR when either one
-    is set, which is exactly what the Trans MR# cell renders. Any failure (no
-    token, no project, network error) degrades to ``(None, None)``.
+    Oldest first (:func:`trans_mr_chain`): the translation-import MR, then
+    every later Language Lead fix MR on ``tranzor-mr-fix-*``. A task counts
+    as *having* a translation MR when the chain is non-empty — a fix MR can
+    outlive an import MR the search no longer matches — which is exactly
+    what the Trans MR# cell renders. Any failure (no token, no project,
+    network error) degrades to ``[]``.
     """
     pid = str(project_id or "").strip()
     src = parse_mr_iid(source_iid)
     if not pid or src is None:
-        return (None, None)
+        return []
     if client is None:
         client = _shared_client()
         if client is None:
-            return (None, None)
+            return []
     try:
         if not client.has_token():
-            return (None, None)
+            return []
         mrs = client.list_merge_requests(
             DELIVERY_SEARCH_TERM.format(iid=src),
             project_id=pid, in_field="title")
     except Exception:
-        return (None, None)
-    import_ref = delivery_ref_from_mr(
-        pick_delivery_mr(mrs, src, task_id=task_id), fallback_project=pid)
-    fix_ref = delivery_ref_from_mr(
-        pick_fix_mr(mrs, src,
-                    exclude_iid=import_ref.iid if import_ref else None),
-        fallback_project=pid)
-    return (import_ref, fix_ref)
+        return []
+    return trans_mr_chain(mrs, src, task_id=task_id, fallback_project=pid)
 
 
 def find_delivery_mr(project_id, source_iid, task_id=None,
                      client=None) -> Optional[DeliveryRef]:
     """GitLab title-search fallback when the task payload has no delivery MR."""
-    return find_follow_up_mrs(
-        project_id, source_iid, task_id=task_id, client=client)[0]
+    for ref in find_trans_mrs(
+            project_id, source_iid, task_id=task_id, client=client):
+        if not is_fix_branch(ref.source_branch):
+            return ref
+    return None
 
 
 def expand_mr_iid_filter(mr_iid, project_ids=None, client=None) -> set:

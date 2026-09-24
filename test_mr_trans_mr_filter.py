@@ -55,11 +55,11 @@ class TestCheckTaskDeliveryMr(unittest.TestCase):
             "merge_request_iid": 4215, "delivery_mr_iid": 4216,
         }
         with mock.patch("mr_jira.fetch_jira_metadata") as meta, \
-                mock.patch("mr_delivery.find_follow_up_mrs") as search:
+                mock.patch("mr_delivery.find_trans_mrs") as search:
             self.tab._check_task_delivery_mr(task)
 
         self.assertTrue(task["_has_delivery_mr"])
-        self.assertEqual(task["_delivery_ref"].iid, 4216)
+        self.assertEqual([r.iid for r in task["_trans_mrs"]], [4216])
         meta.assert_not_called()
         search.assert_not_called()
 
@@ -71,11 +71,11 @@ class TestCheckTaskDeliveryMr(unittest.TestCase):
                 "merge_request_iid": 42382}
         with mock.patch("mr_jira.fetch_jira_metadata",
                         return_value=mr_jira.JiraMetadata("", "", "opened")), \
-                mock.patch("mr_delivery.find_follow_up_mrs") as search:
+                mock.patch("mr_delivery.find_trans_mrs") as search:
             self.tab._check_task_delivery_mr(task)
 
         self.assertFalse(task["_has_delivery_mr"])
-        self.assertIsNone(task["_delivery_ref"])
+        self.assertEqual(task["_trans_mrs"], [])
         search.assert_not_called()
 
     def test_merged_source_resolves_through_the_title_search(self):
@@ -86,12 +86,12 @@ class TestCheckTaskDeliveryMr(unittest.TestCase):
                                     state="opened")
         with mock.patch("mr_jira.fetch_jira_metadata",
                         return_value=mr_jira.JiraMetadata("", "", "merged")), \
-                mock.patch("mr_delivery.find_follow_up_mrs",
-                           return_value=(ref, None)):
+                mock.patch("mr_delivery.find_trans_mrs",
+                           return_value=[ref]):
             self.tab._check_task_delivery_mr(task)
 
         self.assertTrue(task["_has_delivery_mr"])
-        self.assertEqual(task["_delivery_ref"].iid, 42392)
+        self.assertEqual([r.iid for r in task["_trans_mrs"]], [42392])
 
     def test_merged_source_with_no_follow_up_mr_is_filtered_out(self):
         import mr_jira
@@ -99,8 +99,8 @@ class TestCheckTaskDeliveryMr(unittest.TestCase):
                 "merge_request_iid": 2515}
         with mock.patch("mr_jira.fetch_jira_metadata",
                         return_value=mr_jira.JiraMetadata("", "", "merged")), \
-                mock.patch("mr_delivery.find_follow_up_mrs",
-                           return_value=(None, None)):
+                mock.patch("mr_delivery.find_trans_mrs",
+                           return_value=[]):
             self.tab._check_task_delivery_mr(task)
 
         self.assertFalse(task["_has_delivery_mr"])
@@ -115,12 +115,12 @@ class TestCheckTaskDeliveryMr(unittest.TestCase):
                 "merge_request_iid": 4003}
         with mock.patch("mr_jira.fetch_jira_metadata",
                         return_value=mr_jira.JiraMetadata("", "", "merged")), \
-                mock.patch("mr_delivery.find_follow_up_mrs",
-                           return_value=(None, fix)):
+                mock.patch("mr_delivery.find_trans_mrs",
+                           return_value=[fix]):
             self.tab._check_task_delivery_mr(task)
 
         self.assertTrue(task["_has_delivery_mr"])
-        self.assertEqual(task["_delivery_ref"].iid, 4214)
+        self.assertEqual([r.iid for r in task["_trans_mrs"]], [4214])
 
     def test_gitlab_failure_degrades_to_no_rather_than_raising(self):
         task = {"task_id": "t1", "project_id": "common/uns",
@@ -133,7 +133,7 @@ class TestCheckTaskDeliveryMr(unittest.TestCase):
 
     def test_task_without_project_or_source_iid_is_skipped(self):
         task = {"task_id": "t1", "project_id": "", "merge_request_iid": None}
-        with mock.patch("mr_delivery.find_follow_up_mrs") as search:
+        with mock.patch("mr_delivery.find_trans_mrs") as search:
             self.tab._check_task_delivery_mr(task)
 
         self.assertFalse(task["_has_delivery_mr"])
@@ -290,15 +290,8 @@ class TestTransMrOpenFilter(unittest.TestCase):
         self.assertTrue(task["_has_delivery_mr"])
         self.assertFalse(task["_trans_mr_open"])
 
-    def test_state_follows_the_fix_mr_not_the_import_mr(self):
-        # 4213 -> 4214: the column's status follows 4214, so must the filter.
-        task = {
-            "_has_delivery_mr": True,
-            "_delivery_ref": _delivery.DeliveryRef(
-                project_id="common/uns", iid=4213, state="merged"),
-            "_fix_ref": _delivery.DeliveryRef(
-                project_id="common/uns", iid=4214, state="merged"),
-        }
+    def _asked_about(self, chain):
+        task = {"_has_delivery_mr": True, "_trans_mrs": chain}
         asked = []
 
         def _fetch(project, iid, **kw):
@@ -307,8 +300,25 @@ class TestTransMrOpenFilter(unittest.TestCase):
 
         with mock.patch("mr_jira.fetch_jira_metadata", side_effect=_fetch):
             self.tab._resolve_trans_mr_state(task)
+        return asked
 
-        self.assertEqual(asked, [("common/uns", 4214, True)])
+    def test_state_follows_the_newest_mr_of_the_chain(self):
+        # 4213 -> 4214 -> 4233 -> 4237: the column's status follows 4237, so
+        # must the filter.
+        chain = [_delivery.DeliveryRef(project_id="common/uns", iid=iid,
+                                       state="merged")
+                 for iid in (4213, 4214, 4233, 4237)]
+        self.assertEqual(self._asked_about(chain),
+                         [("common/uns", 4237, True)])
+
+    def test_state_follows_an_older_mr_that_is_still_open(self):
+        chain = [
+            _delivery.DeliveryRef("common/uns", 4213, state="merged"),
+            _delivery.DeliveryRef("common/uns", 4214, state="opened"),
+            _delivery.DeliveryRef("common/uns", 4233, state="merged"),
+        ]
+        self.assertEqual(self._asked_about(chain),
+                         [("common/uns", 4214, True)])
 
     def test_open_state_is_not_resolved_when_not_asked_for(self):
         task = {"task_id": "t1", "project_id": "web/web",
@@ -374,8 +384,8 @@ class TestScanScope(unittest.TestCase):
         self.assertFalse(tab._probe_is_dead(("RND/rcvnc", 6745)))
 
 
-class TestFindFollowUpMrs(unittest.TestCase):
-    """One title search must yield both the import MR and any later fix MR."""
+class TestFindTransMrs(unittest.TestCase):
+    """One title search must yield the import MR and every later fix MR."""
 
     class _Client:
         def __init__(self, mrs):
@@ -389,30 +399,35 @@ class TestFindFollowUpMrs(unittest.TestCase):
             self.searches.append(search)
             return self.mrs
 
-    def test_returns_import_and_fix_from_a_single_search(self):
+    def test_returns_the_whole_chain_from_a_single_search(self):
         client = self._Client([
-            {"iid": 4213, "title": "[Tranzor] Translations for MR!4003",
+            {"iid": 4233, "state": "merged",
+             "created_at": "2026-09-23T07:55:30.473Z",
+             "title": "fix(LOC-25286) further fr-FR linguistic fixes "
+                      "for MR!4003",
+             "source_branch": "tranzor-mr-fix-20260923075431-d988",
+             "references": {"full": "common/uns!4233"}},
+            {"iid": 4213, "state": "merged",
+             "created_at": "2026-09-20T08:03:08.773Z",
+             "title": "[Tranzor] Translations for MR!4003",
              "source_branch": "tranzor/translate-4003-772abc-p1-t1",
-             "state": "merged",
              "references": {"full": "common/uns!4213"}},
-            {"iid": 4214, "title": "[Tranzor] Translations for MR!4003",
+            {"iid": 4214, "state": "merged",
+             "created_at": "2026-09-20T09:37:43.527Z",
+             "title": "[Tranzor] Translations for MR!4003",
              "source_branch": "tranzor-mr-fix-20260920093000",
-             "state": "merged",
              "references": {"full": "common/uns!4214"}},
         ])
 
-        import_ref, fix_ref = _delivery.find_follow_up_mrs(
-            "common/uns", 4003, client=client)
+        chain = _delivery.find_trans_mrs("common/uns", 4003, client=client)
 
-        self.assertEqual(import_ref.iid, 4213)
-        self.assertEqual(fix_ref.iid, 4214)
+        self.assertEqual([r.iid for r in chain], [4213, 4214, 4233])
         self.assertEqual(len(client.searches), 1)
 
-    def test_no_match_returns_a_pair_of_nones(self):
+    def test_no_match_returns_an_empty_chain(self):
         client = self._Client([])
         self.assertEqual(
-            _delivery.find_follow_up_mrs("common/uns", 4003, client=client),
-            (None, None))
+            _delivery.find_trans_mrs("common/uns", 4003, client=client), [])
 
     def test_find_delivery_mr_still_returns_just_the_import_mr(self):
         client = self._Client([

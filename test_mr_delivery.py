@@ -184,32 +184,161 @@ class CandidateAndPickTests(unittest.TestCase):
         picked = md.pick_delivery_mr(mrs, 1223)
         self.assertEqual(picked["iid"], 1224)
 
-    def test_pick_fix_mr_prefers_opened_successor(self):
-        mrs = [
-            {"iid": 1224, "title": "[Tranzor] Translations for MR!1223",
-             "source_branch": "tranzor/translate-1223-aaa-bbb-cccccccc",
-             "state": "merged"},
-            {"iid": 1225, "title": "[Tranzor] Translations for MR!1223",
-             "source_branch": "tranzor-mr-fix-20260911152000",
-             "state": "opened"},
-            {"iid": 1220, "title": "[Tranzor] Translations for MR!1223",
-             "source_branch": "tranzor-mr-fix-old",
-             "state": "merged"},
-        ]
-        picked = md.pick_fix_mr(mrs, 1223, exclude_iid=1224)
-        self.assertEqual(picked["iid"], 1225)
+    def test_retitled_fix_mr_is_still_a_fix_candidate(self):
+        # Real !4233: a Language Lead renamed the fix MR. The title lost the
+        # "Translations for MR!" template (and the word "translation"), which
+        # used to drop it from the Trans MR# chain.
+        mr = {"iid": 4233,
+              "title": "fix(LOC-25286) further fr-FR linguistic fixes "
+                       "for MR!4003",
+              "source_branch": "tranzor-mr-fix-20260923075431-d988"}
+        self.assertTrue(md.is_fix_mr_candidate(mr, 4003))
+        self.assertFalse(md.is_delivery_candidate(mr, 4003))
 
-    def test_format_trans_mr_cell_shows_successor_arrow(self):
-        self.assertEqual(md.format_trans_mr_cell(1224), "1224")
-        self.assertEqual(md.format_trans_mr_cell(1224, 1224), "1224")
-        self.assertEqual(md.format_trans_mr_cell(1224, 1225), "1224 → 1225")
-        self.assertEqual(md.format_trans_mr_cell(None, 1225), "1225")
+    def test_fix_candidate_needs_the_exact_source_iid(self):
+        mr = {"iid": 4300, "title": "fix(LOC-1) fixes for MR!40031",
+              "source_branch": "tranzor-mr-fix-20260923075431-d988"}
+        self.assertFalse(md.is_fix_mr_candidate(mr, 4003))
+        self.assertTrue(md.is_fix_mr_candidate(mr, 40031))
+
+    def test_fix_title_on_a_non_fix_branch_is_not_a_fix_candidate(self):
+        mr = {"iid": 4300, "title": "fix(LOC-1) fixes for MR!4003",
+              "source_branch": "feature/LOC-1"}
+        self.assertFalse(md.is_fix_mr_candidate(mr, 4003))
+
+    def test_format_trans_mr_cell_lists_the_whole_chain(self):
+        def ref(iid):
+            return md.DeliveryRef(project_id="p", iid=iid)
+
+        self.assertEqual(md.format_trans_mr_cell([ref(1224)]), "1224")
+        self.assertEqual(
+            md.format_trans_mr_cell([ref(4213), ref(4214), ref(4233),
+                                     ref(4237)]),
+            "4213 → 4214 → 4233 → 4237")
+        self.assertEqual(md.format_trans_mr_cell([]), "—")
         self.assertEqual(md.format_trans_mr_cell(None), "—")
-        self.assertEqual(md.current_trans_mr_iid(1224, 1225), 1225)
-        self.assertEqual(md.current_trans_mr_iid(1224, None), 1224)
-        self.assertEqual(md.trans_mr_sort_iid("1224 → 1225"), 1225)
+        self.assertEqual(
+            md.trans_mr_sort_iid("4213 → 4214 → 4233 → 4237"), 4237)
         self.assertEqual(md.trans_mr_sort_iid("1224"), 1224)
         self.assertIsNone(md.trans_mr_sort_iid("—"))
+
+
+class TransMrChainTests(unittest.TestCase):
+    """The Trans MR# chain: every translation MR of a task, oldest first."""
+
+    TASK_ID = "d00ff2ec-5b54-467e-acb0-098c4a8607f2"  # digest 71c8ec67
+
+    # GitLab's MR!4003 title search, verbatim where it matters (2026-09-24).
+    MRS = [
+        {"iid": 4237, "state": "merged",
+         "created_at": "2026-09-24T06:15:45.028Z",
+         "title": "fix(LOC-25276) it-IT inconsistencies and duplicated "
+                  "translation to 'service' for MR!4003",
+         "source_branch": "tranzor-mr-fix-20260924061453-a932",
+         "target_branch": "26-4-2_XMN-FT5",
+         "references": {"full": "common/uns!4237"}},
+        {"iid": 4233, "state": "merged",
+         "created_at": "2026-09-23T07:55:30.473Z",
+         "title": "fix(LOC-25286) further fr-FR linguistic fixes for MR!4003",
+         "source_branch": "tranzor-mr-fix-20260923075431-d988",
+         "target_branch": "26-4-2_XMN-FT5",
+         "references": {"full": "common/uns!4233"}},
+        {"iid": 4214, "state": "merged",
+         "created_at": "2026-09-20T09:37:43.527Z",
+         "title": "[Tranzor] Translations for MR!4003",
+         "source_branch": "tranzor-mr-fix-20260920093712-fc5f",
+         "target_branch": "26-4-2_XMN-FT5",
+         "references": {"full": "common/uns!4214"}},
+        {"iid": 4213, "state": "merged",
+         "created_at": "2026-09-20T08:03:08.773Z",
+         "title": "[Tranzor] Translations for MR!4003",
+         "source_branch":
+             "tranzor/translate-4003-77293d2ff50d-28ad2d17-71c8ec67",
+         "target_branch": "26-4-2_XMN-FT5",
+         "references": {"full": "common/uns!4213"}},
+    ]
+
+    def _iids(self, chain):
+        return [ref.iid for ref in chain]
+
+    def test_payload_pointing_at_the_newest_fix_yields_the_whole_chain(self):
+        # The screenshot bug: the platform re-points delivery_mr_iid at every
+        # new fix MR, so the payload named 4237. The cell read "4237 → 4214",
+        # losing the import MR 4213 and the retitled fix 4233.
+        payload = md.delivery_from_task({
+            "project_id": "common/uns", "merge_request_iid": 4003,
+            "delivery_mr_iid": 4237})
+        chain = md.trans_mr_chain(
+            self.MRS, 4003, task_id=self.TASK_ID, known=[payload],
+            fallback_project="common/uns")
+        self.assertEqual(self._iids(chain), [4213, 4214, 4233, 4237])
+        self.assertEqual(md.format_trans_mr_cell(chain),
+                         "4213 → 4214 → 4233 → 4237")
+        # The payload ref is refreshed from the search, not left bare.
+        self.assertEqual(chain[-1].created_at, "2026-09-24T06:15:45.028Z")
+        self.assertEqual(chain[-1].state, "merged")
+
+    def test_search_alone_yields_the_whole_chain(self):
+        chain = md.trans_mr_chain(self.MRS, 4003, task_id=self.TASK_ID,
+                                  fallback_project="common/uns")
+        self.assertEqual(self._iids(chain), [4213, 4214, 4233, 4237])
+        self.assertEqual(chain[0].source_branch,
+                         self.MRS[3]["source_branch"])
+
+    def test_order_follows_created_at_not_iid_or_search_order(self):
+        refs = [
+            md.DeliveryRef("a/b", 7, created_at="2026-09-21T00:00:00Z"),
+            md.DeliveryRef("c/d", 9, created_at="2026-09-20T00:00:00Z"),
+            md.DeliveryRef("a/b", 8, created_at="2026-09-22T00:00:00+08:00"),
+        ]
+        # 8 was created at 2026-09-21T16:00Z — after 7, despite the offset.
+        self.assertEqual(self._iids(md.sort_chronologically(refs)), [9, 7, 8])
+
+    def test_unknown_created_at_falls_back_to_iid_order(self):
+        refs = [
+            md.DeliveryRef("p", 4237),
+            md.DeliveryRef("p", 4213, created_at="2026-09-20T08:03:08Z"),
+        ]
+        self.assertEqual(self._iids(md.sort_chronologically(refs)),
+                         [4213, 4237])
+
+    def test_known_import_mr_is_not_joined_by_another_tasks_import(self):
+        # No digest match: the payload's MR (outside the search) is taken to
+        # be this task's import MR, so another task's import MR stays out.
+        mrs = [{"iid": 4300, "state": "merged",
+                "created_at": "2026-09-22T00:00:00Z",
+                "title": "[Tranzor] Translations for MR!4003",
+                "source_branch": "tranzor/translate-4003-aaa-bbb-othertsk",
+                "references": {"full": "common/uns!4300"}}]
+        known = md.DeliveryRef("common/uns", 4213)
+        chain = md.trans_mr_chain(mrs, 4003, task_id=self.TASK_ID,
+                                  known=[known])
+        self.assertEqual(self._iids(chain), [4213])
+
+    def test_newest_import_mr_stands_in_without_a_digest_match(self):
+        mrs = [
+            {"iid": 4100, "state": "merged",
+             "title": "[Tranzor] Translations for MR!4003",
+             "source_branch": "tranzor/translate-4003-aaa-bbb-legacy01"},
+            {"iid": 4200, "state": "merged",
+             "title": "[Tranzor] Translations for MR!4003",
+             "source_branch": "tranzor/translate-4003-ccc-ddd-legacy02"},
+        ]
+        chain = md.trans_mr_chain(mrs, 4003, task_id=self.TASK_ID,
+                                  fallback_project="common/uns")
+        self.assertEqual(self._iids(chain), [4200])
+
+    def test_current_is_the_newest_open_mr_else_the_newest(self):
+        def ref(iid, state):
+            return md.DeliveryRef("p", iid, state=state)
+
+        self.assertEqual(md.current_trans_mr(
+            [ref(4213, "merged"), ref(4214, "merged"),
+             ref(4233, "merged")]).iid, 4233)
+        self.assertEqual(md.current_trans_mr(
+            [ref(4213, "merged"), ref(4214, "opened"),
+             ref(4233, "merged")]).iid, 4214)
+        self.assertIsNone(md.current_trans_mr([]))
 
 
 class FilterMatchTests(unittest.TestCase):
