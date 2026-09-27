@@ -151,7 +151,8 @@ class DataLookbackWindowTests(unittest.TestCase):
         rcv = self.rows(win, "cat:RCV")
         self.assertEqual(rcv[0][2][1], gdl.STRINGS["en"]["dl_branch_unknown"])
         kpis = {k: v[1].cget("text") for k, v in win.kpi_labels.items()}
-        self.assertEqual(kpis, {"mrs": "2", "runs": "3", "branches": "1",
+        # Fiji/video !7 did not resolve, so the branch count is a floor.
+        self.assertEqual(kpis, {"mrs": "2", "runs": "3", "branches": "≥1",
                                 "bugfix": "1", "scan": "1", "projects": "4"})
         self.assertIn("1 MR(s) with unknown target branch",
                       win.lbl_notes.cget("text"))
@@ -223,7 +224,7 @@ class DataLookbackWindowTests(unittest.TestCase):
         self.pump(win)
         self.assertEqual(win.day, today)
         self.assertEqual(str(win.btn_next.cget("state")), "disabled")
-        self.assertIn(gdl.STRINGS["en"]["dl_today"], win.lbl_day.cget("text"))
+        self.assertIn(", today)", win.lbl_day.cget("text"))
         win.load(today + timedelta(days=5))
         self.pump(win)
         self.assertEqual(win.day, today)
@@ -262,6 +263,178 @@ class DataLookbackWindowTests(unittest.TestCase):
         text = self.root.clipboard_get()
         self.assertTrue(text.startswith("2026-09-24 (Thu)"))
         self.assertIn("WEB\tweb/web\t1\tdevelop\t0\t0", text)
+
+    def test_copy_without_gitlab_token_marks_branches_unavailable(self):
+        self.can_resolve = False
+        win = self.make()
+        self.pump(win)
+        win._copy()
+        self.assertIn("WEB\tweb/web\t1\t—\t0\t0", self.root.clipboard_get())
+
+    def test_refresh_reenabled_when_leaving_a_slow_day_for_a_cached_one(self):
+        win = self.make()
+        self.pump(win)
+        gate = threading.Event()
+        fast = win._fetch_day
+
+        def slow(d, cancel_event=None):
+            gate.wait(5)
+            return fast(d, cancel_event=cancel_event)
+
+        win._fetch_day = slow
+        win.load("2026-09-23")
+        self.spin(timeout=0.1)
+        self.assertEqual(str(win.btn_refresh.cget("state")), "disabled")
+        win.load("2026-09-24")          # cached
+        self.pump(win)
+        gate.set()
+        self.spin(timeout=0.2)
+        self.assertEqual(win.day, dl.coerce_day("2026-09-24"))
+        self.assertEqual(str(win.btn_refresh.cget("state")), "normal")
+
+    def test_todays_snapshot_is_not_reused_after_midnight(self):
+        from unittest import mock
+        day = dl.coerce_day("2026-09-28")
+        with mock.patch.object(dl, "today_utc8", return_value=day):
+            win = self.make(day=day)
+            self.pump(win)
+        with mock.patch.object(dl, "today_utc8",
+                               return_value=day + timedelta(days=1)):
+            win.load(day)
+            self.pump(win)
+        self.assertEqual(self.fetches, [day, day])
+
+    def test_failed_sources_are_not_reported_as_an_empty_day(self):
+        self.data = {"mr": [], "bugfix": None, "scan": [],
+                     "errors": {"bugfix": ("error", "boom")}}
+        win = self.make()
+        self.pump(win)
+        status = win.lbl_status.cget("text")
+        self.assertNotIn("no completed", status)
+        self.assertIn("— Bug Fix", status)
+        self.assertEqual(win.kpi_labels["projects"][1].cget("text"), "≥0")
+        self.data = {"mr": None, "bugfix": None, "scan": None,
+                     "errors": {s: ("error", "x") for s in ("mr", "bugfix", "scan")}}
+        win.load(win.day, force=True)
+        self.pump(win)
+        self.assertEqual(win.kpi_labels["projects"][1].cget("text"), "—")
+
+    def test_branch_kpi_is_a_lower_bound_when_some_are_unknown(self):
+        win = self.make()
+        self.pump(win)
+        # web/web → develop; Fiji/video unresolved.
+        self.assertEqual(win.kpi_labels["branches"][1].cget("text"), "≥1")
+        self.data = _day_data()
+        self.data["mr"] = [t for t in self.data["mr"]
+                           if t["project_id"] == "Fiji/video"]
+        win.load(win.day, force=True)
+        self.pump(win)
+        self.assertEqual(win.kpi_labels["branches"][1].cget("text"), "?")
+
+    def test_clipped_cell_shows_full_text_on_hover(self):
+        win = self.make()
+        self.pump(win)
+        long_branches = ", ".join(f"release/26-{i}-very-long-branch-name"
+                                  for i in range(12))
+        values = list(win.tree.item("cat:WEB", "values"))
+        values[1] = long_branches
+        win.tree.item("cat:WEB", values=values)
+        win.win.update()
+        x, y, w, h = win.tree.bbox("cat:WEB", "branches")
+        event = type("E", (), {"x": x + 5, "y": y + h // 2,
+                               "x_root": 0, "y_root": 0})()
+        win._on_tree_motion(event)
+        self.assertIsNotNone(win._tip)
+        label = win._tip.winfo_children()[0]
+        self.assertEqual(label.cget("text"), long_branches)
+        x, y, w, h = win.tree.bbox("cat:WEB", "mrs")
+        event.x, event.y = x + 2, y + h // 2
+        win._on_tree_motion(event)
+        self.assertIsNone(win._tip)      # "1" fits: no tooltip
+
+    def test_all_columns_fit_at_minimum_width(self):
+        win = self.make()
+        self.pump(win)
+        for width in (900, 1180, 1600):
+            win.win.geometry(f"{width}x600")
+            win.win.update()
+            cols = ("#0",) + gdl._COLUMNS
+            total = sum(int(win.tree.column(c, "width")) for c in cols)
+            self.assertLessEqual(total, win.tree.winfo_width(), width)
+            self.assertGreaterEqual(int(win.tree.column("branches", "width")), 160)
+
+    def test_calendar_today_follows_utc8(self):
+        import date_picker
+        win = self.make()
+        self.pump(win)
+        win._pick_date()
+        popup = date_picker._CalendarPopup._open_instance
+        self.addCleanup(lambda: popup._close())
+        self.assertEqual(popup._today(), dl.today_utc8())
+        self.assertEqual(popup._max_date, dl.today_utc8())
+
+
+class HeaderFitTests(unittest.TestCase):
+    """ExportApp._fit_data_lookback_button on a stand-in header."""
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import tkinter as tk
+            cls.root = tk.Tk()
+            cls.root.withdraw()
+        except Exception as exc:
+            raise unittest.SkipTest(f"Tk unavailable: {exc}")
+        import export_gui
+        cls.eg = export_gui
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.root.destroy()
+
+    def make_header(self, account_text, width):
+        import tkinter as tk
+        top = tk.Toplevel(self.root)
+        self.addCleanup(top.destroy)
+        top.geometry(f"{width}x80")
+        header = tk.Frame(top)
+        header.pack(fill="x")
+        fake = type("App", (), {})()
+        fake.DATA_LOOKBACK_ICON = self.eg.ExportApp.DATA_LOOKBACK_ICON
+        fake._t = lambda key: gdl.STRINGS["en"][key]
+        tk.Button(header, text=account_text).pack(side="right", padx=(0, 8))
+        fake.btn_data_lookback = tk.Button(header, text=fake._t("dl_entry"))
+        fake.btn_data_lookback.pack(side="right", padx=(0, 12))
+        fake.lbl_title = tk.Label(header, text="Tranzor Translation Exporter",
+                                  font=("Segoe UI", 18, "bold"))
+        fake.lbl_title.pack(anchor="w")
+        fake.lbl_subtitle = tk.Label(header, text="Export translation changes")
+        fake.lbl_subtitle.pack(anchor="w")
+        top.update()
+        return fake
+
+    def fit(self, fake):
+        self.eg.ExportApp._fit_data_lookback_button(fake)
+        return fake.btn_data_lookback.cget("text")
+
+    def test_full_label_when_room(self):
+        fake = self.make_header("🔑 anna.su", 1200)
+        self.assertEqual(self.fit(fake), "📅 Data Lookback")
+
+    def test_icon_only_when_title_would_clip(self):
+        fake = self.make_header("🔑 " + "christopher.williams" * 3, 760)
+        self.assertEqual(self.fit(fake), "📅")
+
+    def test_pack_padx_total(self):
+        import tkinter as tk
+        f = tk.Frame(self.root)
+        a = tk.Label(f)
+        a.pack(padx=(3, 9))
+        b = tk.Label(f)
+        b.pack(padx=5)
+        self.assertEqual(self.eg._pack_padx_total(a), 12)
+        self.assertEqual(self.eg._pack_padx_total(b), 10)
+        f.destroy()
 
 
 class StringsTests(unittest.TestCase):

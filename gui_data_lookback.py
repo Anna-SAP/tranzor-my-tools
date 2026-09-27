@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import threading
 import tkinter as tk
+import tkinter.font as tkfont
 import webbrowser
 from datetime import datetime, timedelta
 from tkinter import ttk
@@ -28,7 +29,7 @@ STRINGS = {
         "dl_window_title": "Data Lookback",
         "dl_heading": "📅 Data Lookback",
         "dl_day": "{day} ({weekday}) · UTC+8",
-        "dl_today": "today — still in progress",
+        "dl_weekday_today": "{weekday}, today",
         "dl_prev": "◀ Previous day",
         "dl_next": "Next day ▶",
         "dl_pick": "📅 Pick date",
@@ -91,7 +92,7 @@ STRINGS = {
         "dl_window_title": "数据回溯",
         "dl_heading": "📅 数据回溯",
         "dl_day": "{day}（{weekday}）· UTC+8",
-        "dl_today": "今天，数据仍在增加",
+        "dl_weekday_today": "{weekday}·今天",
         "dl_prev": "◀ 前一天",
         "dl_next": "后一天 ▶",
         "dl_pick": "📅 选择日期",
@@ -196,7 +197,7 @@ class DataLookbackWindow:
         self.win = tk.Toplevel(app.root)
         self.win.configure(bg=app.BG)
         self.win.geometry("1180x720")
-        self.win.minsize(860, 480)
+        self.win.minsize(900, 480)
         self.win.protocol("WM_DELETE_WINDOW", self.close)
 
         self.show_idle_var = tk.BooleanVar(value=False)
@@ -234,10 +235,6 @@ class DataLookbackWindow:
         self.btn_next.pack(side="left", padx=(4, 4))
         self.btn_pick = self._button(top, self._pick_date, accent=True)
         self.btn_pick.pack(side="left", padx=(8, 0))
-        self.btn_copy = self._button(top, self._copy)
-        self.btn_copy.pack(side="right")
-        self.btn_refresh = self._button(top, lambda: self.load(self.day, force=True))
-        self.btn_refresh.pack(side="right", padx=(0, 8))
 
         kpi = ttk.Frame(self.win, style="Summary.TFrame")
         kpi.pack(fill="x", padx=16, pady=(4, 6))
@@ -245,8 +242,10 @@ class DataLookbackWindow:
         for i, key in enumerate(_KPIS):
             cell = ttk.Frame(kpi, style="Summary.TFrame")
             cell.grid(row=0, column=i, sticky="w", padx=(14, 26), pady=8)
+            # Fixed width: the cells don't jump as "…" turns into a number,
+            # and a shrinking label leaves no stale pixels on Windows.
             val = ttk.Label(cell, text=_UNAVAILABLE, style="SummaryCount.TLabel",
-                            font=(ff, 16, "bold"))
+                            font=(ff, 16, "bold"), width=7, anchor="w")
             val.pack(anchor="w")
             cap = ttk.Label(cell, text="", style="SummaryCountLabel.TLabel",
                             font=(ff, 9))
@@ -255,6 +254,13 @@ class DataLookbackWindow:
 
         opts = tk.Frame(self.win, bg=app.BG)
         opts.pack(fill="x", padx=16)
+        # Right-hand buttons are packed first so a narrow window squeezes
+        # the status text, never the buttons.
+        self.btn_copy = self._button(opts, self._copy)
+        self.btn_copy.pack(side="right")
+        self.btn_refresh = self._button(
+            opts, lambda: self.load(self.day, force=True))
+        self.btn_refresh.pack(side="right", padx=(0, 8))
         self.chk_idle = ttk.Checkbutton(
             opts, text="", variable=self.show_idle_var,
             style="Card.TCheckbutton", command=self._render)
@@ -274,7 +280,7 @@ class DataLookbackWindow:
         self.tree.column("#0", width=420, minwidth=240, stretch=False)
         self.tree.column("mrs", width=70, minwidth=50, anchor="center",
                          stretch=False)
-        self.tree.column("branches", width=420, minwidth=160, stretch=True)
+        self.tree.column("branches", width=420, minwidth=160, stretch=False)
         self.tree.column("bugfix", width=80, minwidth=60, anchor="center",
                          stretch=False)
         self.tree.column("scan", width=90, minwidth=60, anchor="center",
@@ -292,11 +298,32 @@ class DataLookbackWindow:
         self.tree.tag_configure("idle", foreground="#7a8199")
         self.tree.tag_configure("mr", foreground="#aab4cf")
         self.tree.bind("<Double-1>", self._on_double_click)
+        self.tree.bind("<Configure>", self._fit_columns, add="+")
+        self.tree.bind("<Motion>", self._on_tree_motion, add="+")
+        self.tree.bind("<Leave>", lambda _e: self._hide_tip(), add="+")
+        self._tip = None
+        self._tip_key = None
 
         self.lbl_rules = ttk.Label(self.win, text="", style="Status.TLabel",
                                    justify="left")
         self.lbl_rules.pack(fill="x", padx=16, pady=(2, 12))
         self.win.bind("<Configure>", self._on_resize, add="+")
+
+    def _fit_columns(self, event=None):
+        """Keep every column on screen: the count columns stay fixed, the
+        name column takes ~38% (240–420 px), branches get the rest."""
+        try:
+            width = event.width if event is not None else self.tree.winfo_width()
+        except tk.TclError:
+            return
+        if width <= 1:
+            return
+        fixed = sum(int(self.tree.column(c, "width"))
+                    for c in ("mrs", "bugfix", "scan"))
+        name = max(240, min(420, int(width * 0.38)))
+        branches = max(160, width - fixed - name - 4)
+        self.tree.column("#0", width=name)
+        self.tree.column("branches", width=branches)
 
     def _on_resize(self, _event=None):
         try:
@@ -333,10 +360,9 @@ class DataLookbackWindow:
     def _day_text(self, d) -> str:
         weekdays = self._t("dl_weekdays").split(",")
         weekday = weekdays[d.weekday()] if len(weekdays) == 7 else ""
-        text = self._t("dl_day").format(day=d.isoformat(), weekday=weekday)
         if d == dl.today_utc8():
-            text += f" · {self._t('dl_today')}"
-        return text
+            weekday = self._t("dl_weekday_today").format(weekday=weekday)
+        return self._t("dl_day").format(day=d.isoformat(), weekday=weekday)
 
     def _render_day(self):
         self.lbl_day.configure(text=self._day_text(self.day))
@@ -354,6 +380,8 @@ class DataLookbackWindow:
 
     def _render_status(self):
         t, a = self._t, self._status_args
+        self._set_enabled(self.btn_refresh,
+                          self._state not in ("loading", "resolving"))
         if self._state == "loading":
             self.app._mark_busy(self.lbl_status, t("dl_loading").format(**a))
         elif self._state == "resolving":
@@ -364,7 +392,9 @@ class DataLookbackWindow:
             self.app._mark_idle(self.lbl_status, t("dl_failed").format(**a))
         elif self._state == "done" and self._report is not None:
             tot = self._report["totals"]
-            empty = not any((tot["mr_count"], tot["bugfix"], tot["scan"]))
+            complete = all(self._report["sources"].values())
+            empty = complete and not any(
+                (tot["mr_count"], tot["bugfix"], tot["scan"]))
             key = "dl_done_empty" if empty else "dl_done"
             self.app._mark_idle(self.lbl_status, t(key).format(
                 day=self.day.isoformat(), mrs=_num(tot["mr_count"]),
@@ -375,43 +405,49 @@ class DataLookbackWindow:
 
     # --------------------------------------------------------------- load
     def load(self, day, force=False):
+        """Show ``day``. Tranzor rows of finished days are cached per window;
+        target branches are re-resolved every time (free for MRs already in
+        mr_jira's process cache, a retry for ones that failed before)."""
         d = dl.coerce_day(day)
         if d is None or self._closed:
             return
-        d = min(d, dl.today_utc8())
+        today = dl.today_utc8()
+        d = min(d, today)
         self.day = d
         self._gen += 1
         gen = self._gen
         if self._cancel is not None:
             self._cancel.set()
         self._render_day()
-        cached = self._cache.get(d)
-        if cached is not None and not force and d < dl.today_utc8():
-            self._report, self._branch_state, self._loaded_at = cached
-            self._state = "done"
-            self._render_status()
-            self._render()
-            return
+        cached = None if force else self._cache.get(d)
         cancel = self._cancel = threading.Event()
         self._report = None
         self._branch_state = "pending"
         self._state = "loading"
         self._status_args = {"day": d.isoformat()}
-        self._set_enabled(self.btn_refresh, False)
         self._render_status()
         self._render()
-        threading.Thread(target=self._work, args=(d, gen, cancel),
+        # Only a day that was already over when the fetch started is final;
+        # a snapshot of today must not be served as that day tomorrow.
+        complete = d < today
+        threading.Thread(target=self._work,
+                         args=(d, gen, cancel, cached, complete),
                          daemon=True, name="data-lookback").start()
 
-    def _work(self, d, gen, cancel):
-        try:
-            data = self._fetch_day(d, cancel_event=cancel)
-        except dl.LookbackCancelled:
-            return
-        except Exception as exc:  # pragma: no cover - fetch_day isolates sources
-            self._post(gen, self._on_failed, str(exc))
-            return
-        self._post(gen, self._on_rows, d, data)
+    def _work(self, d, gen, cancel, cached=None, complete=False):
+        if cached is not None:
+            data, fetched_at = cached
+        else:
+            try:
+                data = self._fetch_day(d, cancel_event=cancel)
+            except dl.LookbackCancelled:
+                return
+            except Exception as exc:  # pragma: no cover - sources are isolated
+                self._post(gen, self._on_failed, str(exc))
+                return
+            fetched_at = datetime.now().strftime("%H:%M:%S")
+        self._post(gen, self._on_rows, d, data, fetched_at,
+                   complete and cached is None)
         keys = dl.mr_keys(data.get("mr") or [])
         if not keys:
             self._post(gen, self._on_meta, d, data, {}, "done")
@@ -452,10 +488,13 @@ class DataLookbackWindow:
     def _on_failed(self, error):
         self._state = "failed"
         self._status_args = {"day": self.day.isoformat(), "error": error}
-        self._set_enabled(self.btn_refresh, True)
         self._render_status()
+        self._render()
 
-    def _on_rows(self, d, data):
+    def _on_rows(self, d, data, fetched_at, cache_it):
+        if cache_it and not data.get("errors"):
+            self._cache[d] = (data, fetched_at)
+        self._loaded_at = fetched_at
         self._report = dl.build_report(
             d, mr_tasks=data.get("mr"), bugfix_rows=data.get("bugfix"),
             scan_tasks=data.get("scan"), errors=data.get("errors"))
@@ -476,10 +515,6 @@ class DataLookbackWindow:
             scan_tasks=data.get("scan"), mr_meta=meta,
             errors=data.get("errors"))
         self._state = "done"
-        self._loaded_at = datetime.now().strftime("%H:%M:%S")
-        self._set_enabled(self.btn_refresh, True)
-        if not data.get("errors"):
-            self._cache[d] = (self._report, branch_state, self._loaded_at)
         self._render_status()
         self._render()
 
@@ -499,6 +534,7 @@ class DataLookbackWindow:
     def _render(self):
         if self._closed:
             return
+        self._hide_tip()
         tree = self.tree
         # Remember what the user expanded / collapsed; it carries over to
         # the next render and to other days. An empty tree (loading) must
@@ -602,6 +638,16 @@ class DataLookbackWindow:
             stack.extend(self.tree.get_children(iid))
         return out
 
+    @staticmethod
+    def _partial(value, sources):
+        """Counts that span every source: "—" when none loaded, "≥n" when
+        only some did (a failed source may hide more activity)."""
+        if not any(sources.values()):
+            return _UNAVAILABLE
+        if not all(sources.values()):
+            return f"≥{value:,}"
+        return _num(value)
+
     def _render_kpis(self, report):
         values = dict.fromkeys(_KPIS, _UNAVAILABLE)
         if report is not None:
@@ -611,12 +657,17 @@ class DataLookbackWindow:
                 "runs": _num(tot["runs"]),
                 "bugfix": _num(tot["bugfix"]),
                 "scan": _num(tot["scan"]),
-                "projects": _num(tot["active_projects"]),
+                "projects": self._partial(
+                    tot["active_projects"], report["sources"]),
             })
             if self._branch_state == "no_token" or not report["sources"]["mr"]:
                 values["branches"] = _UNAVAILABLE
             elif not report["branches_resolved"]:
                 values["branches"] = self._t("dl_branch_pending")
+            elif tot["unknown_branch_mrs"]:
+                # Unresolved MRs may target branches not counted yet.
+                values["branches"] = (f"≥{tot['branch_count']:,}"
+                                      if tot["branch_count"] else "?")
             else:
                 values["branches"] = _num(tot["branch_count"])
         elif self._state == "loading":
@@ -647,6 +698,7 @@ class DataLookbackWindow:
             elif report["branches_resolved"] and tot["unknown_branch_mrs"]:
                 notes.append(t("dl_note_unknown").format(
                     n=tot["unknown_branch_mrs"]))
+                warn = True
             if tot["unmapped_projects"]:
                 notes.append(t("dl_note_unmapped").format(
                     n=tot["unmapped_projects"]))
@@ -668,7 +720,8 @@ class DataLookbackWindow:
             self.btn_pick, font_family=self.ff,
             get_value=lambda: self.day.isoformat(),
             set_value=lambda s: self.app.root.after(0, self.load, s),
-            lang=lambda: self.app.lang, max_date=dl.today_utc8())
+            lang=lambda: self.app.lang, max_date=dl.today_utc8(),
+            today=dl.today_utc8)
 
     def _copy(self):
         if self._report is None:
@@ -681,7 +734,9 @@ class DataLookbackWindow:
                      t("dl_col_mrs"), t("dl_col_branches"),
                      t("dl_col_bugfix"), t("dl_col_scan")],
             unknown_label=t("dl_branch_unknown"),
-            include_idle=bool(self.show_idle_var.get()))
+            include_idle=bool(self.show_idle_var.get()),
+            unresolved=(_UNAVAILABLE if self._branch_state == "no_token"
+                        else t("dl_branch_pending")))
         text = f"{self._day_text(self.day)}\n{text}"
         try:
             self.win.clipboard_clear()
@@ -697,6 +752,59 @@ class DataLookbackWindow:
         url = self._mr_urls.get(iid)
         if url:
             webbrowser.open(url)
+
+    # ---------------------------------------------------- cell tooltip
+    def _cell_text(self, iid, column):
+        """Full text of a tree cell, and the width its column shows."""
+        tree = self.tree
+        if column == "#0":
+            return str(tree.item(iid, "text")), int(tree.column("#0", "width"))
+        try:
+            idx = int(column.lstrip("#")) - 1
+        except ValueError:
+            return "", 0
+        values = tree.item(iid, "values") or ()
+        if not 0 <= idx < len(values):
+            return "", 0
+        return str(values[idx]), int(tree.column(_COLUMNS[idx], "width"))
+
+    def _on_tree_motion(self, event):
+        """Hover a clipped cell (a category's branch set, a long MR title)
+        to read it in full."""
+        iid = self.tree.identify_row(event.y)
+        column = self.tree.identify_column(event.x)
+        key = (iid, column)
+        if key == self._tip_key:
+            return
+        self._hide_tip()
+        if not iid:
+            return
+        text, width = self._cell_text(iid, column)
+        if not text:
+            return
+        bold = bool(set(self.tree.item(iid, "tags") or ()) & {"cat", "unmapped"})
+        font = tkfont.Font(family=self.ff, size=10 if bold else 9,
+                           weight="bold" if bold else "normal")
+        indent = 60 if column == "#0" else 12
+        if font.measure(text) + indent <= width:
+            return
+        self._tip_key = key
+        tip = self._tip = tk.Toplevel(self.win)
+        tip.wm_overrideredirect(True)
+        tip.configure(bg="#0f3460")
+        tk.Label(tip, text=text, bg="#16213e", fg="#e0e0e0",
+                 font=(self.ff, 9), justify="left", wraplength=720,
+                 padx=8, pady=5).pack(padx=1, pady=1)
+        tip.geometry(f"+{event.x_root + 14}+{event.y_root + 16}")
+
+    def _hide_tip(self):
+        self._tip_key = None
+        if self._tip is not None:
+            try:
+                self._tip.destroy()
+            except tk.TclError:
+                pass
+            self._tip = None
 
     # -------------------------------------------------------------- close
     def exists(self) -> bool:
@@ -720,6 +828,7 @@ class DataLookbackWindow:
         if self._closed:
             return
         self._closed = True
+        self._hide_tip()
         if self._cancel is not None:
             self._cancel.set()
         try:

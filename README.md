@@ -128,6 +128,8 @@ The window is a `ttk.Notebook`. The first three tabs are core; the remaining fou
 
 **Cross-cutting — Send to LLM QA.** On **File Translation**, **MR Pipeline** and **Scan Tasks**, a `🤖 Send to LLM QA` button (next to *Export Selected*) does the whole LQA hand-off in one click: it exports the selected task's **full-translation JSON** (the audit schema the `/rc-core-products-trans-checker` skill consumes — no need to toggle the format radios), copies the prompt `/rc-core-products-trans-checker 检查附件JSON这批翻译的质量，重点关注 Critical 问题。` to the clipboard, reveals the file, and tells you to upload the attachment and paste the prompt in your LLM chat.
 
+**Cross-cutting — 📅 Data Lookback.** A header button (next to the token pill) opens a calendar; pick a day and a report window shows that day's activity grouped **Category → Project** (the fixed 65-project category table: CoreLib, RCV, WEB, Copilot, DPW, ENGAGE, INTEGRATION, IVA, RCW; anything else is listed under *Unmapped*): **distinct MRs** with a completed MR translation task (deduped by project + MR#; expand a project to see each MR), their **target branches** (GitLab MR target branch, needs a GitLab token), completed **Bug Fix** submissions (Applied / Partially applied) and completed **Scan tasks**. Days are UTC+8 and a task counts on the day it was created (Tranzor keeps no completion time). ◀ / ▶ step through days, ⟳ refreshes, 📋 copies the table as TSV.
+
 See [SPEC.md](SPEC.md) for the full rules, scope and acceptance criteria, and [ARCHITECTURE.md](ARCHITECTURE.md) for how it is built.
 
 ---

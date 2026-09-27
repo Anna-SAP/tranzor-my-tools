@@ -16,8 +16,10 @@ Day assignment. None of the three Tranzor list endpoints has a date filter,
 and Tranzor stores no completion timestamp: ``updated_at`` keeps moving after
 completion (a Language Lead fix MR pushes it 12–34 h later), so a task is
 counted on the UTC+8 day of its ``created_at``. That value never changes, so
-a past day's report is stable, and a completed MR task runs about a minute
-(median), so it almost always equals the completion day.
+past MR / Scan counts stay put, and a completed MR task runs about a minute
+(median), so it almost always equals the completion day. A Bug Fix is
+Applied to TM when it is submitted, so its submission day is its completion
+day (a later status change can still move it in or out of the count).
 
 The endpoints all return newest ``created_at`` first; :func:`collect_window`
 walks them with an early stop, and binary-searches the offset when the day
@@ -29,6 +31,7 @@ group so new repositories stay visible until the table is updated.
 """
 from __future__ import annotations
 
+import re
 import threading
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
@@ -396,17 +399,32 @@ def fetch_bugfix_day(window, *, base_url=None, get_fn=None,
             if in_window(s.get("created_at"), window)]
 
 
+_AUTH_TEXT = re.compile(r"\b401\b|unauthori[sz]ed")
+_FORBIDDEN_TEXT = re.compile(r"\b403\b|forbidden")
+
+
 def error_kind(exc: BaseException) -> str:
-    """``auth`` (401 — sign in again), ``forbidden`` (403) or ``error``."""
+    """``auth`` (401 — sign in again), ``forbidden`` (403) or ``error``.
+
+    The HTTP status decides when there is one. Connection errors and bad JSON
+    are plain errors even though their text may quote a URL like
+    ``offset=7403`` or ``(char 4013)``.
+    """
     status = getattr(getattr(exc, "response", None), "status_code", None)
-    if status == 401:
-        return "auth"
-    if status == 403:
-        return "forbidden"
+    if status is not None:
+        return {401: "auth", 403: "forbidden"}.get(status, "error")
+    if isinstance(exc, (ConnectionError, TimeoutError, ValueError)):
+        return "error"
+    try:
+        import requests
+        if isinstance(exc, (requests.ConnectionError, requests.Timeout)):
+            return "error"
+    except ImportError:  # pragma: no cover - requests ships with the app
+        pass
     text = str(exc).lower()
-    if "401" in text or "unauthorized" in text:
+    if _AUTH_TEXT.search(text):
         return "auth"
-    if "403" in text or "forbidden" in text:
+    if _FORBIDDEN_TEXT.search(text):
         return "forbidden"
     return "error"
 
@@ -707,30 +725,35 @@ def format_branches(counter: Mapping[Any, int], *, unknown_label: str = "?",
 
 def report_to_tsv(report: Mapping[str, Any], *, headers: Iterable[str],
                   unknown_label: str = "?", include_idle: bool = False,
-                  unavailable: str = "—") -> str:
-    """Tab-separated copy of the report (category + project rows)."""
+                  unavailable: str = "—", unresolved: str = "—") -> str:
+    """Tab-separated copy of the report (category + project rows).
+
+    ``unresolved`` fills the branch cell of rows that have MRs while branches
+    are not resolved (the view passes "…" while resolving, "—" without a
+    GitLab token), so the copy matches what the window shows.
+    """
     has = report.get("sources") or {}
 
     def num(value, source):
         return str(value) if has.get(source) else unavailable
 
-    def br(counter):
+    def br(row):
         if not has.get("mr"):
             return unavailable
         if not report.get("branches_resolved"):
-            return ""
-        return format_branches(counter, unknown_label=unknown_label)
+            return unresolved if row["mr_count"] else ""
+        return format_branches(row["branches"], unknown_label=unknown_label)
 
     lines = ["\t".join(headers)]
     for c in report.get("categories") or []:
         lines.append("\t".join([
-            c["name"], "", num(c["mr_count"], "mr"), br(c["branches"]),
+            c["name"], "", num(c["mr_count"], "mr"), br(c),
             num(c["bugfix"], "bugfix"), num(c["scan"], "scan")]))
         for p in c["projects"]:
             if not (include_idle or p["active"]):
                 continue
             lines.append("\t".join([
                 c["name"], p["project"], num(p["mr_count"], "mr"),
-                br(p["branches"]), num(p["bugfix"], "bugfix"),
+                br(p), num(p["bugfix"], "bugfix"),
                 num(p["scan"], "scan")]))
     return "\n".join(lines) + "\n"

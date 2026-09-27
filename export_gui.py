@@ -1204,6 +1204,25 @@ def format_token_expiry_status(seconds_left, *, now=None, lang="en",
 # ============================================================
 # TextRedirector — forward print() to tkinter Text widget
 # ============================================================
+def _pack_padx_total(widget) -> int:
+    """Horizontal pack padding of ``widget`` (both sides), in pixels."""
+    try:
+        pad = widget.pack_info().get("padx", 0)
+    except Exception:
+        return 0
+    if isinstance(pad, (tuple, list)):
+        parts = list(pad)
+    else:
+        parts = str(pad).split()
+    try:
+        nums = [int(float(p)) for p in parts]
+    except (TypeError, ValueError):
+        return 0
+    if len(nums) == 1:
+        return 2 * nums[0]
+    return sum(nums[:2])
+
+
 class Tooltip:
     """Lightweight hover tooltip for tk / ttk widgets. Zero-dependency."""
 
@@ -1776,6 +1795,8 @@ class ExportApp:
             self.btn_data_lookback.pack(side="right", anchor="ne",
                                         padx=(0, 12))
             self._data_lookback_tip = Tooltip(self.btn_data_lookback, "")
+            header.bind("<Configure>", self._fit_data_lookback_button,
+                        add="+")
 
         self.lbl_title = ttk.Label(header, text="", style="Title.TLabel")
         self.lbl_title.pack(anchor="w")
@@ -2447,6 +2468,7 @@ class ExportApp:
         if getattr(self, "btn_data_lookback", None) is not None:
             self.btn_data_lookback.configure(text=self._t("dl_entry"))
             self._data_lookback_tip.set_text(self._t("dl_entry_tip"))
+            self._fit_data_lookback_button()
         dl_win = getattr(self, "_dl_window", None)
         if dl_win is not None and dl_win.exists():
             dl_win.refresh_text()
@@ -3408,6 +3430,7 @@ class ExportApp:
                 btn.pack_forget()
         except Exception:
             pass  # the status pill must never break the header
+        self._fit_data_lookback_button()
 
     def _token_status_tick(self):
         try:
@@ -3845,6 +3868,42 @@ class ExportApp:
     # ------------------------------------------------------------------
     # 📅 Data Lookback
     # ------------------------------------------------------------------
+    DATA_LOOKBACK_ICON = "📅"
+
+    def _fit_data_lookback_button(self, _event=None):
+        """Show "📅 Data Lookback" while the header has room, else just 📅.
+
+        The right-hand header group grows with the token pill and the
+        account name, and the title / subtitle get what is left. Rather
+        than clip the app title (long account names at the default width),
+        the entry collapses to its icon; the tooltip keeps the full name.
+        """
+        btn = getattr(self, "btn_data_lookback", None)
+        if btn is None:
+            return
+        try:
+            header = btn.master
+            width = header.winfo_width()
+            if width <= 1:
+                return
+            others = 0
+            for w in header.pack_slaves():
+                if w in (btn, self.lbl_title, self.lbl_subtitle):
+                    continue
+                others += w.winfo_reqwidth() + _pack_padx_total(w)
+            title_need = max(self.lbl_title.winfo_reqwidth(),
+                             self.lbl_subtitle.winfo_reqwidth())
+            full = self._t("dl_entry")
+            full_need = (tkfont.Font(family=FONT_FAMILY, size=10,
+                                     weight="bold").measure(full)
+                         + 24 + 12 + 8)   # button padx, pack padx, border
+            text = (full if width - others - title_need >= full_need
+                    else self.DATA_LOOKBACK_ICON)
+            if str(btn.cget("text")) != text:
+                btn.configure(text=text)
+        except Exception:
+            pass  # a cosmetic fit must never break the header
+
     def _on_data_lookback(self):
         """Header button: open the calendar; picking a day opens the report."""
         import data_lookback
@@ -3857,7 +3916,8 @@ class ExportApp:
             # set_value fires while the popup still holds its grab; open
             # the report on the next idle instead.
             set_value=lambda s: self.root.after(0, self._open_data_lookback, s),
-            lang=lambda: self.lang, max_date=data_lookback.today_utc8())
+            lang=lambda: self.lang, max_date=data_lookback.today_utc8(),
+            today=data_lookback.today_utc8)
 
     def _open_data_lookback(self, day):
         """Show ``day`` in the (single) Data Lookback window."""
@@ -3925,6 +3985,12 @@ class ExportApp:
         try:
             if getattr(self, "bf_tab", None) is not None:
                 self.bf_tab.stop()
+        except Exception:
+            pass
+        try:
+            # Cancels its in-flight Tranzor / GitLab fetches.
+            if getattr(self, "_dl_window", None) is not None:
+                self._dl_window.close()
         except Exception:
             pass
         try:

@@ -61,6 +61,29 @@ class MaxDatePopupTests(unittest.TestCase):
         finally:
             popup._close()
 
+    def test_injected_today_drives_highlight_and_today_button(self):
+        import tkinter as tk
+        picked = []
+        btn = tk.Button(self.root, text="x")
+        popup = dp.open_calendar(
+            btn, font_family="Segoe UI", get_value=lambda: "",
+            set_value=picked.append, max_date=date(2026, 9, 28),
+            today=lambda: date(2026, 9, 28))
+        self.assertEqual(popup._selected, date(2026, 9, 28))
+        popup._pick_today()
+        self.assertEqual(picked, ["2026-09-28"])
+
+    def test_today_button_never_passes_max_date(self):
+        import tkinter as tk
+        picked = []
+        btn = tk.Button(self.root, text="x")
+        popup = dp.open_calendar(
+            btn, font_family="Segoe UI", get_value=lambda: "",
+            set_value=picked.append, max_date=date(2026, 9, 27),
+            today=date(2026, 9, 28))
+        popup._pick_today()
+        self.assertEqual(picked, ["2026-09-27"])
+
     def test_seed_after_max_date_is_clamped(self):
         import tkinter as tk
         btn = tk.Button(self.root, text="x")

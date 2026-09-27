@@ -272,7 +272,22 @@ class FetchSourceTests(unittest.TestCase):
         self.assertEqual(dl.error_kind(HTTPErr(403)), "forbidden")
         self.assertEqual(dl.error_kind(HTTPErr(500)), "error")
         self.assertEqual(dl.error_kind(RuntimeError("Authorization header required 401")), "auth")
+        self.assertEqual(dl.error_kind(RuntimeError("403 Client Error: Forbidden")), "forbidden")
         self.assertEqual(dl.error_kind(RuntimeError("timeout")), "error")
+
+    def test_error_kind_ignores_numbers_inside_urls_and_json_errors(self):
+        import json
+        import requests
+        url = "/api/v1/tasks?limit=1&offset=7403&status=completed"
+        self.assertEqual(dl.error_kind(requests.ConnectionError(
+            f"Max retries exceeded with url: {url}")), "error")
+        self.assertEqual(dl.error_kind(requests.Timeout(
+            f"Read timed out: {url.replace('7403', '4010')}")), "error")
+        with self.assertRaises(ValueError) as ctx:
+            json.loads("[" * 4013 + "x")
+        self.assertIn("4013", str(ctx.exception))
+        self.assertEqual(dl.error_kind(ctx.exception), "error")
+        self.assertEqual(dl.error_kind(RuntimeError("row 14013 failed")), "error")
 
     def test_fetch_day_isolates_a_failing_source(self):
         class Forbidden(Exception):
@@ -507,6 +522,16 @@ class FormatTests(unittest.TestCase):
         self.assertEqual(len(lines), 1 + 9 + 1)
         full = dl.report_to_tsv(rep, headers=["a"] * 6, include_idle=True)
         self.assertEqual(len(full.splitlines()), 1 + 9 + 65)
+
+    def test_tsv_marks_unresolved_branches_like_the_view(self):
+        rep = dl.build_report("2026-09-27", mr_tasks=[_mr("web/web", 1)],
+                              bugfix_rows=[], scan_tasks=[])
+        lines = dl.report_to_tsv(rep, headers=["h"] * 6,
+                                 unresolved="…").splitlines()
+        self.assertIn("WEB\tweb/web\t1\t…\t0\t0", lines)
+        self.assertIn("CoreLib\t\t0\t\t0\t0", lines)   # no MRs → blank
+        lines = dl.report_to_tsv(rep, headers=["h"] * 6).splitlines()
+        self.assertIn("WEB\tweb/web\t1\t—\t0\t0", lines)
 
 
 if __name__ == "__main__":

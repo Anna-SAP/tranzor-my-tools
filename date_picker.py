@@ -116,16 +116,17 @@ class _CalendarPopup(tk.Toplevel):
     _open_instance: "_CalendarPopup | None" = None  # 全局单例，避免叠开多个
 
     def __init__(self, anchor, *, font_family, get_value, set_value,
-                 lang="en", max_date=None):
+                 lang="en", max_date=None, today=None):
         super().__init__(anchor.winfo_toplevel())
         self._anchor = anchor
         self._set_value = set_value
         self._lang = lang if lang in _WEEK_HEADERS else "en"
         self._ff = font_family
         self._max_date = max_date
+        self._today_src = today
 
         seed = parse_date(get_value() if callable(get_value) else None) \
-            or date.today()
+            or self._today()
         if max_date is not None and seed > max_date:
             seed = max_date
         self._view_year = seed.year
@@ -212,7 +213,7 @@ class _CalendarPopup(tk.Toplevel):
         self._lbl_title.configure(
             text=format_month_title(self._view_year, self._view_month,
                                     self._lang))
-        today = date.today()
+        today = self._today()
         weeks = month_weeks(self._view_year, self._view_month)
         for r, week in enumerate(weeks):
             for c, day in enumerate(week):
@@ -252,8 +253,17 @@ class _CalendarPopup(tk.Toplevel):
         finally:
             self._close()
 
+    def _today(self) -> date:
+        """“今天”：调用方可注入（如 Data Lookback 固定按 UTC+8），缺省本机日期。"""
+        src = self._today_src
+        try:
+            value = src() if callable(src) else src
+        except Exception:
+            value = None
+        return value if isinstance(value, date) else date.today()
+
     def _pick_today(self):
-        today = date.today()
+        today = self._today()
         if not is_selectable(today, self._max_date):
             today = self._max_date
         self._pick(today)
@@ -321,7 +331,7 @@ def _resolve_lang(lang) -> str:
 
 
 def _open_calendar(anchor, *, font_family, get_value, set_value, lang="en",
-                   max_date=None):
+                   max_date=None, today=None):
     """打开（单例）日历弹窗。已有打开的先关掉，避免叠加。"""
     prev = _CalendarPopup._open_instance
     if prev is not None:
@@ -332,22 +342,24 @@ def _open_calendar(anchor, *, font_family, get_value, set_value, lang="en",
         # 同一个按钮再次点击 → 视为收起，不再重开。
     popup = _CalendarPopup(
         anchor, font_family=font_family, get_value=get_value,
-        set_value=set_value, lang=_resolve_lang(lang), max_date=max_date)
+        set_value=set_value, lang=_resolve_lang(lang), max_date=max_date,
+        today=today)
     _CalendarPopup._open_instance = popup
     return popup
 
 
 def open_calendar(anchor, *, font_family, get_value, set_value, lang="en",
-                  max_date=None):
+                  max_date=None, today=None):
     """直接打开锚定到 ``anchor`` 下方的日历弹窗（不配套 Entry / 📅 按钮）。
 
     供“点按钮 → 选日期 → 执行动作”这类入口使用（如 Data Lookback）。
-    ``max_date`` 之后的日期置灰不可选。``set_value`` 在弹窗关闭前同步调用，
+    ``max_date`` 之后的日期置灰不可选；``today``（date 或返回 date 的可调用）
+    决定“今天”高亮与 Today 按钮，缺省本机日期。``set_value`` 在弹窗关闭前同步调用，
     重活请在回调里用 ``after`` 延后。
     """
     return _open_calendar(anchor, font_family=font_family,
                           get_value=get_value, set_value=set_value,
-                          lang=lang, max_date=max_date)
+                          lang=lang, max_date=max_date, today=today)
 
 
 # ---------------------------------------------------------------------------
