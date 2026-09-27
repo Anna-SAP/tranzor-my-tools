@@ -16,6 +16,87 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import date_picker as dp
 
 
+class IsSelectableTests(unittest.TestCase):
+    def test_no_limit(self):
+        self.assertTrue(dp.is_selectable(date(2099, 1, 1)))
+
+    def test_limit_is_inclusive(self):
+        cap = date(2026, 9, 28)
+        self.assertTrue(dp.is_selectable(date(2026, 9, 27), cap))
+        self.assertTrue(dp.is_selectable(cap, cap))
+        self.assertFalse(dp.is_selectable(date(2026, 9, 29), cap))
+
+
+class MaxDatePopupTests(unittest.TestCase):
+    """Real-Tk check that days after ``max_date`` cannot be clicked."""
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import tkinter as tk
+            cls.root = tk.Tk()
+            cls.root.withdraw()
+        except Exception as exc:  # no display
+            raise unittest.SkipTest(f"Tk unavailable: {exc}")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.root.destroy()
+
+    def test_future_days_are_plain_labels(self):
+        import tkinter as tk
+        picked = []
+        btn = tk.Button(self.root, text="x")
+        popup = dp.open_calendar(
+            btn, font_family="Segoe UI", get_value=lambda: "2026-09-27",
+            set_value=picked.append, max_date=date(2026, 9, 28))
+        try:
+            cells = popup._grid_holder.winfo_children()
+            clickable = sorted(int(w.cget("text")) for w in cells
+                               if isinstance(w, tk.Button))
+            greyed = sorted(int(w.cget("text")) for w in cells
+                            if isinstance(w, tk.Label) and w.cget("text"))
+            self.assertEqual(clickable, list(range(1, 29)))
+            self.assertEqual(greyed, [29, 30])
+        finally:
+            popup._close()
+
+    def test_injected_today_drives_highlight_and_today_button(self):
+        import tkinter as tk
+        picked = []
+        btn = tk.Button(self.root, text="x")
+        popup = dp.open_calendar(
+            btn, font_family="Segoe UI", get_value=lambda: "",
+            set_value=picked.append, max_date=date(2026, 9, 28),
+            today=lambda: date(2026, 9, 28))
+        self.assertEqual(popup._selected, date(2026, 9, 28))
+        popup._pick_today()
+        self.assertEqual(picked, ["2026-09-28"])
+
+    def test_today_button_never_passes_max_date(self):
+        import tkinter as tk
+        picked = []
+        btn = tk.Button(self.root, text="x")
+        popup = dp.open_calendar(
+            btn, font_family="Segoe UI", get_value=lambda: "",
+            set_value=picked.append, max_date=date(2026, 9, 27),
+            today=date(2026, 9, 28))
+        popup._pick_today()
+        self.assertEqual(picked, ["2026-09-27"])
+
+    def test_seed_after_max_date_is_clamped(self):
+        import tkinter as tk
+        btn = tk.Button(self.root, text="x")
+        popup = dp.open_calendar(
+            btn, font_family="Segoe UI", get_value=lambda: "2026-12-05",
+            set_value=lambda _s: None, max_date=date(2026, 9, 28))
+        try:
+            self.assertEqual((popup._view_year, popup._view_month), (2026, 9))
+            self.assertEqual(popup._selected, date(2026, 9, 28))
+        finally:
+            popup._close()
+
+
 class ParseDateTests(unittest.TestCase):
     def test_plain_iso(self):
         self.assertEqual(dp.parse_date("2026-05-20"), date(2026, 5, 20))

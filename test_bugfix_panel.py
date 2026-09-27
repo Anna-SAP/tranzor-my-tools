@@ -39,6 +39,29 @@ class TestHistoryPagination(unittest.TestCase):
             "http://platform/api/v1/bug-fix/history",
         )
 
+    def test_stop_after_page_ends_paging_early(self):
+        rows = [{"submission_id": f"s-{i}"} for i in range(350)]
+        calls = []
+
+        def fake_get(_url, params):
+            calls.append(params["page"])
+            start = (params["page"] - 1) * params["page_size"]
+            return {"submissions": rows[start:start + params["page_size"]],
+                    "total_submissions": len(rows)}
+
+        seen_batches = []
+
+        def stop(batch):
+            seen_batches.append(len(batch))
+            return len(seen_batches) == 2
+
+        payload = bp.fetch_all_history(
+            "http://platform", get_fn=fake_get, stop_after_page=stop)
+
+        self.assertEqual(calls, [1, 2])
+        self.assertEqual(len(payload["submissions"]), 200)
+        self.assertEqual(seen_batches, [100, 100])
+
     def test_underreported_total_does_not_truncate_full_page(self):
         calls = []
 

@@ -528,6 +528,16 @@ except Exception as _mts_e:  # pragma: no cover
 else:
     _mts_import_error = None
 
+# 📅 Data Lookback — header entry: pick a day, see MRs / target branches /
+# Bug Fix / Scan per category → project. Pure-additive.
+try:
+    import gui_data_lookback as _dl_mod
+except Exception as _dl_e:  # pragma: no cover
+    _dl_mod = None
+    _dl_import_error = _dl_e
+else:
+    _dl_import_error = None
+
 _boot_mark("optional_tabs_imported")
 
 # ---------------------------------------------------------------------------
@@ -1114,6 +1124,13 @@ if _mts_tab_mod is not None:
     except Exception:
         pass
 
+if _dl_mod is not None:
+    try:
+        for _lang_code, _extra in _dl_mod.STRINGS.items():
+            STRINGS.setdefault(_lang_code, {}).update(_extra)
+    except Exception:
+        pass
+
 # Merge in strings for the shared Advanced Filters panel (MR Pipeline + Scan
 # Tasks tabs). Best-effort: a missing module just leaves the panel English.
 try:
@@ -1187,6 +1204,25 @@ def format_token_expiry_status(seconds_left, *, now=None, lang="en",
 # ============================================================
 # TextRedirector — forward print() to tkinter Text widget
 # ============================================================
+def _pack_padx_total(widget) -> int:
+    """Horizontal pack padding of ``widget`` (both sides), in pixels."""
+    try:
+        pad = widget.pack_info().get("padx", 0)
+    except Exception:
+        return 0
+    if isinstance(pad, (tuple, list)):
+        parts = list(pad)
+    else:
+        parts = str(pad).split()
+    try:
+        nums = [int(float(p)) for p in parts]
+    except (TypeError, ValueError):
+        return 0
+    if len(nums) == 1:
+        return 2 * nums[0]
+    return sum(nums[:2])
+
+
 class Tooltip:
     """Lightweight hover tooltip for tk / ttk widgets. Zero-dependency."""
 
@@ -1745,6 +1781,22 @@ class ExportApp:
         self.lbl_token_status.pack(side="right", anchor="ne",
                                    padx=(0, 6), pady=(5, 0))
         self._token_tip = Tooltip(self.lbl_token_status, "")
+
+        # 📅 Data Lookback (leftmost of the right-hand group): calendar →
+        # one day's MRs / target branches / Bug Fix / Scan per category.
+        self.btn_data_lookback = None
+        if _dl_mod is not None:
+            self.btn_data_lookback = self._create_button(
+                header, text="", command=self._on_data_lookback,
+                style_name="Secondary",
+                font=(FONT_FAMILY, 10, "bold"),
+                bg=self.ACCENT, fg="#ffffff", activebackground="#1a3a6a",
+                activeforeground="#fff", padx=12, pady=2)
+            self.btn_data_lookback.pack(side="right", anchor="ne",
+                                        padx=(0, 12))
+            self._data_lookback_tip = Tooltip(self.btn_data_lookback, "")
+            header.bind("<Configure>", self._fit_data_lookback_button,
+                        add="+")
 
         self.lbl_title = ttk.Label(header, text="", style="Title.TLabel")
         self.lbl_title.pack(anchor="w")
@@ -2413,6 +2465,13 @@ class ExportApp:
         self.btn_lang.configure(text=self._t("lang_toggle"))
         self._refresh_theme_button()
         self._update_account_button()
+        if getattr(self, "btn_data_lookback", None) is not None:
+            self.btn_data_lookback.configure(text=self._t("dl_entry"))
+            self._data_lookback_tip.set_text(self._t("dl_entry_tip"))
+            self._fit_data_lookback_button()
+        dl_win = getattr(self, "_dl_window", None)
+        if dl_win is not None and dl_win.exists():
+            dl_win.refresh_text()
 
         # PR-L: LAZY per-tab refresh — the real fix for the ~57s
         # "(未响应)" gap between window paint and first interactivity
@@ -3371,6 +3430,7 @@ class ExportApp:
                 btn.pack_forget()
         except Exception:
             pass  # the status pill must never break the header
+        self._fit_data_lookback_button()
 
     def _token_status_tick(self):
         try:
@@ -3805,6 +3865,83 @@ class ExportApp:
                 self._bridge_watchdog_tick,
             )
 
+    # ------------------------------------------------------------------
+    # 📅 Data Lookback
+    # ------------------------------------------------------------------
+    DATA_LOOKBACK_ICON = "📅"
+
+    def _fit_data_lookback_button(self, _event=None):
+        """Show "📅 Data Lookback" while the header has room, else just 📅.
+
+        The right-hand header group grows with the token pill and the
+        account name, and the title / subtitle get what is left. Rather
+        than clip the app title (long account names at the default width),
+        the entry collapses to its icon; the tooltip keeps the full name.
+        """
+        btn = getattr(self, "btn_data_lookback", None)
+        if btn is None:
+            return
+        try:
+            header = btn.master
+            width = header.winfo_width()
+            if width <= 1:
+                return
+            others = 0
+            for w in header.pack_slaves():
+                if w in (btn, self.lbl_title, self.lbl_subtitle):
+                    continue
+                others += w.winfo_reqwidth() + _pack_padx_total(w)
+            title_need = max(self.lbl_title.winfo_reqwidth(),
+                             self.lbl_subtitle.winfo_reqwidth())
+            full = self._t("dl_entry")
+            # Measure the real button: font metrics under-count CJK + emoji
+            # labels by several px. reqwidth updates synchronously, and the
+            # final text is set below before anything is redrawn.
+            if str(btn.cget("text")) != full:
+                btn.configure(text=full)
+            full_need = btn.winfo_reqwidth() + _pack_padx_total(btn)
+            text = (full if width - others - title_need >= full_need
+                    else self.DATA_LOOKBACK_ICON)
+            if str(btn.cget("text")) != text:
+                btn.configure(text=text)
+        except Exception:
+            pass  # a cosmetic fit must never break the header
+
+    def _on_data_lookback(self):
+        """Header button: open the calendar; picking a day opens the report."""
+        import data_lookback
+        import date_picker
+        last = getattr(self, "_dl_last_day", None) or (
+            data_lookback.today_utc8() - timedelta(days=1))
+        date_picker.open_calendar(
+            self.btn_data_lookback, font_family=FONT_FAMILY,
+            get_value=lambda: last.isoformat(),
+            # set_value fires while the popup still holds its grab; open
+            # the report on the next idle instead.
+            set_value=lambda s: self.root.after(0, self._open_data_lookback, s),
+            lang=lambda: self.lang, max_date=data_lookback.today_utc8(),
+            today=data_lookback.today_utc8)
+
+    def _open_data_lookback(self, day):
+        """Show ``day`` in the (single) Data Lookback window."""
+        import data_lookback
+        d = data_lookback.coerce_day(day)
+        if d is None or _dl_mod is None:
+            return
+        self._dl_last_day = d
+        win = getattr(self, "_dl_window", None)
+        if win is not None and win.exists():
+            win.focus()
+            win.load(d)
+            return
+        try:
+            self._dl_window = _dl_mod.DataLookbackWindow(
+                self, font_family=FONT_FAMILY, day=d,
+                on_close=lambda: setattr(self, "_dl_window", None))
+        except Exception as exc:  # pragma: no cover - never break the app
+            print(f"[data-lookback] open failed: {exc!r}")
+            self._dl_window = None
+
     def _open_bridge_setup_wizard(self, *, force: bool = False):
         """Open the first-time setup wizard. ``force=True`` bypasses the
         auto-trigger heuristic; callers that want the heuristic should
@@ -3851,6 +3988,12 @@ class ExportApp:
         try:
             if getattr(self, "bf_tab", None) is not None:
                 self.bf_tab.stop()
+        except Exception:
+            pass
+        try:
+            # Cancels its in-flight Tranzor / GitLab fetches.
+            if getattr(self, "_dl_window", None) is not None:
+                self._dl_window.close()
         except Exception:
             pass
         try:

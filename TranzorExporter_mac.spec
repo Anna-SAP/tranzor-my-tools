@@ -34,6 +34,8 @@ a = Analysis(
         'tm_panel',
         'gui_tab_bugfix',
         'bugfix_panel',
+        'gui_data_lookback',  # 📅 Data Lookback window (header entry)
+        'data_lookback',  # Data Lookback day window / fetch / aggregation
         'date_picker',  # 共享深色日历选择组件（日期字段 📅 选择器）
         'time_display',  # tz-aware clock formatter (Created / token expiry)
         'app_theme',  # Light/Dark theme engine (hooks tkinter option funnels)
