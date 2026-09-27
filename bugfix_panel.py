@@ -129,8 +129,14 @@ def fetch_all_history(
     get_fn: Callable[..., Any] | None = None,
     max_pages: int = MAX_HISTORY_PAGES,
     cancel_event: Any = None,
+    stop_after_page: Callable[[list], bool] | None = None,
 ) -> dict[str, Any]:
-    """Fetch every matching Platform submission using its grouped pagination."""
+    """Fetch every matching Platform submission using its grouped pagination.
+
+    ``stop_after_page(batch)`` lets a caller that only needs recent rows end
+    early: history is ordered newest-first, so once a page reaches past the
+    oldest day of interest the remaining pages cannot matter.
+    """
     if get_fn is None:
         from export_mr_pipeline import _api_get
         get_fn = _api_get
@@ -189,6 +195,8 @@ def fetch_all_history(
         # metadata, but trusting it as a pagination gate can silently truncate
         # when a concurrent write or backend count drift under-reports rows.
         if len(batch) < size:
+            break
+        if stop_after_page is not None and stop_after_page(batch):
             break
     else:
         if last_page_was_full and (total is None or len(out) < total):
