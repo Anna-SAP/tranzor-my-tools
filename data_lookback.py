@@ -190,6 +190,23 @@ def today_utc8(now: Optional[datetime] = None) -> date:
     return moment.astimezone(TZ_UTC8).date()
 
 
+SETTLE_GRACE = timedelta(hours=6)
+
+
+def is_settled(day: Any, now: Optional[datetime] = None,
+               grace: timedelta = SETTLE_GRACE) -> bool:
+    """True once ``day`` ended at least ``grace`` ago (UTC+8).
+
+    Only completed tasks are listed, and a task counts on the day it was
+    created — so a scan created at 23:40 that finishes at 00:25 joins
+    yesterday late. A day is safe to cache only after that tail is done.
+    """
+    moment = now or datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment >= day_window(day)[1] + grace
+
+
 def coerce_day(value: Any) -> Optional[date]:
     """``date`` / ``datetime`` / ``YYYY-MM-DD`` → ``date`` (else ``None``)."""
     if isinstance(value, datetime):
@@ -417,7 +434,10 @@ def error_kind(exc: BaseException) -> str:
         return "error"
     try:
         import requests
-        if isinstance(exc, (requests.ConnectionError, requests.Timeout)):
+        # Transport failures (connection, timeout, a body cut off mid-way —
+        # "IncompleteRead(401 bytes read)") carry no status to go by.
+        if (isinstance(exc, requests.RequestException)
+                and not isinstance(exc, requests.HTTPError)):
             return "error"
     except ImportError:  # pragma: no cover - requests ships with the app
         pass

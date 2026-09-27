@@ -112,6 +112,14 @@ class DayWindowTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             dl.day_window("nope")
 
+    def test_is_settled_waits_out_the_late_finishers(self):
+        # 2026-09-27 ends 2026-09-27T16:00Z; grace 6 h → settled at 22:00Z.
+        self.assertFalse(dl.is_settled("2026-09-27", _utc(2026, 9, 27, 16, 5)))
+        self.assertFalse(dl.is_settled("2026-09-27", _utc(2026, 9, 27, 21, 59)))
+        self.assertTrue(dl.is_settled("2026-09-27", _utc(2026, 9, 27, 22, 0)))
+        self.assertTrue(dl.is_settled("2026-09-20", _utc(2026, 9, 27, 0, 0)))
+        self.assertFalse(dl.is_settled("2026-09-28", _utc(2026, 9, 27, 22, 0)))
+
     def test_today_utc8(self):
         from datetime import date
         self.assertEqual(dl.today_utc8(_utc(2026, 9, 27, 15, 59)),
@@ -288,6 +296,16 @@ class FetchSourceTests(unittest.TestCase):
         self.assertIn("4013", str(ctx.exception))
         self.assertEqual(dl.error_kind(ctx.exception), "error")
         self.assertEqual(dl.error_kind(RuntimeError("row 14013 failed")), "error")
+        cut = requests.exceptions.ChunkedEncodingError(
+            "Connection broken: IncompleteRead(401 bytes read, 57 more expected)")
+        self.assertEqual(dl.error_kind(cut), "error")
+        self.assertEqual(dl.error_kind(requests.exceptions.ChunkedEncodingError(
+            "IncompleteRead(403 bytes read)")), "error")
+        # A genuine HTTP 401 still maps to sign-in.
+        resp = requests.Response()
+        resp.status_code = 401
+        self.assertEqual(dl.error_kind(requests.HTTPError(
+            "401 Client Error", response=resp)), "auth")
 
     def test_fetch_day_isolates_a_failing_source(self):
         class Forbidden(Exception):

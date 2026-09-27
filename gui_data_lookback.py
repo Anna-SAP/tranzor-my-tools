@@ -191,6 +191,8 @@ class DataLookbackWindow:
         self._progress = (0, 0)
         self._loaded_at = ""
         self._mr_urls: dict[str, str] = {}
+        self._full_text: dict[str, str] = {}   # iid → untruncated #0 text
+        self._cols_fitted = False
         self._open_state: dict[str, bool] = {}
         self._rendered_day = None
 
@@ -280,7 +282,8 @@ class DataLookbackWindow:
         self.tree.column("#0", width=420, minwidth=240, stretch=False)
         self.tree.column("mrs", width=70, minwidth=50, anchor="center",
                          stretch=False)
-        self.tree.column("branches", width=420, minwidth=160, stretch=False)
+        # branches absorbs width when the user drags a column divider.
+        self.tree.column("branches", width=420, minwidth=160, stretch=True)
         self.tree.column("bugfix", width=80, minwidth=60, anchor="center",
                          stretch=False)
         self.tree.column("scan", width=90, minwidth=60, anchor="center",
@@ -299,8 +302,14 @@ class DataLookbackWindow:
         self.tree.tag_configure("mr", foreground="#aab4cf")
         self.tree.bind("<Double-1>", self._on_double_click)
         self.tree.bind("<Configure>", self._fit_columns, add="+")
+        # A dragged column divider can push the count columns off screen.
+        self.tree.bind("<ButtonRelease-1>",
+                       lambda _e: self._fit_columns(), add="+")
         self.tree.bind("<Motion>", self._on_tree_motion, add="+")
-        self.tree.bind("<Leave>", lambda _e: self._hide_tip(), add="+")
+        # Scrolling / clicking moves rows under a still pointer.
+        for seq in ("<Leave>", "<MouseWheel>", "<Button-4>", "<Button-5>",
+                    "<ButtonPress>", "<KeyPress>"):
+            self.tree.bind(seq, lambda _e: self._hide_tip(), add="+")
         self._tip = None
         self._tip_key = None
 
@@ -310,20 +319,34 @@ class DataLookbackWindow:
         self.win.bind("<Configure>", self._on_resize, add="+")
 
     def _fit_columns(self, event=None):
-        """Keep every column on screen: the count columns stay fixed, the
-        name column takes ~38% (240–420 px), branches get the rest."""
+        """Keep every column on screen (there is no horizontal scrollbar).
+
+        The first fit gives the name column ~38% (240–420 px); later fits
+        keep whatever width the user dragged it to, shrinking it only as
+        far as needed. The count columns keep their width (capped so a
+        dragged one cannot starve the rest) and branches get the remainder.
+        """
         try:
             width = event.width if event is not None else self.tree.winfo_width()
         except tk.TclError:
             return
         if width <= 1:
             return
-        fixed = sum(int(self.tree.column(c, "width"))
-                    for c in ("mrs", "bugfix", "scan"))
-        name = max(240, min(420, int(width * 0.38)))
+        tree = self.tree
+        counts = ("mrs", "bugfix", "scan")
+        for c in counts:
+            if int(tree.column(c, "width")) > 200:
+                tree.column(c, width=200)
+        fixed = sum(int(tree.column(c, "width")) for c in counts)
+        if self._cols_fitted:
+            name = int(tree.column("#0", "width"))
+        else:
+            name = min(420, int(width * 0.38))
+            self._cols_fitted = True
+        name = max(240, min(name, width - fixed - 160 - 4))
         branches = max(160, width - fixed - name - 4)
-        self.tree.column("#0", width=name)
-        self.tree.column("branches", width=branches)
+        tree.column("#0", width=name)
+        tree.column("branches", width=branches)
 
     def _on_resize(self, _event=None):
         try:
@@ -427,9 +450,9 @@ class DataLookbackWindow:
         self._status_args = {"day": d.isoformat()}
         self._render_status()
         self._render()
-        # Only a day that was already over when the fetch started is final;
-        # a snapshot of today must not be served as that day tomorrow.
-        complete = d < today
+        # Cache only a day that had settled when the fetch started: today,
+        # or a day that ended minutes ago, is still gaining late finishers.
+        complete = dl.is_settled(d)
         threading.Thread(target=self._work,
                          args=(d, gen, cancel, cached, complete),
                          daemon=True, name="data-lookback").start()
@@ -550,6 +573,7 @@ class DataLookbackWindow:
             yview = 0.0
         tree.delete(*tree.get_children(""))
         self._mr_urls = {}
+        self._full_text = {}
         report = self._report
         self._render_kpis(report)
         self._render_notes(report)
@@ -576,7 +600,8 @@ class DataLookbackWindow:
             cid = f"cat:{cat['name']}"
             if cat["mapped"]:
                 label = t("dl_cat_label").format(
-                    name=cat["name"], active=cat["active_projects"],
+                    name=cat["name"],
+                    active=self._partial(cat["active_projects"], has),
                     total=cat["project_total"])
                 tags = ("cat",)
             else:
@@ -607,11 +632,15 @@ class DataLookbackWindow:
         parts = [f"!{mr['iid']}"]
         if mr.get("jira"):
             parts.append(mr["jira"])
+        full_parts = list(parts)
         if mr.get("title"):
             parts.append(_shorten(mr["title"], _MR_TITLE_MAX))
-        label = "  ".join(parts)
+            full_parts.append(" ".join(str(mr["title"]).split()))
+        suffix = ""
         if mr["runs"] > 1:
-            label += f"   ({t('dl_mr_runs').format(n=mr['runs'])})"
+            suffix = f"   ({t('dl_mr_runs').format(n=mr['runs'])})"
+        label = "  ".join(parts) + suffix
+        full_label = "  ".join(full_parts) + suffix
         if self._branch_state == "no_token":
             branch = _UNAVAILABLE
         elif not self._report["branches_resolved"]:
@@ -621,6 +650,8 @@ class DataLookbackWindow:
         iid = f"mr:{mr['project_id']}!{mr['iid']}"
         self.tree.insert(parent, "end", iid=iid, text=label,
                          values=("", branch, "", ""), tags=("mr",))
+        if full_label != label:
+            self._full_text[iid] = full_label
         try:
             import mr_delivery
             url = mr_delivery.gitlab_mr_url(mr["project_id"], mr["iid"])
@@ -758,7 +789,8 @@ class DataLookbackWindow:
         """Full text of a tree cell, and the width its column shows."""
         tree = self.tree
         if column == "#0":
-            return str(tree.item(iid, "text")), int(tree.column("#0", "width"))
+            return (self._full_text.get(iid) or str(tree.item(iid, "text")),
+                    int(tree.column("#0", "width")))
         try:
             idx = int(column.lstrip("#")) - 1
         except ValueError:
@@ -786,7 +818,8 @@ class DataLookbackWindow:
         font = tkfont.Font(family=self.ff, size=10 if bold else 9,
                            weight="bold" if bold else "normal")
         indent = 60 if column == "#0" else 12
-        if font.measure(text) + indent <= width:
+        shortened = (column == "#0" and iid in self._full_text)
+        if not shortened and font.measure(text) + indent <= width:
             return
         self._tip_key = key
         tip = self._tip = tk.Toplevel(self.win)
@@ -795,7 +828,17 @@ class DataLookbackWindow:
         tk.Label(tip, text=text, bg="#16213e", fg="#e0e0e0",
                  font=(self.ff, 9), justify="left", wraplength=720,
                  padx=8, pady=5).pack(padx=1, pady=1)
-        tip.geometry(f"+{event.x_root + 14}+{event.y_root + 16}")
+        # Keep it on screen: an overrideredirect window is not pulled back
+        # by the window manager (a maximized window's right edge).
+        tip.update_idletasks()
+        w, h = tip.winfo_reqwidth(), tip.winfo_reqheight()
+        sw, sh = tip.winfo_screenwidth(), tip.winfo_screenheight()
+        x, y = event.x_root + 14, event.y_root + 16
+        if x + w > sw - 4:
+            x = max(0, min(event.x_root - w - 8, sw - w - 4))
+        if y + h > sh - 4:
+            y = max(0, event.y_root - h - 8)
+        tip.geometry(f"+{x}+{y}")
 
     def _hide_tip(self):
         self._tip_key = None

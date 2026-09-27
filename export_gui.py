@@ -3894,9 +3894,12 @@ class ExportApp:
             title_need = max(self.lbl_title.winfo_reqwidth(),
                              self.lbl_subtitle.winfo_reqwidth())
             full = self._t("dl_entry")
-            full_need = (tkfont.Font(family=FONT_FAMILY, size=10,
-                                     weight="bold").measure(full)
-                         + 24 + 12 + 8)   # button padx, pack padx, border
+            # Measure the real button: font metrics under-count CJK + emoji
+            # labels by several px. reqwidth updates synchronously, and the
+            # final text is set below before anything is redrawn.
+            if str(btn.cget("text")) != full:
+                btn.configure(text=full)
+            full_need = btn.winfo_reqwidth() + _pack_padx_total(btn)
             text = (full if width - others - title_need >= full_need
                     else self.DATA_LOOKBACK_ICON)
             if str(btn.cget("text")) != text:

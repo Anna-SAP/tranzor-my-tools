@@ -363,6 +363,107 @@ class DataLookbackWindowTests(unittest.TestCase):
             self.assertLessEqual(total, win.tree.winfo_width(), width)
             self.assertGreaterEqual(int(win.tree.column("branches", "width")), 160)
 
+    def test_unsettled_day_is_not_cached(self):
+        from unittest import mock
+        with mock.patch.object(dl, "is_settled", return_value=False):
+            win = self.make()
+            self.pump(win)
+            win.load("2026-09-23")
+            self.pump(win)
+            win.load("2026-09-24")
+            self.pump(win)
+        self.assertEqual(len(self.fetches), 3)
+
+    def test_category_active_count_is_partial_when_a_source_failed(self):
+        self.data = _day_data(errors={"bugfix": ("error", "boom")}, bugfix=False)
+        win = self.make()
+        self.pump(win)
+        self.assertIn("≥1/21", win.tree.item("cat:WEB", "text"))
+        self.data = {"mr": None, "bugfix": None, "scan": None,
+                     "errors": {s: ("error", "x") for s in ("mr", "bugfix", "scan")}}
+        win.load(win.day, force=True)
+        self.pump(win)
+        self.assertIn("—/21", win.tree.item("cat:WEB", "text"))
+
+    def hover(self, win, iid, column):
+        win.tree.see(iid)
+        win.win.update()
+        x, y, w, h = win.tree.bbox(iid, column)
+        event = type("E", (), {"x": x + 5, "y": y + h // 2,
+                               "x_root": win.tree.winfo_rootx() + x + 5,
+                               "y_root": win.tree.winfo_rooty() + y + h // 2})()
+        win._on_tree_motion(event)
+        return event
+
+    def test_long_mr_title_tooltip_shows_the_whole_title(self):
+        title = "Localize the scheduler booking confirmation dialog " * 3
+        self.meta_title = title
+
+        def resolve(keys, cancel_event=None, on_progress=None):
+            return {("web/web", 1): {"branch": "develop", "jira": "UIA-9",
+                                     "title": title}}
+
+        win = self.make()
+        win._resolve_meta = resolve
+        win.load(win.day, force=True)
+        self.pump(win)
+        win.tree.item("prj:web/web", open=True)
+        self.hover(win, "mr:web/web!1", "#0")
+        self.assertIsNotNone(win._tip)
+        text = win._tip.winfo_children()[0].cget("text")
+        self.assertIn(" ".join(title.split()), text)
+        self.assertNotIn("…", text)
+
+    def test_tooltip_hides_on_wheel_and_stays_on_screen(self):
+        win = self.make()
+        self.pump(win)
+        long_branches = ", ".join(f"release/26-{i}-very-long-branch-name"
+                                  for i in range(30))
+        values = list(win.tree.item("cat:WEB", "values"))
+        values[1] = long_branches
+        win.tree.item("cat:WEB", values=values)
+        event = self.hover(win, "cat:WEB", "branches")
+        tip = win._tip
+        self.assertIsNotNone(tip)
+        tip.update_idletasks()
+        self.assertLessEqual(tip.winfo_x() + tip.winfo_reqwidth(),
+                             tip.winfo_screenwidth())
+        # Pretend the pointer sits at the far right edge of the screen.
+        win._hide_tip()
+        event.x_root = win.tree.winfo_screenwidth() - 5
+        win._on_tree_motion(event)
+        win._tip.update_idletasks()
+        self.assertLessEqual(win._tip.winfo_x() + win._tip.winfo_reqwidth(),
+                             win._tip.winfo_screenwidth())
+        win.tree.event_generate("<MouseWheel>", delta=-120)
+        self.assertIsNone(win._tip)
+
+    def test_dragged_name_column_never_pushes_counts_off_screen(self):
+        win = self.make()
+        self.pump(win)
+        win.win.geometry("1180x600")
+        win.win.update()
+        cols = ("#0",) + gdl._COLUMNS
+
+        def total():
+            return sum(int(win.tree.column(c, "width")) for c in cols)
+
+        # Simulate a divider drag: the name column grows by 200 px.
+        win.tree.column("#0", width=int(win.tree.column("#0", "width")) + 200)
+        win._fit_columns()                 # <ButtonRelease-1>
+        self.assertLessEqual(total(), win.tree.winfo_width())
+        dragged = int(win.tree.column("#0", "width"))
+        self.assertGreater(dragged, 420)
+        # A resize keeps the user's width while it still fits.
+        win.win.geometry("1300x600")
+        win.win.update()
+        self.assertEqual(int(win.tree.column("#0", "width")), dragged)
+        self.assertLessEqual(total(), win.tree.winfo_width())
+        # A dragged count column is capped.
+        win.tree.column("bugfix", width=900)
+        win._fit_columns()
+        self.assertLessEqual(total(), win.tree.winfo_width())
+
     def test_calendar_today_follows_utc8(self):
         import date_picker
         win = self.make()
@@ -424,6 +525,29 @@ class HeaderFitTests(unittest.TestCase):
     def test_icon_only_when_title_would_clip(self):
         fake = self.make_header("🔑 " + "christopher.williams" * 3, 760)
         self.assertEqual(self.fit(fake), "📅")
+
+    def test_threshold_uses_the_real_button_width(self):
+        """Full label exactly when it fits — for CJK too, where font
+        metrics under-count the rendered button by a few px."""
+        import tkinter as tk
+        for lang in ("en", "zh"):
+            fake = self.make_header("🔑 anna.su", 1200)
+            fake._t = lambda key, lang=lang: gdl.STRINGS[lang][key]
+            btn = fake.btn_data_lookback
+            btn.configure(text=fake._t("dl_entry"))
+            header = btn.master
+            header.update()
+            need = btn.winfo_reqwidth() + self.eg._pack_padx_total(btn)
+            others = sum(w.winfo_reqwidth() + self.eg._pack_padx_total(w)
+                         for w in header.pack_slaves()
+                         if w not in (btn, fake.lbl_title, fake.lbl_subtitle))
+            title = max(fake.lbl_title.winfo_reqwidth(),
+                        fake.lbl_subtitle.winfo_reqwidth())
+            top = header.winfo_toplevel()
+            for slack, expected in ((0, fake._t("dl_entry")), (-1, "📅")):
+                top.geometry(f"{others + title + need + slack}x80")
+                top.update()
+                self.assertEqual(self.fit(fake), expected, (lang, slack))
 
     def test_pack_padx_total(self):
         import tkinter as tk
