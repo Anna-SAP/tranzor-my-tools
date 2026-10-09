@@ -658,32 +658,69 @@ def stable_sort_submissions(
     )
 
 
+def _casefold_key(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _filter_keys(value: Any, normalize=_casefold_key) -> set[str]:
+    """Normalize a filter argument into the set of accepted keys.
+
+    Every structured filter accepts either one value (``"merged"``) or any
+    iterable of values (``["merged", "closed"]``) so the multi-select
+    dropdowns and older single-value callers share one code path. Blank
+    entries are dropped; an empty result means "do not filter".
+    """
+    if value is None:
+        return set()
+    items = [value] if isinstance(value, str) else list(value)
+    return {key for key in (normalize(item) for item in items) if key}
+
+
+# Free-text search scope. ``created_by`` is deliberately absent: the
+# submitter has its own multi-select filter, and a name typed into the
+# search box must not silently widen the match to rows the user did not
+# pick in that dropdown.
+_SEARCH_FIELDS = (
+    "bug_id", "submission_id", "mr_iid", "mr_url", "branch_name",
+    "project_id",
+)
+
+
 def filter_submissions(
     submissions: Iterable[Mapping[str, Any]],
     *,
-    project: str = "",
-    platform_status: str = "",
-    mr_state: str = "",
+    project: str | Iterable[str] | None = "",
+    platform_status: str | Iterable[str] | None = "",
+    mr_state: str | Iterable[str] | None = "",
+    submitter: str | Iterable[str] | None = "",
     query: str = "",
 ) -> list[dict[str, Any]]:
-    project_key = str(project or "").strip().lower()
-    platform_key = _normal(platform_status)
-    mr_key = _normal(mr_state)
+    """Rows matching every filter; a filter with no values is ignored.
+
+    ``project`` / ``platform_status`` / ``mr_state`` / ``submitter`` each
+    take one value or an iterable; within one filter the values are OR-ed,
+    across filters AND-ed. ``submitter`` compares against the canonical
+    ``created_by`` label case-insensitively.
+    """
+    project_keys = _filter_keys(project)
+    platform_keys = _filter_keys(platform_status, _normal)
+    mr_keys = _filter_keys(mr_state, _normal)
+    submitter_keys = _filter_keys(submitter)
     needle = str(query or "").strip().lower()
     out = []
     for raw in submissions:
         row = normalize_submission(raw)
-        if project_key and str(row.get("project_id") or "").lower() != project_key:
+        if project_keys and _casefold_key(row.get("project_id")) not in project_keys:
             continue
-        if platform_key and row["platform_status"] != platform_key:
+        if platform_keys and row["platform_status"] not in platform_keys:
             continue
-        if mr_key and row["mr_state"] != mr_key:
+        if mr_keys and row["mr_state"] not in mr_keys:
+            continue
+        if submitter_keys and _casefold_key(row.get("created_by")) not in submitter_keys:
             continue
         if needle:
-            haystack = "\n".join(str(row.get(key) or "") for key in (
-                "bug_id", "submission_id", "mr_iid", "mr_url",
-                "branch_name", "created_by", "project_id",
-            )).lower()
+            haystack = "\n".join(
+                str(row.get(key) or "") for key in _SEARCH_FIELDS).lower()
             if needle not in haystack:
                 continue
         out.append(row)

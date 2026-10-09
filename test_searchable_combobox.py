@@ -209,5 +209,65 @@ class ResolveLangTests(unittest.TestCase):
         self.assertEqual(sc._resolve_lang(_boom), "en")
 
 
+class ResolveHintTests(unittest.TestCase):
+    def test_default_follows_lang(self):
+        self.assertEqual(sc._resolve_hint(None, "en"), sc._MULTI_HINT["en"])
+        self.assertEqual(sc._resolve_hint("", "zh"), sc._MULTI_HINT["zh"])
+
+    def test_string_and_callable(self):
+        self.assertEqual(sc._resolve_hint("  custom ", "en"), "custom")
+        self.assertEqual(sc._resolve_hint(lambda: "from call", "zh"),
+                         "from call")
+
+    def test_broken_or_blank_callable_falls_back(self):
+        def boom():
+            raise RuntimeError("no")
+        self.assertEqual(sc._resolve_hint(boom, "en"), sc._MULTI_HINT["en"])
+        self.assertEqual(sc._resolve_hint(lambda: "   ", "zh"),
+                         sc._MULTI_HINT["zh"])
+
+
+class MultiPopupHintTests(unittest.TestCase):
+    """Real-Tk check that the multi-select popup renders the caller's hint."""
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import tkinter as tk
+            cls.root = tk.Tk()
+            cls.root.withdraw()
+        except Exception as exc:  # no display
+            raise unittest.SkipTest(f"Tk unavailable: {exc}")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.root.destroy()
+
+    def _open(self, **kwargs):
+        from tkinter import ttk
+        combo = ttk.Combobox(self.root, state="readonly")
+        return sc._open_popup(
+            combo, font_family="Segoe UI", get_options=lambda: ["a", "b"],
+            multi=True, get_selected=lambda: [], set_selected=lambda _s: None,
+            **kwargs)
+
+    def test_custom_hint_replaces_the_project_wording(self):
+        popup = self._open(lang="en", hint=lambda: "Click to toggle · empty = all")
+        try:
+            self.assertEqual(popup._hint_label.cget("text"),
+                             "Click to toggle · empty = all")
+        finally:
+            popup._close()
+
+    def test_default_hint_is_the_localized_project_one(self):
+        popup = self._open(lang="zh")
+        try:
+            self.assertEqual(popup._hint_label.cget("text"),
+                             sc._MULTI_HINT["zh"])
+        finally:
+            popup._close()
+        self.assertIsNone(sc._SearchPopup._open_instance)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
