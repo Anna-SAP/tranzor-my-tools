@@ -168,9 +168,104 @@ class TestNormalization(unittest.TestCase):
         self.assertEqual(blank["created_by"], "")
         self.assertEqual(
             [item["submission_id"] for item in bp.filter_submissions(
-                [named, fallback, blank], query="amelia")],
+                [named, fallback, blank], submitter="amelia cai")],
             ["fallback"],
         )
+        # The free-text box no longer reaches the submitter: that is the
+        # dedicated Submitter multi-select's job.
+        self.assertEqual(
+            bp.filter_submissions([named, fallback, blank], query="amelia"),
+            [],
+        )
+
+
+class TestFilterSubmissionsMulti(unittest.TestCase):
+    """Every structured filter takes one value or many (OR inside, AND across)."""
+
+    def setUp(self):
+        self.rows = [
+            {
+                "submission_id": "bui-merged-hanny",
+                "project_id": "web/bui",
+                "created_by": "hanny.han@ringcentral.com",
+                "summary": {"aggregate_status": "Applied"},
+                "mr_url": "https://git/web/bui/-/merge_requests/1",
+                "mr_state": "merged",
+            },
+            {
+                "submission_id": "i18n-open-derek",
+                "project_id": "web/i18n",
+                "created_by": "Derek Yan",
+                "summary": {"aggregate_status": "MR creation failed"},
+                "mr_url": "https://git/web/i18n/-/merge_requests/2",
+                "mr_state": "opened",
+            },
+            {
+                "submission_id": "uns-direct-anna",
+                "project_id": "common/uns",
+                "created_by": "anna.su@ringcentral.com",
+                "summary": {"aggregate_status": "Applied"},
+            },
+            {
+                "submission_id": "fiji-closed-blank",
+                "project_id": "Fiji/Fiji",
+                "summary": {"aggregate_status": "Failed"},
+                "mr_url": "https://git/Fiji/Fiji/-/merge_requests/3",
+                "mr_state": "closed",
+            },
+        ]
+
+    def ids(self, **kwargs):
+        return [row["submission_id"]
+                for row in bp.filter_submissions(self.rows, **kwargs)]
+
+    def test_single_values_keep_the_old_behaviour(self):
+        self.assertEqual(self.ids(project="web/bui"), ["bui-merged-hanny"])
+        self.assertEqual(
+            self.ids(platform_status="Applied"),
+            ["bui-merged-hanny", "uns-direct-anna"])
+        self.assertEqual(self.ids(mr_state="closed"), ["fiji-closed-blank"])
+        self.assertEqual(
+            self.ids(submitter="HANNY.HAN@ringcentral.com"),
+            ["bui-merged-hanny"])
+
+    def test_many_values_are_or_ed_inside_one_filter(self):
+        self.assertEqual(
+            self.ids(project=["WEB/bui", "common/uns"]),
+            ["bui-merged-hanny", "uns-direct-anna"])
+        self.assertEqual(
+            self.ids(platform_status=("mr creation failed", "failed")),
+            ["i18n-open-derek", "fiji-closed-blank"])
+        self.assertEqual(
+            self.ids(mr_state={"merged", "none"}),
+            ["bui-merged-hanny", "uns-direct-anna"])
+        self.assertEqual(
+            self.ids(submitter=["derek yan", "anna.su@ringcentral.com"]),
+            ["i18n-open-derek", "uns-direct-anna"])
+
+    def test_filters_are_and_ed_across_each_other(self):
+        self.assertEqual(
+            self.ids(
+                project=["web/bui", "web/i18n", "common/uns"],
+                mr_state=["merged", "opened"],
+                submitter=["Derek Yan"],
+            ),
+            ["i18n-open-derek"])
+        self.assertEqual(
+            self.ids(project=["web/bui"], submitter=["Derek Yan"]), [])
+
+    def test_blank_or_missing_values_mean_no_filter(self):
+        everything = [row["submission_id"] for row in self.rows]
+        self.assertEqual(self.ids(), everything)
+        self.assertEqual(
+            self.ids(project=["", "  "], platform_status=None,
+                     mr_state=(), submitter=[None]),
+            everything)
+
+    def test_unknown_value_matches_nothing(self):
+        self.assertEqual(self.ids(submitter=["nobody"]), [])
+        self.assertEqual(self.ids(project=["web/bui", "no/such"]),
+                         ["bui-merged-hanny"])
 
     def test_extracts_iid_from_url_when_field_is_missing(self):
         identity = bp.extract_mr_identity({

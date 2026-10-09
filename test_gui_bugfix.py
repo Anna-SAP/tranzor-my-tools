@@ -129,7 +129,7 @@ class TestBugFixSorting(unittest.TestCase):
     def test_filter_render_defaults_to_newest_created_first(self):
         tab = self.tab
         del tab._apply_filters
-        tab._filter_raw = {"project": "", "workflow": "", "mr": ""}
+        tab._filter_raw = _empty_filters()
         tab._all_rows = [
             {
                 "submission_id": "old",
@@ -159,7 +159,7 @@ class TestBugFixSorting(unittest.TestCase):
         tab = self.tab
         # Exercise the actual filter/render path, used by live and comment refresh.
         del tab._apply_filters
-        tab._filter_raw = {"project": "", "workflow": "", "mr": ""}
+        tab._filter_raw = _empty_filters()
         tab._all_rows = [
             {"submission_id": "A", "summary": {"total": 12}, "project_id": "web/jedi"},
             {"submission_id": "B", "summary": {"total": 2}, "project_id": "web/jedi"},
@@ -174,7 +174,7 @@ class TestBugFixSorting(unittest.TestCase):
         tab._sort_by("strings")
         self.assertEqual(list(tab._row_by_iid), ["C", "B", "A"])
         tab.tree.selection_set.assert_called_with("A")
-        tab._filter_raw["project"] = "web/jedi"
+        tab._filter_raw["project"] = ["web/jedi"]
         tab._apply_filters()
         self.assertEqual(list(tab._row_by_iid), ["B", "A"])
         tab._all_rows[0]["summary"]["total"] = 0
@@ -199,7 +199,7 @@ class TestBugFixSorting(unittest.TestCase):
     def test_submitter_column_renders_created_by_and_placeholder(self):
         tab = self.tab
         del tab._apply_filters
-        tab._filter_raw = {"project": "", "workflow": "", "mr": ""}
+        tab._filter_raw = _empty_filters()
         tab._all_rows = [
             {
                 "submission_id": "named",
@@ -392,43 +392,62 @@ class _Combo:
             self.values = list(kwargs["values"])
 
 
+class _Tip:
+    def __init__(self):
+        self.text = None
+
+    def set_text(self, text):
+        self.text = text
+
+
+def _empty_filters():
+    return {key: [] for key in gui._FILTER_KEYS}
+
+
+def _filter_stub(rows=(), last_result=None, filter_raw=None, lang="en"):
+    """A BugFixTab with only the multi-select filter state wired up."""
+    tab = object.__new__(gui.BugFixTab)
+    tab._all_rows = list(rows)
+    tab._last_result = dict(last_result or {})
+    tab._filter_raw = _empty_filters()
+    tab._filter_raw.update(filter_raw or {})
+    tab._filter_options = {key: [] for key in gui._FILTER_KEYS}
+    tab._filter_tips = {key: _Tip() for key in gui._FILTER_KEYS}
+    for combo_name, var_name in gui._FILTER_WIDGETS.values():
+        setattr(tab, combo_name, _Combo())
+        setattr(tab, var_name, _ValueVar())
+    tab._t = lambda key, lang=lang: gui.STRINGS[lang][key]
+    tab._schedule_filter = mock.Mock()
+    return tab
+
+
+def _refresh_with_current(tab):
+    tab._refresh_filter_values(
+        project_raw=tab._project_raw(),
+        workflow_raw=tab._workflow_raw(),
+        mr_raw=tab._mr_raw(),
+        submitter_raw=tab._submitter_raw(),
+    )
+
+
 class TestBugFixTabResilience(unittest.TestCase):
 
     def test_direct_filter_survives_en_zh_round_trip(self):
-        tab = object.__new__(gui.BugFixTab)
-        tab._all_rows = []
-        tab._last_result = {}
-        tab._filter_raw = {"project": "", "workflow": "", "mr": "none"}
-        tab.var_project = _ValueVar()
-        tab.var_workflow = _ValueVar()
-        tab.var_mr_state = _ValueVar()
-        tab.cmb_project = _Combo()
-        tab.cmb_workflow = _Combo()
-        tab.cmb_mr_state = _Combo()
+        tab = _filter_stub(filter_raw={"mr": ["none"]})
 
-        tab._t = lambda key: gui.STRINGS["en"][key]
-        tab._refresh_filter_values(
-            project_raw="", workflow_raw="", mr_raw=tab._mr_raw())
+        tab._refresh_filter_values(mr_raw=tab._mr_raw())
         self.assertEqual(tab.var_mr_state.get(), "Direct / no MR")
-        self.assertEqual(tab._mr_raw(), "none")
+        self.assertEqual(tab._mr_raw(), ["none"])
 
         tab._t = lambda key: gui.STRINGS["zh"][key]
-        tab._refresh_filter_values(
-            project_raw=tab._project_raw(),
-            workflow_raw=tab._workflow_raw(),
-            mr_raw=tab._mr_raw(),
-        )
+        _refresh_with_current(tab)
         self.assertEqual(tab.var_mr_state.get(), "直写 / 无 MR")
-        self.assertEqual(tab._mr_raw(), "none")
+        self.assertEqual(tab._mr_raw(), ["none"])
 
         tab._t = lambda key: gui.STRINGS["en"][key]
-        tab._refresh_filter_values(
-            project_raw=tab._project_raw(),
-            workflow_raw=tab._workflow_raw(),
-            mr_raw=tab._mr_raw(),
-        )
+        _refresh_with_current(tab)
         self.assertEqual(tab.var_mr_state.get(), "Direct / no MR")
-        self.assertEqual(tab._mr_raw(), "none")
+        self.assertEqual(tab._mr_raw(), ["none"])
 
     def test_failed_refresh_keeps_existing_in_memory_snapshot(self):
         tab = object.__new__(gui.BugFixTab)
@@ -442,9 +461,10 @@ class TestBugFixTabResilience(unittest.TestCase):
             "total_submissions": 1,
             "available_statuses": ["Applied"],
         }
-        tab._project_raw = lambda: ""
-        tab._workflow_raw = lambda: ""
-        tab._mr_raw = lambda: ""
+        tab._project_raw = lambda: []
+        tab._workflow_raw = lambda: []
+        tab._mr_raw = lambda: []
+        tab._submitter_raw = lambda: []
         tab._refresh_filter_values = mock.Mock()
         tab._apply_filters = mock.Mock(return_value=1)
         messages = []
@@ -719,6 +739,298 @@ class TestBugFixFinalGuards(unittest.TestCase):
         self.assertIn("[需处理]", captured[0])
         self.assertIn("[近期评论]", captured[0])
 
+
+
+class TestBugFixMultiSelectFilters(unittest.TestCase):
+    """Project / Bug Fix status / MR status / Submitter multi-select wiring."""
+
+    ROWS = [
+        {
+            "submission_id": "bui-hanny",
+            "project_id": "web/bui",
+            "created_by": "hanny.han@ringcentral.com",
+            "platform_status": "applied",
+            "mr_state": "merged",
+            "attention": {"level": "done", "code": "no_action"},
+        },
+        {
+            "submission_id": "i18n-derek",
+            "project_id": "web/i18n",
+            "created_by": "Derek Yan",
+            "platform_status": "mr_creation_failed",
+            "mr_state": "opened",
+            "attention": {"level": "watch", "code": "open_mr"},
+        },
+        {
+            "submission_id": "uns-anna",
+            "project_id": "common/uns",
+            "created_by": "anna.su@ringcentral.com",
+            "platform_status": "applied",
+            "mr_state": "none",
+            "attention": {"level": "direct", "code": "direct_no_mr"},
+        },
+        {
+            "submission_id": "bui-blank",
+            "project_id": "web/bui",
+            "created_by": "",
+            "platform_status": "failed",
+            "mr_state": "closed",
+            "attention": {"level": "action", "code": "workflow_failed"},
+        },
+    ]
+
+    def test_options_drop_the_all_placeholder_and_list_distinct_submitters(self):
+        tab = _filter_stub(self.ROWS)
+        self.assertEqual(
+            tab._project_options(),
+            [("common/uns", "common/uns"), ("web/bui", "web/bui"),
+             ("web/i18n", "web/i18n")])
+        self.assertEqual(
+            tab._submitter_options(),
+            [("anna.su@ringcentral.com", "anna.su@ringcentral.com"),
+             ("Derek Yan", "Derek Yan"),
+             ("hanny.han@ringcentral.com", "hanny.han@ringcentral.com")])
+        self.assertEqual(
+            [raw for raw, _label in tab._mr_options()],
+            ["opened", "merged", "closed", "locked", "none", "unknown"])
+        self.assertEqual(
+            tab._workflow_options(),
+            [("applied", "Applied"), ("failed", "Failed"),
+             ("mr_creation_failed", "MR creation failed")])
+        for options in (tab._project_options(), tab._submitter_options(),
+                        tab._mr_options(), tab._workflow_options()):
+            self.assertNotIn("", dict(options))
+            self.assertNotIn("All", dict(options).values())
+
+    def test_popup_labels_round_trip_to_raw_keys_and_summary(self):
+        tab = _filter_stub(self.ROWS)
+        tab._refresh_filter_values()
+        self.assertEqual(
+            tab._filter_labels("mr"),
+            ["Open", "Merged", "Closed", "Locked", "Direct / no MR", "Unknown"])
+        self.assertEqual(tab.cmb_mr_state.values, tab._filter_labels("mr"))
+        for key in gui._FILTER_KEYS:
+            self.assertEqual(
+                getattr(tab, gui._FILTER_WIDGETS[key][1]).get(), "All")
+            self.assertEqual(tab._filter_tips[key].text, "")
+
+        tab._set_filter_selection("mr", ["Direct / no MR", "Merged"])
+        self.assertEqual(tab._mr_raw(), ["merged", "none"])
+        self.assertEqual(tab._selected_labels("mr"), ["Merged", "Direct / no MR"])
+        self.assertEqual(tab.var_mr_state.get(), "2 selected")
+        self.assertEqual(
+            tab._filter_tips["mr"].text, "Merged\nDirect / no MR")
+        tab._schedule_filter.assert_called_once_with()
+
+        tab._set_filter_selection("submitter", ["Derek Yan", "nobody"])
+        self.assertEqual(tab._submitter_raw(), ["Derek Yan"])
+        self.assertEqual(tab.var_submitter.get(), "Derek Yan")
+
+        tab._set_filter_selection("mr", [])
+        self.assertEqual(tab._mr_raw(), [])
+        self.assertEqual(tab.var_mr_state.get(), "All")
+        self.assertEqual(tab._filter_tips["mr"].text, "")
+
+    def test_language_switch_relabels_a_kept_selection(self):
+        tab = _filter_stub(
+            self.ROWS, filter_raw={"mr": ["merged", "none"],
+                                   "workflow": ["mr_creation_failed"]})
+        _refresh_with_current(tab)
+        self.assertEqual(tab.var_mr_state.get(), "2 selected")
+        self.assertEqual(tab.var_workflow.get(), "MR creation failed")
+
+        tab._t = lambda key: gui.STRINGS["zh"][key]
+        _refresh_with_current(tab)
+        self.assertEqual(tab._mr_raw(), ["merged", "none"])
+        self.assertEqual(tab.var_mr_state.get(), "已选 2 项")
+        self.assertEqual(tab._selected_labels("mr"), ["已合并", "直写 / 无 MR"])
+        self.assertEqual(tab.var_workflow.get(), "MR 创建失败")
+        self.assertEqual(tab.var_project.get(), "全部")
+
+        tab._set_filter_selection("mr", ["已合并"])
+        self.assertEqual(tab._mr_raw(), ["merged"])
+        self.assertEqual(tab.var_mr_state.get(), "已合并")
+
+    def test_refresh_prunes_vanished_keys_and_accepts_a_single_string(self):
+        tab = _filter_stub(self.ROWS)
+        tab._refresh_filter_values(
+            project_raw=["web/bui", "gone/project", "web/bui", ""],
+            submitter_raw="Derek Yan",
+            mr_raw=["unknown", "merged"],
+            workflow_raw=["not_a_status"],
+        )
+        self.assertEqual(tab._project_raw(), ["web/bui"])
+        self.assertEqual(tab._submitter_raw(), ["Derek Yan"])
+        self.assertEqual(tab._mr_raw(), ["unknown", "merged"])
+        self.assertEqual(tab._workflow_raw(), [])
+        self.assertEqual(tab.var_project.get(), "web/bui")
+        self.assertEqual(tab.var_workflow.get(), "All")
+
+        # The only selected submitter disappears from the data: the filter
+        # is dropped rather than left hiding every row.
+        tab._all_rows = [row for row in self.ROWS
+                         if row["created_by"] != "Derek Yan"]
+        _refresh_with_current(tab)
+        self.assertEqual(tab._submitter_raw(), [])
+        self.assertEqual(tab.var_submitter.get(), "All")
+        self.assertEqual(tab._project_raw(), ["web/bui"])
+
+    def _render_stub(self, filter_raw=None, search=""):
+        tab = _filter_stub(self.ROWS, filter_raw=filter_raw)
+        tab._sort_column = gui.BugFixTab._DEFAULT_SORT_COLUMN
+        tab._sort_descending = gui.BugFixTab._DEFAULT_SORT_DESCENDING
+        tab._filter_after_id = None
+        tab._row_by_iid = {}
+        tab.tree = mock.Mock()
+        tab.tree.get_children.return_value = []
+        tab.var_search = _ValueVar(search)
+        tab._selected_submission_id = lambda: ""
+        tab._update_kpis = mock.Mock()
+        tab._show_detail = mock.Mock()
+        tab._set_detail = mock.Mock()
+        tab._syncing = False
+        tab._idle = mock.Mock()
+        return tab
+
+    def test_apply_filters_ors_inside_a_filter_and_ands_across(self):
+        tab = self._render_stub(filter_raw={
+            "project": ["web/bui", "common/uns"],
+            "mr": ["merged", "none", "closed"],
+        })
+        self.assertEqual(tab._apply_filters(), 3)
+        self.assertEqual(
+            set(tab._row_by_iid), {"bui-hanny", "uns-anna", "bui-blank"})
+
+        tab._filter_raw["submitter"] = [
+            "hanny.han@ringcentral.com", "anna.su@ringcentral.com"]
+        tab._filter_raw["workflow"] = ["applied"]
+        self.assertEqual(tab._apply_filters(), 2)
+        self.assertEqual(set(tab._row_by_iid), {"bui-hanny", "uns-anna"})
+
+    def test_search_box_no_longer_matches_the_submitter(self):
+        # "yan" only occurs in Derek Yan's created_by, never in an id/url.
+        tab = self._render_stub(search="yan")
+        self.assertEqual(tab._apply_filters(), 0)
+        tab.var_search.set("i18n")
+        self.assertEqual(tab._apply_filters(), 1)
+        self.assertEqual(list(tab._row_by_iid), ["i18n-derek"])
+        self.assertEqual(gui.STRINGS["en"]["bf_search"], "Search Bug ID, MR…")
+        self.assertEqual(gui.STRINGS["zh"]["bf_search"], "搜索 Bug ID、MR…")
+
+    def test_reset_clears_every_multi_select_and_the_search(self):
+        tab = _filter_stub(self.ROWS, filter_raw={
+            "project": ["web/bui"], "workflow": ["applied"],
+            "mr": ["merged"], "submitter": ["Derek Yan"],
+        })
+        _refresh_with_current(tab)
+        self.assertEqual(tab.var_submitter.get(), "Derek Yan")
+        tab.var_search = _ValueVar("LOC-1")
+        tab._refresh_sort_headings = mock.Mock()
+        tab._apply_filters = mock.Mock()
+        tab._reset_filters()
+        for key in gui._FILTER_KEYS:
+            self.assertEqual(tab._filter_raw[key], [])
+            self.assertEqual(
+                getattr(tab, gui._FILTER_WIDGETS[key][1]).get(), "All")
+        self.assertEqual(tab.var_search.get(), "")
+        tab._apply_filters.assert_called_once_with()
+
+    def test_popup_close_applies_at_once_and_drops_the_debounce(self):
+        tab = _filter_stub(self.ROWS)
+        tab.parent = mock.Mock()
+        tab._filter_after_id = "pending"
+        tab._apply_filters = mock.Mock()
+        tab._on_filter_change()
+        tab.parent.after_cancel.assert_called_once_with("pending")
+        self.assertIsNone(tab._filter_after_id)
+        tab._apply_filters.assert_called_once_with()
+
+    def test_build_filter_wires_the_multi_select_popup(self):
+        import types
+        tab = _filter_stub(self.ROWS)
+        tab.app = types.SimpleNamespace(lang="zh")
+        tab._refresh_filter_values()
+        with (
+            mock.patch.object(gui.ttk, "Label"),
+            mock.patch.object(gui.ttk, "Combobox") as combo_cls,
+            mock.patch.object(gui.tk, "StringVar", _ValueVar),
+            mock.patch.object(gui, "attach_search") as attach,
+        ):
+            _label, variable, combo = tab._build_filter(
+                mock.Mock(), "mr", width=16)
+        self.assertIs(combo, combo_cls.return_value)
+        # The tooltip adds its own hover bindings; the selection hook must
+        # still be there.
+        self.assertIn(
+            mock.call("<<ComboboxSelected>>", tab._on_filter_change),
+            combo.bind.call_args_list)
+        self.assertIsInstance(variable, _ValueVar)
+        kwargs = attach.call_args.kwargs
+        self.assertIs(attach.call_args.args[0], combo)
+        self.assertTrue(kwargs["multi"])
+        self.assertEqual(kwargs["lang"](), "zh")
+        self.assertEqual(kwargs["hint"](), "Click to toggle · empty = all")
+        self.assertEqual(kwargs["get_options"](), tab._filter_labels("mr"))
+        self.assertEqual(kwargs["get_selected"](), [])
+        kwargs["set_selected"](["Merged", "Locked"])
+        self.assertEqual(tab._mr_raw(), ["merged", "locked"])
+        self.assertEqual(kwargs["get_selected"](), ["Merged", "Locked"])
+        self.assertIn("mr", tab._filter_tips)
+
+
+class TestBugFixFilterBarLayout(unittest.TestCase):
+    """Search box + buttons share the dropdown row only while they fit."""
+
+    def _tab(self, available, head, tail):
+        tab = object.__new__(gui.BugFixTab)
+        tab._filter_box = mock.Mock()
+        tab._filter_box.winfo_width.return_value = available
+        tab._filter_head = mock.Mock()
+        tab._filter_head.winfo_reqwidth.return_value = head
+        tab._filter_tail = mock.Mock()
+        tab._filter_tail.winfo_reqwidth.return_value = tail
+        tab._filter_row1 = mock.Mock()
+        tab._filter_row2 = mock.Mock()
+        tab._filter_wrapped = False
+        return tab
+
+    def test_wraps_when_too_narrow_and_unwraps_when_wide(self):
+        tab = self._tab(1196, 900, 580)
+        tab._sync_filter_layout()
+        self.assertTrue(tab._filter_wrapped)
+        tab._filter_tail.pack_forget.assert_called_once_with()
+        tab._filter_row2.pack.assert_called_once_with(fill="x", pady=(6, 0))
+        tab._filter_tail.pack.assert_called_once_with(
+            in_=tab._filter_row2, fill="x")
+
+        # The <Configure> storm during a resize must not repack every tick.
+        tab._filter_tail.pack.reset_mock()
+        tab._filter_row2.pack.reset_mock()
+        tab._sync_filter_layout()
+        tab._filter_tail.pack.assert_not_called()
+        tab._filter_row2.pack.assert_not_called()
+
+        tab._filter_box.winfo_width.return_value = 1806
+        tab._sync_filter_layout()
+        self.assertFalse(tab._filter_wrapped)
+        tab._filter_row2.pack_forget.assert_called_once_with()
+        tab._filter_tail.pack.assert_called_once_with(
+            in_=tab._filter_row1, side="left", fill="x", expand=True)
+
+    def test_exact_fit_stays_on_one_row(self):
+        tab = self._tab(1480, 900, 580)
+        tab._sync_filter_layout()
+        self.assertFalse(tab._filter_wrapped)
+        tab._filter_tail.pack.assert_not_called()
+        tab._filter_row2.pack.assert_not_called()
+
+    def test_unmeasured_box_and_missing_widgets_are_ignored(self):
+        tab = self._tab(1, 900, 580)
+        tab._sync_filter_layout()
+        self.assertFalse(tab._filter_wrapped)
+        tab._filter_tail.pack.assert_not_called()
+        bare = object.__new__(gui.BugFixTab)
+        bare._sync_filter_layout()  # no filter bar built: silently no-op
 
 
 class TestLockedMrLocalization(unittest.TestCase):

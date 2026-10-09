@@ -202,6 +202,26 @@ def _resolve_lang(lang) -> str:
     return value if value in _ALL_LABEL else "en"
 
 
+def _resolve_hint(hint, lang: str) -> str:
+    """多选弹窗提示行文案。
+
+    ``hint`` 允许是字符串、返回字符串的可调用或 ``None``；缺省沿用
+    :data:`_MULTI_HINT`（"留空表示全部项目"）。非 Project 场景（状态、
+    提交人…）传入自己的文案，避免提示里出现"项目"字样。
+
+    >>> _resolve_hint(None, "en")
+    'Click to toggle · empty = all projects'
+    >>> _resolve_hint(lambda: "custom", "en")
+    'custom'
+    """
+    try:
+        value = hint() if callable(hint) else hint
+    except Exception:
+        value = None
+    text = str(value or "").strip()
+    return text or _MULTI_HINT.get(lang, _MULTI_HINT["en"])
+
+
 # ---------------------------------------------------------------------------
 # 弹窗
 # ---------------------------------------------------------------------------
@@ -217,12 +237,14 @@ class _SearchPopup(tk.Toplevel):
 
     def __init__(self, anchor, *, font_family, get_options, lang="en",
                  multi=False, get_selected=None, set_selected=None,
-                 get_presets=None, save_presets=None):
+                 get_presets=None, save_presets=None, hint=None):
         super().__init__(anchor.winfo_toplevel())
         self._anchor = anchor
         self._lang = _resolve_lang(lang)
         self._ff = font_family
         self._multi = bool(multi)
+        self._hint_text = _resolve_hint(hint, self._lang)
+        self._hint_label = None
         self._set_selected = set_selected
         self._get_presets = get_presets
         self._save_presets = save_presets
@@ -280,9 +302,10 @@ class _SearchPopup(tk.Toplevel):
         self._query_var.trace_add("write", lambda *_a: self._refilter())
 
         if self._multi:
-            tk.Label(frame, text=_MULTI_HINT[self._lang],
-                     font=(self._ff, 8), bg=_POPUP_BG, fg=_FG_MUTED,
-                     anchor="w").pack(fill="x", padx=8, pady=(0, 2))
+            self._hint_label = tk.Label(
+                frame, text=self._hint_text,
+                font=(self._ff, 8), bg=_POPUP_BG, fg=_FG_MUTED, anchor="w")
+            self._hint_label.pack(fill="x", padx=8, pady=(0, 2))
 
         if self._preset_enabled:
             self._build_preset_bar(frame)
@@ -890,7 +913,7 @@ class _SearchPopup(tk.Toplevel):
 # ---------------------------------------------------------------------------
 def _open_popup(combobox, *, font_family, get_options, lang,
                 multi=False, get_selected=None, set_selected=None,
-                get_presets=None, save_presets=None):
+                get_presets=None, save_presets=None, hint=None):
     """打开（单例）搜索弹窗。已有打开的先关掉，避免叠加。"""
     prev = _SearchPopup._open_instance
     if prev is not None:
@@ -902,14 +925,14 @@ def _open_popup(combobox, *, font_family, get_options, lang,
         combobox, font_family=font_family, get_options=get_options,
         lang=_resolve_lang(lang), multi=multi,
         get_selected=get_selected, set_selected=set_selected,
-        get_presets=get_presets, save_presets=save_presets)
+        get_presets=get_presets, save_presets=save_presets, hint=hint)
     _SearchPopup._open_instance = popup
     return popup
 
 
 def attach_search(combobox, *, font_family, lang="en", get_options=None,
                   multi=False, get_selected=None, set_selected=None,
-                  get_presets=None, save_presets=None):
+                  get_presets=None, save_presets=None, hint=None):
     """对一个 readonly ``ttk.Combobox`` 启用"关键字搜索"下拉。
 
     点击（以及焦点态按 ↓/空格）不再弹原生 popdown，而是弹出顶部带搜索框
@@ -929,6 +952,8 @@ def attach_search(combobox, *, font_family, lang="en", get_options=None,
     get_presets / save_presets
                 : 多选时读写命名项目组合。传入 ``get_presets`` 才会画出
                   Preset 条；``save_presets(list)`` 在增删改后立刻落盘。
+    hint        : 多选弹窗搜索框下方的提示行文案（字符串或返回字符串的
+                  可调用）；缺省是面向 Project 的"留空表示全部项目"。
 
     单选时 Combobox 的 textvariable / ``<<ComboboxSelected>>`` 语义保持不变。
     """
@@ -948,7 +973,8 @@ def attach_search(combobox, *, font_family, lang="en", get_options=None,
                     get_options=fetch, lang=lang,
                     multi=multi, get_selected=get_selected,
                     set_selected=set_selected,
-                    get_presets=get_presets, save_presets=save_presets)
+                    get_presets=get_presets, save_presets=save_presets,
+                    hint=hint)
         return "break"
 
     combobox.bind("<Button-1>", _open)

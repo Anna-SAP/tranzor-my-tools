@@ -3,6 +3,11 @@
 The UI renders Platform history first and treats GitLab enrichment as a
 separate, fail-open data source. MR discussions are fetched only for the
 selected row. All network work runs off the tkinter thread.
+
+Project / Bug Fix status / MR status / Submitter are multi-select filters
+(searchable_combobox popup); each keeps a list of raw keys in
+``_filter_raw`` and an empty list means "all". The free-text box searches
+Bug ID / submission / MR / branch / project only.
 """
 from __future__ import annotations
 
@@ -18,6 +23,7 @@ from typing import Any
 
 import bugfix_panel as bf
 import gitlab_client
+from searchable_combobox import attach_search
 from time_display import format_display_datetime
 
 
@@ -32,8 +38,11 @@ STRINGS = {
         "bf_project": "Project",
         "bf_workflow": "Bug Fix status",
         "bf_mr_state": "MR status",
-        "bf_search": "Search Bug ID, MR, submitter…",
+        "bf_submitter": "Submitter",
+        "bf_search": "Search Bug ID, MR…",
         "bf_all": "All",
+        "bf_selected_n": "{n} selected",
+        "bf_multi_hint": "Click to toggle · empty = all",
         "bf_refresh": "⟳ Refresh live",
         "bf_reset": "Reset",
         "bf_open_platform": "Open Tranzor",
@@ -157,8 +166,11 @@ STRINGS = {
         "bf_project": "项目",
         "bf_workflow": "Bug Fix 状态",
         "bf_mr_state": "MR 状态",
-        "bf_search": "搜索 Bug ID、MR、提交人…",
+        "bf_submitter": "提交人",
+        "bf_search": "搜索 Bug ID、MR…",
         "bf_all": "全部",
+        "bf_selected_n": "已选 {n} 项",
+        "bf_multi_hint": "点击勾选，留空表示全部",
         "bf_refresh": "⟳ 实时刷新",
         "bf_reset": "重置",
         "bf_open_platform": "打开 Tranzor",
@@ -271,8 +283,16 @@ STRINGS = {
 }
 
 
-_MR_FILTERS = (
-    "", "opened", "merged", "closed", "locked", "none", "unknown")
+_MR_FILTERS = ("opened", "merged", "closed", "locked", "none", "unknown")
+# Multi-select filters in the order they sit on the filter bar, mapped to
+# the (Combobox, StringVar) attribute names that render them.
+_FILTER_KEYS = ("project", "workflow", "mr", "submitter")
+_FILTER_WIDGETS = {
+    "project": ("cmb_project", "var_project"),
+    "workflow": ("cmb_workflow", "var_workflow"),
+    "mr": ("cmb_mr_state", "var_mr_state"),
+    "submitter": ("cmb_submitter", "var_submitter"),
+}
 _MR_STATE_KEYS = {
     "opened": "bf_state_open",
     "open": "bf_state_open",
@@ -423,7 +443,13 @@ class BugFixTab:
         self._filter_after_id = None
         self._cancel_event = threading.Event()
         self._comment_runner = None
-        self._filter_raw = {"project": "", "workflow": "", "mr": ""}
+        # Every filter is a multi-select: a list of raw keys, empty = all.
+        self._filter_raw: dict[str, list[str]] = {
+            key: [] for key in _FILTER_KEYS}
+        # (raw, label) pairs behind each dropdown, rebuilt with the data.
+        self._filter_options: dict[str, list[tuple[str, str]]] = {
+            key: [] for key in _FILTER_KEYS}
+        self._filter_tips: dict[str, Any] = {}
         self._all_rows: list[dict[str, Any]] = []
         self._row_by_iid: dict[str, dict[str, Any]] = {}
         self._comment_loading: set[str] = set()
@@ -470,58 +496,58 @@ class BugFixTab:
             wraplength=1450, justify="left")
         self.lbl_hint.pack(fill="x", pady=(0, 8))
 
+        # Filter bar: four dropdowns ("head") followed by the search box and
+        # buttons ("tail"). The tail shares the row while the window is wide
+        # enough and wraps onto a second row otherwise, so the default
+        # 1280px window never clips Reset / Open Tranzor (see
+        # _sync_filter_layout). The tail's parent is the outer box so
+        # pack(in_=…) can move it between the two rows.
         filters = ttk.Frame(content, style="App.TFrame")
         filters.pack(fill="x", pady=(0, 7))
+        self._filter_box = filters
+        self._filter_row1 = ttk.Frame(filters, style="App.TFrame")
+        self._filter_row1.pack(fill="x")
+        self._filter_row2 = ttk.Frame(filters, style="App.TFrame")
+        self._filter_head = ttk.Frame(self._filter_row1, style="App.TFrame")
+        self._filter_head.pack(side="left")
+        self._filter_tail = ttk.Frame(filters, style="App.TFrame")
+        self._filter_wrapped = False
+        self._filter_tail.pack(
+            in_=self._filter_row1, side="left", fill="x", expand=True)
+        filters.bind("<Configure>", self._sync_filter_layout, add="+")
 
-        self.lbl_project = ttk.Label(
-            filters, text="", style="Status.TLabel")
-        self.lbl_project.pack(side="left")
-        self.var_project = tk.StringVar()
-        self.cmb_project = ttk.Combobox(
-            filters, textvariable=self.var_project,
-            state="readonly", width=18)
-        self.cmb_project.pack(side="left", padx=(5, 12))
-        self.cmb_project.bind("<<ComboboxSelected>>", self._on_filter_change)
+        # Four multi-select dropdowns share the searchable check-list popup
+        # from searchable_combobox. Each readonly Combobox only shows a
+        # summary (All / one label / "N selected"); the raw keys live in
+        # self._filter_raw and the Submitter is no longer part of the
+        # free-text search.
+        head = self._filter_head
+        self.lbl_project, self.var_project, self.cmb_project = (
+            self._build_filter(head, "project", width=18))
+        self.lbl_workflow, self.var_workflow, self.cmb_workflow = (
+            self._build_filter(head, "workflow", width=17))
+        self.lbl_mr_state, self.var_mr_state, self.cmb_mr_state = (
+            self._build_filter(head, "mr", width=16))
+        self.lbl_submitter, self.var_submitter, self.cmb_submitter = (
+            self._build_filter(head, "submitter", width=22))
 
-        self.lbl_workflow = ttk.Label(
-            filters, text="", style="Status.TLabel")
-        self.lbl_workflow.pack(side="left")
-        self.var_workflow = tk.StringVar()
-        self.cmb_workflow = ttk.Combobox(
-            filters, textvariable=self.var_workflow,
-            state="readonly", width=17)
-        self.cmb_workflow.pack(side="left", padx=(5, 12))
-        self.cmb_workflow.bind(
-            "<<ComboboxSelected>>", self._on_filter_change)
-
-        self.lbl_mr_state = ttk.Label(
-            filters, text="", style="Status.TLabel")
-        self.lbl_mr_state.pack(side="left")
-        self.var_mr_state = tk.StringVar()
-        self.cmb_mr_state = ttk.Combobox(
-            filters, textvariable=self.var_mr_state,
-            state="readonly", width=16)
-        self.cmb_mr_state.pack(side="left", padx=(5, 12))
-        self.cmb_mr_state.bind(
-            "<<ComboboxSelected>>", self._on_filter_change)
-
-        self.lbl_search = ttk.Label(
-            filters, text="", style="Status.TLabel")
+        tail = self._filter_tail
+        self.lbl_search = ttk.Label(tail, text="", style="Status.TLabel")
         self.lbl_search.pack(side="left", padx=(0, 5))
         self.var_search = tk.StringVar()
         self.ent_search = ttk.Entry(
-            filters, textvariable=self.var_search, width=27)
+            tail, textvariable=self.var_search, width=22)
         self.ent_search.pack(side="left", fill="x", expand=True, padx=(0, 8))
         self.ent_search.bind("<Return>", self._on_filter_change)
         self.var_search.trace_add("write", self._schedule_filter)
 
         self.btn_refresh = self._button(
-            filters, command=self.refresh_live, accent=True)
+            tail, command=self.refresh_live, accent=True)
         self.btn_refresh.pack(side="left")
-        self.btn_reset = self._button(filters, command=self._reset_filters)
+        self.btn_reset = self._button(tail, command=self._reset_filters)
         self.btn_reset.pack(side="left", padx=(6, 0))
         self.btn_platform = self._button(
-            filters, command=self._open_platform)
+            tail, command=self._open_platform)
         self.btn_platform.pack(side="left", padx=(6, 0))
 
         kpis = ttk.Frame(content, style="App.TFrame")
@@ -607,6 +633,7 @@ class BugFixTab:
         self.lbl_project.configure(text=t("bf_project"))
         self.lbl_workflow.configure(text=t("bf_workflow"))
         self.lbl_mr_state.configure(text=t("bf_mr_state"))
+        self.lbl_submitter.configure(text=t("bf_submitter"))
         self.lbl_search.configure(text=t("bf_search"))
         self.btn_refresh.configure(text=t("bf_refresh"))
         self.btn_reset.configure(text=t("bf_reset"))
@@ -616,6 +643,12 @@ class BugFixTab:
         self._kpis["action"][0].configure(text=t("bf_action"))
         self._kpis["open"][0].configure(text=t("bf_open"))
         self._kpis["direct"][0].configure(text=t("bf_direct"))
+        # New label widths may push the search/buttons over the edge (or
+        # free the room to pull them back); re-decide once Tk has measured.
+        try:
+            self.parent.after_idle(self._sync_filter_layout)
+        except Exception:
+            pass
 
         self._refresh_sort_headings()
 
@@ -623,6 +656,7 @@ class BugFixTab:
             project_raw=self._project_raw(),
             workflow_raw=self._workflow_raw(),
             mr_raw=self._mr_raw(),
+            submitter_raw=self._submitter_raw(),
         )
         if not self._all_rows:
             self._set_detail(t("bf_detail_placeholder"))
@@ -727,13 +761,47 @@ class BugFixTab:
         if self.tree.identify_region(event.x, event.y) in {"cell", "tree"}:
             self._open_selected_mr()
 
+    # -- Multi-select filters ---------------------------------------------
+    def _lang(self):
+        return getattr(self.app, "lang", "en") or "en"
+
+    def _build_filter(self, parent, key, *, width):
+        """Label + readonly Combobox driven by the multi-select popup.
+
+        The popup reads labels through ``get_options`` / ``get_selected``
+        and reports every toggle through ``set_selected``; raw keys never
+        leave this class, so localized labels can change under a kept
+        selection (see ``_refresh_filter_values``).
+        """
+        from export_gui import FONT_FAMILY
+        label = ttk.Label(parent, text="", style="Status.TLabel")
+        label.pack(side="left")
+        variable = tk.StringVar()
+        combo = ttk.Combobox(
+            parent, textvariable=variable, state="readonly", width=width)
+        combo.pack(side="left", padx=(5, 12))
+        combo.bind("<<ComboboxSelected>>", self._on_filter_change)
+        attach_search(
+            combo, font_family=FONT_FAMILY, lang=self._lang, multi=True,
+            get_options=lambda key=key: self._filter_labels(key),
+            get_selected=lambda key=key: self._selected_labels(key),
+            set_selected=lambda labels, key=key: (
+                self._set_filter_selection(key, labels)),
+            hint=lambda: self._t("bf_multi_hint"),
+        )
+        try:
+            from export_gui import Tooltip
+            self._filter_tips[key] = Tooltip(combo, "")
+        except Exception:
+            pass
+        return label, variable, combo
+
     def _project_options(self):
         projects = sorted({
             str(row.get("project_id") or "")
             for row in self._all_rows if row.get("project_id")
         }, key=str.lower)
-        return [("", self._t("bf_all"))] + [
-            (item, item) for item in projects]
+        return [(item, item) for item in projects]
 
     def _workflow_options(self):
         values = {
@@ -745,7 +813,7 @@ class BugFixTab:
             for item in (self._last_result.get("available_statuses") or [])
             if item
         )
-        return [("", self._t("bf_all"))] + [
+        return [
             (
                 item,
                 self._t(_PLATFORM_STATUS_KEYS[item])
@@ -756,45 +824,140 @@ class BugFixTab:
         ]
 
     def _mr_options(self):
-        return [
-            (raw, self._t(_MR_STATE_KEYS[raw]) if raw else self._t("bf_all"))
-            for raw in _MR_FILTERS
-        ]
+        return [(raw, self._t(_MR_STATE_KEYS[raw])) for raw in _MR_FILTERS]
 
-    @staticmethod
-    def _raw_from_display(display, options):
-        for raw, label in options:
-            if display == label or display == raw:
-                return raw
-        return ""
+    def _submitter_options(self):
+        names = sorted({
+            self._submitter_text(row, empty="") for row in self._all_rows
+        } - {""}, key=str.lower)
+        return [(item, item) for item in names]
+
+    def _options_for(self, key):
+        return {
+            "project": self._project_options,
+            "workflow": self._workflow_options,
+            "mr": self._mr_options,
+            "submitter": self._submitter_options,
+        }[key]()
 
     def _project_raw(self):
-        return self._filter_raw.get("project", "")
+        return self._as_keys(self._filter_raw.get("project"))
 
     def _workflow_raw(self):
-        return self._filter_raw.get("workflow", "")
+        return self._as_keys(self._filter_raw.get("workflow"))
 
     def _mr_raw(self):
-        return self._filter_raw.get("mr", "")
+        return self._as_keys(self._filter_raw.get("mr"))
+
+    def _submitter_raw(self):
+        return self._as_keys(self._filter_raw.get("submitter"))
+
+    @staticmethod
+    def _as_keys(value):
+        """One raw key or an iterable -> ordered, de-duplicated, no blanks."""
+        if value is None:
+            return []
+        items = [value] if isinstance(value, str) else list(value)
+        keys = []
+        for item in items:
+            key = str(item or "").strip()
+            if key and key not in keys:
+                keys.append(key)
+        return keys
+
+    def _filter_labels(self, key):
+        return [label for _raw, label in self._filter_options.get(key) or []]
+
+    def _selected_labels(self, key):
+        labels = dict(self._filter_options.get(key) or [])
+        return [labels[raw] for raw in self._filter_raw.get(key) or []
+                if raw in labels]
+
+    def _set_filter_selection(self, key, labels):
+        """Popup callback: checked labels -> raw keys, then re-filter live."""
+        wanted = {str(label) for label in (labels or [])}
+        self._filter_raw[key] = [
+            raw for raw, label in self._filter_options.get(key) or []
+            if label in wanted
+        ]
+        self._sync_filter_display(key)
+        self._schedule_filter()
+
+    def _filter_display_text(self, key):
+        labels = self._selected_labels(key)
+        if not labels:
+            return self._t("bf_all")
+        if len(labels) == 1:
+            return labels[0]
+        return self._t("bf_selected_n").format(n=len(labels))
+
+    def _sync_filter_display(self, key):
+        getattr(self, _FILTER_WIDGETS[key][1]).set(
+            self._filter_display_text(key))
+        tip = (getattr(self, "_filter_tips", None) or {}).get(key)
+        if tip is not None:
+            try:
+                tip.set_text("\n".join(self._selected_labels(key)))
+            except Exception:
+                pass
 
     def _refresh_filter_values(
-            self, *, project_raw="", workflow_raw="", mr_raw=""):
-        for raw_key, combo, variable, options, raw in (
-            ("project", self.cmb_project, self.var_project,
-             self._project_options(), project_raw),
-            ("workflow", self.cmb_workflow, self.var_workflow,
-             self._workflow_options(), workflow_raw),
-            ("mr", self.cmb_mr_state, self.var_mr_state,
-             self._mr_options(), mr_raw),
-        ):
-            combo.configure(values=[label for _key, label in options])
-            selected_raw = raw if any(key == raw for key, _label in options) else ""
-            self._filter_raw[raw_key] = selected_raw
-            label = next(
-                (label for key, label in options if key == selected_raw),
-                options[0][1],
-            )
-            variable.set(label)
+            self, *, project_raw=(), workflow_raw=(), mr_raw=(),
+            submitter_raw=()):
+        """Rebuild every dropdown from the current rows and language.
+
+        Requested raw keys survive when they still exist (a language switch
+        only swaps labels); keys whose option vanished from the data are
+        dropped so a stale filter can never hide every row silently.
+        """
+        requested = {
+            "project": project_raw, "workflow": workflow_raw,
+            "mr": mr_raw, "submitter": submitter_raw,
+        }
+        for key in _FILTER_KEYS:
+            options = self._options_for(key)
+            self._filter_options[key] = options
+            valid = {raw for raw, _label in options}
+            self._filter_raw[key] = [
+                raw for raw in self._as_keys(requested[key]) if raw in valid]
+            getattr(self, _FILTER_WIDGETS[key][0]).configure(
+                values=[label for _raw, label in options])
+            self._sync_filter_display(key)
+
+    def _sync_filter_layout(self, _event=None):
+        """One row when the dropdowns + search + buttons fit, else two.
+
+        Compares requested widths, so it also reacts to label text changes
+        after a language switch. Only repacks when the mode flips, which
+        keeps the <Configure> storm during a resize cheap and loop-free.
+        """
+        box = getattr(self, "_filter_box", None)
+        if box is None:
+            return
+        try:
+            available = box.winfo_width()
+            needed = (self._filter_head.winfo_reqwidth()
+                      + self._filter_tail.winfo_reqwidth())
+        except tk.TclError:
+            return
+        if available <= 1:  # not laid out yet
+            return
+        wrapped = needed > available
+        if wrapped == self._filter_wrapped:
+            return
+        self._filter_wrapped = wrapped
+        try:
+            self._filter_tail.pack_forget()
+            if wrapped:
+                self._filter_row2.pack(fill="x", pady=(6, 0))
+                self._filter_tail.pack(in_=self._filter_row2, fill="x")
+            else:
+                self._filter_row2.pack_forget()
+                self._filter_tail.pack(
+                    in_=self._filter_row1, side="left", fill="x",
+                    expand=True)
+        except tk.TclError:
+            pass
 
     def _busy(self, text):
         try:
@@ -921,13 +1084,11 @@ class BugFixTab:
         else:
             self._last_result = dict(result)
             self._all_rows = bf.stable_sort_submissions(rows)
-        current_project = self._project_raw()
-        current_workflow = self._workflow_raw()
-        current_mr = self._mr_raw()
         self._refresh_filter_values(
-            project_raw=current_project,
-            workflow_raw=current_workflow,
-            mr_raw=current_mr,
+            project_raw=self._project_raw(),
+            workflow_raw=self._workflow_raw(),
+            mr_raw=self._mr_raw(),
+            submitter_raw=self._submitter_raw(),
         )
         shown = self._apply_filters()
 
@@ -964,12 +1125,17 @@ class BugFixTab:
             self._idle(self._t("bf_failed").format(
                 error=result.get("error") or self._t("bf_unknown")))
 
-    def _schedule_filter(self, *_args):
+    def _cancel_scheduled_filter(self):
         if self._filter_after_id is not None:
             try:
                 self.parent.after_cancel(self._filter_after_id)
             except Exception:
                 pass
+            self._filter_after_id = None
+
+    def _schedule_filter(self, *_args):
+        """Debounce keystrokes and popup toggles into one re-render."""
+        self._cancel_scheduled_filter()
         try:
             self._filter_after_id = self.parent.after(
                 180, self._apply_filters)
@@ -977,14 +1143,10 @@ class BugFixTab:
             self._filter_after_id = None
 
     def _on_filter_change(self, _event=None):
-        self._filter_raw.update({
-            "project": self._raw_from_display(
-                self.var_project.get(), self._project_options()),
-            "workflow": self._raw_from_display(
-                self.var_workflow.get(), self._workflow_options()),
-            "mr": self._raw_from_display(
-                self.var_mr_state.get(), self._mr_options()),
-        })
+        # Popup closed or Enter in the search box: render now and drop any
+        # debounced run still pending from the last toggle / keystroke. The
+        # popup already pushed its raw keys through _set_filter_selection.
+        self._cancel_scheduled_filter()
         self._apply_filters()
 
     def _apply_filters(self, select_submission=""):
@@ -995,6 +1157,7 @@ class BugFixTab:
             project=self._project_raw(),
             platform_status=self._workflow_raw(),
             mr_state=self._mr_raw(),
+            submitter=self._submitter_raw(),
             query=self.var_search.get(),
         )
 
